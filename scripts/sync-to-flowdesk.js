@@ -19,8 +19,11 @@
 const fs = require('fs');
 const path = require('path');
 
-const target = process.argv[2];
-const checkOnly = process.argv.includes('--check');
+// The target is the first non-flag argument rather than argv[2], because
+// `npm run sync:check -- <path>` appends the path after the --check flag.
+const args = process.argv.slice(2);
+const checkOnly = args.includes('--check');
+const target = args.find((arg) => !arg.startsWith('--'));
 
 if (!target) {
   console.error('Usage: node scripts/sync-to-flowdesk.js <path-to-flowdesk-backend> [--check]');

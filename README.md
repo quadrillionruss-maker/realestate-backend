@@ -36,6 +36,38 @@ tokens. This is a separate product that shares a login, not a new tab in an
 invoicing app. Colour always encodes state: clay for what's late, brass for
 what the AI wrote, moss for money in.
 
+## Dependencies
+
+Four external packages, pinned to the same ranges FlowDesk uses so the graft
+can never imply a version conflict:
+
+| Package | Used by |
+|---|---|
+| `express` | every file in `src/routes/` |
+| `@supabase/supabase-js` | `src/middleware/orgContext.js` (the one service-role client) |
+| `node-cron` | `src/jobs/daily.js` |
+| `puppeteer` | `src/services/pdfAdapter.js` — **optional peer** |
+
+Puppeteer is an optional peer dependency, not a dependency: when grafted, the
+host already has it and `pdfAdapter` uses FlowDesk's PDF service instead of
+launching its own browser. Declaring it outright would download ~150MB of
+Chromium just to run the logic tests. Install it explicitly only if you need
+standalone document generation:
+
+```bash
+npm install            # 78 packages, no Chromium
+npm test               # 23 logic tests
+npm install puppeteer  # only for standalone PDF rendering
+```
+
+The daily brief needs no OpenAI SDK — it calls the API over `fetch`, matching
+FlowDesk's existing `ai.controller.js`.
+
+```bash
+npm run sync -- ../../flowdesk-backend         # push into a FlowDesk checkout
+npm run sync:check -- ../../flowdesk-backend   # diff only, exit 1 if stale
+```
+
 ## Reusing FlowDesk, not rebuilding it
 
 Auth, teams, the Paystack account and its verified webhook, Puppeteer,
