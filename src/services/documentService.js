@@ -1,12 +1,11 @@
 // documentService.js — allocation letters: render, store, hand back a link.
 //
-// Reuses FlowDesk's Puppeteer service (via pdfAdapter) and Supabase Storage,
-// the same two pieces that already produce invoice PDFs and host logo uploads.
+// Renders with Puppeteer (via pdfAdapter) and stores in Supabase Storage.
 //
-// STORAGE PRIVACY: logos live in a public bucket because they are public.
-// An allocation letter carries a buyer's name and what they paid for a house,
-// so these go in a PRIVATE bucket and are served through short-lived signed
-// URLs. What we persist on the row is the object path, never a bearer link.
+// STORAGE PRIVACY: an allocation letter carries a buyer's name and what they
+// paid for a house, so these go in a PRIVATE bucket and are served through
+// short-lived signed URLs. What we persist on the row is the object path,
+// never a bearer link.
 
 const fs = require('fs');
 const path = require('path');
@@ -14,8 +13,7 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { renderHtmlToPdf } = require('./pdfAdapter');
 const { escapeHtml } = require('../utils/escapeHtml');
 
-// Template lives inside src/ so this path holds both in a standalone checkout
-// and after the module is copied to FlowDesk's src/re/.
+// Template lives inside src/ so it travels with the code.
 const TEMPLATE_PATH = path.join(__dirname, '../templates/allocation_letter.html');
 const BUCKET = process.env.RE_DOCUMENTS_BUCKET || 're-documents';
 const SIGNED_URL_TTL_SECONDS = 300;
@@ -28,7 +26,9 @@ const formatDate = (value) =>
 
 // ── Branding ───────────────────────────────────────────────────────────────
 // organization_id is a team id or a user id (see migrations/001). Letterhead
-// details live on the FlowDesk user profile, so resolve whichever it is.
+// details live on the user profile, so resolve whichever it is. Missing tables
+// or rows fall through to an empty object — a letter with a plain heading
+// beats no letter at all.
 async function resolveBranding(orgId) {
   const profileColumns = 'full_name, company_name, brand_company_name, brand_logo_url, brand_address, brand_phone, brand_website';
 

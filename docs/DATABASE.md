@@ -5,15 +5,22 @@ existing schema — nothing existing is altered.
 
 ## organization_id
 
-`organization_id = user.team_id ?? user.id`, the same rule as FlowDesk's
-`src/utils/scopeOwner.js`. It points at `teams.id` for team workspaces and
-`users.id` for solo ones, so it carries **no foreign key**. It is denormalized
-onto every table on purpose: one-line org filters and fast dashboard
-aggregates without three-level joins. The Express layer sets it explicitly on
-every insert (`src/middleware/orgContext.js`) — never inferred by trigger.
+`organization_id = user.team_id ?? user.id`. It points at a team for team
+workspaces and at the user for solo ones, so it carries **no foreign key**. It
+is denormalized onto every table on purpose: one-line org filters and fast
+dashboard aggregates without three-level joins. The Express layer sets it
+explicitly on every insert (`src/middleware/orgContext.js`) — never inferred
+by trigger.
 
-FlowDesk has no `organizations` table and no `org_members` table; earlier
-drafts of this schema assumed both. Membership is `team_members`.
+Team membership is read from `team_members` during authentication. If that
+table does not exist, every caller is treated as a solo account and scoped by
+user id, so the service runs against a database holding only the `re_*`
+tables.
+
+One consequence worth knowing: if a solo user records data and *later* joins a
+team, their scope key changes and the earlier rows go quiet. Backfill with
+`update re_projects set organization_id = '<team-id>' where organization_id =
+'<user-id>'`, repeated for each `re_*` table.
 
 ## Tables
 
@@ -62,12 +69,13 @@ briefs by (org, brief_date desc).
 RLS is **enabled on every table with no policies at all**, which means the
 anon and authenticated keys can read nothing.
 
-That is deliberate, and stronger than it looks. FlowDesk issues its own HS256
-JWT, so `auth.uid()` is NULL for all application traffic; a policy written
-against it would silently evaluate to NULL and read as protection that does
-not exist. Every query runs server-side through the service-role client (which
-bypasses RLS by design), which is why each one filters `organization_id`
-explicitly. No browser touches these tables directly.
+That is deliberate, and stronger than it looks. Callers authenticate with an
+HS256 bearer token rather than a Supabase Auth session, so `auth.uid()` is
+NULL for all application traffic; a policy written against it would silently
+evaluate to NULL and read as protection that does not exist. Every query runs
+server-side through the service-role client (which bypasses RLS by design),
+which is why each one filters `organization_id` explicitly. No browser touches
+these tables directly.
 
 If client-side Supabase access is ever added, a commented policy template
 following FlowDesk's own `teams`/`team_members` shape sits at the bottom of

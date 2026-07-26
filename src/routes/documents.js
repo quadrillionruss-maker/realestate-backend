@@ -48,8 +48,8 @@ router.post('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Render the allocation letter with FlowDesk's Puppeteer service, store it in
-// a private Storage bucket, and return a short-lived signed URL.
+// Render the allocation letter to PDF, store it in a private Storage bucket,
+// and return a short-lived signed URL.
 router.post('/:id/generate', async (req, res, next) => {
   try {
     const result = await generateDocument(req.orgId, req.params.id);

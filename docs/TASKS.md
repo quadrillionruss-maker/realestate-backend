@@ -1,30 +1,43 @@
 # Tasks
 
-## Integration — done
+## Build — done
 
-- [x] Migrations rewritten for FlowDesk's real schema (`teams`/`public.users`,
-      no `organizations`, no `org_members`), deny-by-default RLS, integrity
-      indexes for double-allocation and webhook replay
-- [x] `/api/re` mounted in `src/app.js` after `express.json()`/`sanitizeBody`,
-      behind FlowDesk's `authenticate`
-- [x] **`PATCH` added to the CORS `methods` allowlist** — it was missing and
-      every status transition in this module is a PATCH
-- [x] `orgContext` rewired to FlowDesk auth (`req.user.team_id ?? req.user.id`)
-- [x] `handleRealEstateCharge` hooked into the existing Paystack webhook
-- [x] `documents/:id/generate` wired to Puppeteer + private Storage bucket with
-      signed URLs
-- [x] `realestate.html/css/js` added as a static page (no Vite in this
-      codebase); own visual identity; shares `fd_token`
-- [x] Sidebar entry, revealed only for workspaces with ≥1 project
-- [x] `node-cron` installed (`openai` not needed — the brief uses `fetch`)
-- [x] 23 logic tests + an 8-step smoke script
+- [x] Schema with deny-by-default RLS and integrity indexes for
+      double-allocation and webhook replay
+- [x] Full API under `/api/re`: projects, units, customers, sales reps,
+      reservations, payments, documents, tasks, dashboard, brief
+- [x] Atomic unit claim (conditional UPDATE + unique partial index) so two
+      simultaneous requests cannot double-allocate
+- [x] Kobo-precise, timezone-independent installment schedules
+- [x] Paystack adapter: namespaced `REINST-*` references, idempotent handler
+- [x] Allocation letters → Puppeteer → private Storage bucket → signed URLs
+- [x] Daily brief with a rule-based fallback when OpenAI is unavailable
+- [x] **Standalone server**: `server.js`, own HS256 auth, error handler,
+      health check, CORS (with `PATCH`), rate limiting, graceful shutdown
+- [x] `render.yaml` blueprint; `.env.example`
+- [x] 23 offline logic tests + 14 server checks + an 8-step smoke script
 
 ## Operational — for you
 
 - [ ] Run `migrations/001` then `002` in the Supabase SQL editor
-- [ ] Set `OPENAI_API_KEY` on Railway (optional; without it the brief falls
-      back to a rule-based summary)
-- [ ] Deploy and run `npm run smoke:re` against staging
+- [ ] Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `JWT_SECRET` on the host
+      (the service refuses to boot without them)
+- [ ] Set `ALLOWED_ORIGINS` to the frontend's origin — in production no
+      browser origin is allowed by default
+- [ ] Set `OPENAI_API_KEY` (optional; without it the brief falls back)
+- [ ] Confirm the host's start command is `node server.js` and its root
+      directory is the folder containing it
+- [ ] Deploy and run `npm run smoke` against staging
+
+## Known gaps
+
+- [ ] No `/api/auth` — this service verifies tokens but does not issue them.
+      Whatever handles login must share `JWT_SECRET`.
+- [ ] No Paystack webhook route. The handler exists and is idempotent; a route
+      that verifies the signature against the raw body still needs mounting if
+      Paystack should post here directly (see `docs/API.md`).
+- [ ] The frontend redirects to `./index.html` on 401, which assumes a login
+      page ships alongside it.
 
 ## v1.x (after first real customer feedback)
 

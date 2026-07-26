@@ -2,7 +2,7 @@ const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const router = express.Router();
 
-// A sales rep is a FlowDesk user tagged for this module, joined here to their
+// A sales rep is a platform user tagged for this product, joined here to their
 // profile so the UI can show a name rather than a UUID.
 router.get('/', async (req, res, next) => {
   try {
@@ -25,8 +25,8 @@ router.post('/', async (req, res, next) => {
     const { user_id } = req.body || {};
     if (!user_id) return res.status(400).json({ error: 'user_id is required' });
 
-    // Only real FlowDesk users can be reps — the FK would reject anything else
-    // anyway, but a 404 explains it better than a constraint violation.
+    // Only real users can be reps — the FK would reject anything else anyway,
+    // but a 404 explains it better than a constraint violation.
     const { data: user } = await supabaseAdmin
       .from('users').select('id').eq('id', user_id).maybeSingle();
     if (!user) return res.status(404).json({ error: 'User not found' });

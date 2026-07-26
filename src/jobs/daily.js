@@ -1,11 +1,15 @@
 // jobs/daily.js — 07:00 Africa/Lagos: mark overdue, then brief every org.
 //
-// MOUNTING (FlowDesk's src/app.js, once):
-//   require('./re/jobs/daily');
+// Scheduled by requiring this file once — server.js does it at the bottom.
 //
-// Railway keeps the process alive, so node-cron is enough; there is no need
-// for a separate scheduler service at this size. Set RE_DISABLE_CRON=true to
-// keep it quiet in local development or tests.
+// The host keeps the web process alive, so node-cron is enough; there is no
+// need for a separate scheduler service at this size. Set RE_DISABLE_CRON=true
+// to keep it quiet in local development or tests.
+//
+// One caveat if this ever runs on more than one instance: each instance
+// schedules its own timer, so the job would run once per instance. The brief
+// upserts on (organization_id, brief_date) and markOverdue is idempotent, so
+// duplicates are harmless — but it does mean duplicate OpenAI calls.
 //
 // 07:00 Lagos is chosen so the brief is already waiting when the MD opens the
 // app — the product's whole promise is that the thinking happened overnight.
@@ -21,8 +25,8 @@ async function runDailyJob() {
   const flipped = await markOverdue();
   console.log(`[re-daily] marked ${flipped} installment(s) overdue`);
 
-  // Brief every org that has at least one project. Orgs using FlowDesk purely
-  // for invoicing never see a real estate brief.
+  // Brief every org that has at least one project — an account that signed up
+  // but never entered inventory gets no brief and costs no tokens.
   const { data: projects, error } = await supabaseAdmin
     .from('re_projects')
     .select('organization_id');

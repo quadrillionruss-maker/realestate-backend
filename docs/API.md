@@ -1,12 +1,17 @@
 # API Reference
 
-All routes under `/api/re`, all authenticated by FlowDesk's `authenticate`
-middleware, all scoped to `organization_id` (= `team_id ?? user_id`).
+All routes under `/api/re`, all behind `src/middleware/auth.js` (HS256 bearer
+token, algorithm pinned), all scoped to `organization_id`
+(= `team_id ?? user_id`).
 
-Handlers return plain JSON (an object or array) rather than FlowDesk's
-`{ success, data }` envelope — the real estate screen is the only consumer.
-Errors do flow through FlowDesk's global error handler, so failures arrive as
-`{ success: false, error }` with the right status code.
+Successful handlers return plain JSON — an object or an array, no envelope.
+Failures go through the global error handler and arrive as
+`{ success: false, error }` with a meaningful status code: 400 for bad input,
+401 for auth, 404 for a missing row in your org, 409 for a conflict the
+business rules refuse (unit already reserved, installment already paid).
+
+`GET /health` is the one unauthenticated route; it reports database
+reachability for the platform's health checks.
 
 ## Projects
 - `GET /projects` — list + unit counts (total/sold/reserved/available)
@@ -72,11 +77,21 @@ day with nothing to report). The dashboard shows which.
 
 ## Webhook
 
-**No new endpoint.** `handleRealEstateCharge(event)` is called from FlowDesk's
-existing verified Paystack webhook, inside `charge.success`, before the
-subscription logic. It returns `false` for non-`REINST-*` references so
-billing proceeds untouched, and is idempotent against Paystack's retries.
+`handleRealEstateCharge(event)` is exported from
+`src/services/paystackService.js` and is idempotent against Paystack's
+retries (it checks the reference, and a unique partial index makes the check
+race-proof).
 
-References are `REINST-<schedule-uuid>-<timestamp>`. Note the schedule id is
-itself a UUID containing `-`, so the reference is parsed by pattern, never by
+This service does **not** currently expose a webhook route. Payments recorded
+through `POST /payments/:scheduleId/record` need none, and payment links are
+reconciled when Paystack posts to whichever endpoint owns the account. To have
+Paystack post here directly, add a route that verifies the
+`x-paystack-signature` HMAC against the **raw** body — mounted before
+`express.json()`, or the signature will not match — and call the handler from
+its `charge.success` branch.
+
+The handler returns `false` for references it does not own, so it can share a
+webhook with another product on the same Paystack account without a second
+endpoint. References are `REINST-<schedule-uuid>-<timestamp>`; the schedule id
+is itself a UUID containing `-`, so references are parsed by pattern, never by
 splitting on the delimiter.

@@ -1,8 +1,7 @@
-// escapeHtml.js — vendored copy of FlowDesk's src/utils/escapeHtml.js.
+// escapeHtml.js — escaping for values interpolated into PDF templates.
 //
-// Duplicated rather than imported so this module stays a self-contained folder
-// you can drop into any FlowDesk checkout. Five lines is a cheaper dependency
-// than a require path that breaks depending on where the module was copied.
+// Five lines rather than a dependency: this runs on buyer-supplied names that
+// end up inside an HTML document we then print.
 const escapeHtml = (str) => String(str ?? '')
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')

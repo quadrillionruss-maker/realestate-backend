@@ -1,125 +1,156 @@
-# Real Estate Module — Integration Guide
+# Real Estate Sales Operations API — Working Guide
 
-A module grafted onto the existing FlowDesk codebase, not a new app. FlowDesk
-already has auth, teams, Paystack (with constant-time HMAC webhook
-verification), Resend, Puppeteer PDF generation and Supabase Storage.
-**All of it is reused. None of it was rebuilt.**
+A **standalone backend**. It owns its authentication, error handling and
+scheduled work, and imports nothing from any other codebase.
 
-## Status: integrated
-
-The graft is done in `c:\Users\quadr\Desktop\flowdesk-backend`. What remains is
-operational — run the migrations, set one env var, deploy. See
-**"What's left for you"** below.
-
-## What FlowDesk actually turned out to be
-
-Earlier drafts of this guide assumed things the codebase does not do. The code
-now targets reality; keep these in mind before writing anything new:
-
-| Assumed | Actual |
-|---|---|
-| An `organizations` table | `teams` + `team_members`; solo users have `team_id = NULL` |
-| Supabase Auth (`auth.uid()`) | FlowDesk's own HS256 JWT; `auth.uid()` is NULL for app traffic |
-| Auth sets `req.userId` / `req.orgId` | `authenticate` sets `req.user = { id, email, team_id, role }` |
-| Routes mounted in `server.js` | `server.js` only listens; routes live in `src/app.js` |
-| Vite frontend with entry points | No bundler, no build step — `frontend/*.html` is served as-is |
-| `npm i openai` | FlowDesk calls OpenAI over `fetch`; no SDK is installed, so the brief does too |
-| A reusable PDF renderer | `pdf.service.js` only knew how to draw invoices; a generic `renderHtmlToPdf` was split out of it |
-
-**The org scope key.** `organization_id` = `user.team_id ?? user.id`, mirroring
-FlowDesk's `src/utils/scopeOwner.js`. It therefore points at `teams.id` for
-team accounts and `users.id` for solo ones, which is why it carries no foreign
-key. One consequence worth knowing: if a solo user records real estate data and
-*later* creates a team, their scope key changes and the old rows go quiet. The
-same is already true of FlowDesk's own invoices and clients. Backfill when it
-happens:
-
-```sql
-update re_projects set organization_id = '<team-id>' where organization_id = '<user-id>';
--- repeat for re_units, re_customers, re_sales_reps, re_reservations,
--- re_installment_plans, re_installment_schedule, re_payments,
--- re_documents, re_tasks, re_ai_briefs
+```
+npm install
+cp .env.example .env     # fill in the three required values
+npm start                # → http://localhost:4000
 ```
 
-## What's left for you
+## Entry point
 
-1. **Run the migrations** in the Supabase SQL editor, in order:
-   `migrations/001_phase1_schema.sql`, then `migrations/002_ai_briefs.sql`.
-   No find/replace needed — they already target `teams`/`public.users`. Both
-   are idempotent, so re-running is safe.
-2. **Set `OPENAI_API_KEY` on Railway** if it isn't already set. Optional: with
-   no key the daily brief still runs and produces a rule-based summary and
-   drafts, marked `generated_by: 'fallback'`.
-3. **Deploy.** `node-cron` is already in `package.json`; Railway keeps the
-   process alive, so the 07:00 Africa/Lagos job runs without extra infra.
-4. **Run the smoke test** (below) against staging.
+`server.js` at the repo root. It validates config, builds the Express app,
+mounts the API and listens on `process.env.PORT`.
+
+```
+node server.js      ← the start command; also `npm start`
+```
+
+There is no `src/app.js`. If a host is configured to run one, it will fail
+with "Cannot find module" — point it at `server.js` instead.
+
+## Layout
+
+```
+server.js                  boot, middleware, mount, listen
+render.yaml                Render blueprint (root dir + Chromium notes)
+src/
+  config/env.js            all process.env reads; assertRequired() at boot
+  middleware/
+    auth.js                HS256 bearer verification → req.user
+    orgContext.js          req.user → req.orgId; the shared Supabase client
+    errorHandler.js        statusCode-aware; hides 5xx internals in production
+  routes/                  thin HTTP layer, one file per resource
+  services/                all business logic and provider adapters
+  jobs/daily.js            07:00 Africa/Lagos cron
+  templates/               allocation letter
+  test/                    logic.test.js (offline), smoke.js (live)
+migrations/                two idempotent SQL files
+frontend/                  the Sales Operations screen
+```
+
+## Request pipeline
+
+```
+helmet → cors → rate limit → express.json
+      → /health (no auth)
+      → /api/re → authenticate → orgContext → routes
+      → 404 → errorHandler
+```
+
+`authenticate` verifies an HS256 bearer token (algorithm pinned — `alg:none`
+and RS256-confusion are rejected) and looks up team membership. `orgContext`
+then sets `req.orgId`.
+
+**This service verifies tokens, it does not issue them.** Whatever handles
+login must sign with the same `JWT_SECRET` and include `id` in the payload.
+If you later want it to own login too, that is a new `/api/auth` route plus a
+users table — nothing in the current design blocks it.
+
+## Org scoping
+
+`organization_id = user.team_id ?? user.id`. It points at a team for team
+accounts and at the user for solo ones, which is why it carries no foreign
+key. Every table has the column and every query filters it explicitly, because
+the service-role client bypasses RLS by design. RLS is enabled with **no
+policies** — deny-by-default — so the anon key can read nothing even if it
+leaks. See `docs/DATABASE.md` for why a policy on `auth.uid()` would be
+decorative here.
+
+Team lookup degrades to "solo account" if there is no `team_members` table, so
+the service runs against a database that only has the `re_*` tables.
+
+## Deployment
+
+Required env: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `JWT_SECRET`. The
+process exits at boot if any is missing. Everything else is optional and
+degrades:
+
+| Missing | Effect |
+|---|---|
+| `OPENAI_API_KEY` | Brief still runs, rule-based, marked `generated_by: 'fallback'` |
+| `PAYSTACK_SECRET_KEY` | Payment links 503; recording bank transfers still works |
+| `ALLOWED_ORIGINS` | No browser origin is allowed in production |
+
+Two deployment gotchas, both covered in `render.yaml`:
+
+1. **Root directory.** If the repo holds other projects, point the service at
+   the folder containing `server.js`.
+2. **Chromium.** Allocation letters render with headless Puppeteer, which is
+   absent from Render's default Node runtime. Only PDF generation is affected;
+   the rest of the API is unaffected.
 
 The Storage bucket needs no setup — `re-documents` is created privately on
 first document generation.
 
-## Where everything went
+## Before first use
 
-```
-flowdesk-backend/
-  src/re/                     ← the whole module (copied; see "Staying in sync")
-    routes/  services/  middleware/  jobs/  templates/  utils/  test/
-  frontend/realestate.{html,css,js}
-```
-
-Five hand-made edits in FlowDesk itself — the sync script never touches these:
-
-| File | Edit |
-|---|---|
-| `src/app.js` | mounts `app.use('/api/re', authenticate, reRoutes)` after `express.json()`/`sanitizeBody`; requires `./re/jobs/daily`; **added `PATCH` to the CORS `methods` list** — it was missing, and every status transition in this module is a PATCH |
-| `src/controllers/paystack.controller.js` | `charge.success` calls `handleRealEstateCharge()` first and breaks if it returns true |
-| `src/services/pdf.service.js` | `renderHtmlToPdf(html)` split out and exported; `generateInvoicePdf` now calls it (no behaviour change) |
-| `frontend/index.html` | hidden "Real Estate" nav item + `initRealEstateNav()`, revealed only when the workspace has ≥1 project |
-| `package.json` | `node-cron`; `test:re` and `smoke:re` scripts |
-
-**No second webhook endpoint exists.** Real estate references are namespaced
-`REINST-<schedule-uuid>-<timestamp>`; the handler returns `false` for anything
-else so subscription billing proceeds untouched, and it is idempotent against
-Paystack's retries (checked reference plus a unique partial index).
-
-## Staying in sync
-
-This module is the canonical source; FlowDesk holds a copy.
-
-```bash
-node scripts/sync-to-flowdesk.js ../../flowdesk-backend          # apply
-node scripts/sync-to-flowdesk.js ../../flowdesk-backend --check  # diff, exit 1 if stale
-```
+Run `migrations/001_phase1_schema.sql` then `migrations/002_ai_briefs.sql` in
+the Supabase SQL editor. Both are idempotent.
 
 ## Testing
 
 ```bash
-# From the FlowDesk checkout (dependencies live there):
-npm run test:re      # 23 logic tests, no network, no database
-
-RE_SMOKE_TOKEN=<fd_token from localStorage> npm run smoke:re
+npm test                                          # 23 logic tests, offline
+RE_SMOKE_TOKEN=<jwt> RE_SMOKE_API=<url> npm run smoke
 ```
 
-`test:re` covers the things that must not silently break: schedules summing to
-the exact plan total in kobo, month-end clamping (31 Jan → 28 Feb),
-timezone independence, `REINST-` references round-tripping through a UUID,
-HTML escaping in the allocation letter, and the rule-based brief.
+`npm test` covers what must not silently break: schedules summing to the exact
+plan total in kobo, month-end clamping (31 Jan → 28 Feb), timezone
+independence, `REINST-` references round-tripping through a UUID, HTML
+escaping in the allocation letter, and the rule-based brief.
 
-`smoke:re` runs the acceptance sequence against a live server: project → 5
-units → 2 customers → reservation with a 12-month plan (12 rows, unit flips to
-`reserved`) → **second reservation on the same unit rejected with 409** →
-payment settles installment 1 → brief generates → dashboard reflects it all.
-It writes real rows named `Test Estate <timestamp>` — point it at staging.
+`npm run smoke` runs the acceptance sequence against a live server: project →
+5 units → 2 customers → reservation with a 12-month plan → **second
+reservation on the same unit rejected with 409** → payment settles installment
+1 → brief generates → dashboard reflects it. It writes real rows named
+`Test Estate <timestamp>` — point it at staging.
+
+## Two rules the database enforces, not the code
+
+Both are unique partial indexes in `migrations/001`, because the application
+must not be the only thing standing between a developer and these:
+
+- one live reservation per unit (double allocation)
+- one payment per Paystack reference (webhook replay)
+
+## Payments
+
+Paystack references are namespaced `REINST-<schedule-uuid>-<timestamp>`. The
+schedule id is itself a UUID containing `-`, so references are parsed by
+pattern, never by splitting on the delimiter.
+
+`handleRealEstateCharge(event)` is exported from
+`src/services/paystackService.js` and returns `false` for references it does
+not own, so it can be called from a webhook shared with another product
+without a second endpoint. This service does not currently expose a webhook
+route of its own; add one that verifies the Paystack signature before calling
+the handler if you need Paystack to post here directly.
 
 ## Deliberately NOT in v1 (do not add)
 
 Buyer/Seller/Mortgage/Legal/Pricing/Market agents, agent orchestration, MLS,
 multi-country, marketplace, voice, in-app WhatsApp sending. One AI worker
-only: the daily brief plus drafted follow-ups. See `docs/AI_WORKFORCE.md` for
-the growth path and the gates each future agent must clear.
+only: the daily brief plus drafted follow-ups. Every AI output is a proposal a
+human sends. See `docs/AI_WORKFORCE.md` for the growth path and the gates each
+future agent must clear.
 
-## Design note
+## Design
 
-The real estate screen has its **own visual identity** and deliberately does
-not inherit FlowDesk's design tokens — it is a separate product that happens
-to share a login. It shares the session (`localStorage.fd_token`) and the API
-base (`window.__API_BASE__`), and nothing visual.
+The frontend is a warm "morning dispatch" almanac — paper stock, hairline
+rules, editorial serif for prose, tabular monospace for money. Colour encodes
+state: clay for what's late, brass for what the AI wrote, moss for money in.
+It is its own product with its own identity, not a themed variant of anything
+else.

@@ -1,0 +1,44 @@
+# Render blueprint. Committing this means the service's configuration is
+# reviewable in git rather than living only in a dashboard.
+#
+# Two things worth knowing before deploying:
+#
+# 1. ROOT DIRECTORY. If this repo contains other projects, set the service's
+#    root directory to the folder holding this file, or Render will build the
+#    wrong tree and fail with "Cannot find module".
+#
+# 2. PUPPETEER. Allocation letters render with headless Chromium, which is not
+#    present on Render's default Node runtime. The Docker runtime below ships
+#    it. On the plain Node runtime, PDF generation is the one endpoint that
+#    will fail — everything else works.
+
+services:
+  - type: web
+    name: realestate-sales-ops-api
+    runtime: node
+    plan: starter
+    buildCommand: npm ci
+    startCommand: node server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # Chromium is downloaded at install time into the build cache; without
+      # this Render's read-only home directory can break the download.
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/project/.cache/puppeteer
+
+      # Set these in the dashboard (or a secret group) — never in this file.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false

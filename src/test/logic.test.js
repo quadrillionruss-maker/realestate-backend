@@ -1,9 +1,8 @@
 // logic.test.js — the rules that must not silently break.
 //
-// Pure logic only: no network, no database, no Supabase calls. Run it from the
-// FlowDesk checkout, where the dependencies live:
+// Pure logic only: no network, no database, no Supabase calls.
 //
-//     node src/re/test/logic.test.js      (or: npm run test:re)
+//     npm test
 //
 // The service modules construct a Supabase client at require time, so dummy
 // credentials are set below. Nothing here ever issues a query.

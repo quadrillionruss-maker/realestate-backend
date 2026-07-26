@@ -6,8 +6,8 @@
 // them. That boundary is what makes the Deal Manager upgrade in
 // docs/AI_WORKFORCE.md a change of permissions rather than a rewrite.
 //
-// Talks to OpenAI over fetch, the same way FlowDesk's existing
-// src/controllers/ai.controller.js does — no SDK dependency to install.
+// Talks to OpenAI over fetch — no SDK dependency to install, and one less
+// package to keep current for a single HTTP call.
 
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { lagosToday } = require('./overdueService');

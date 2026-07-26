@@ -5,9 +5,9 @@
 // units, buyers and reservations. Point it at staging, not at a workspace
 // with live customers in it.
 //
-//   RE_SMOKE_TOKEN=<fd_token from localStorage after logging in> \
+//   RE_SMOKE_TOKEN=<bearer token signed with this service's JWT_SECRET> \
 //   RE_SMOKE_API=http://localhost:4000/api \
-//   node src/re/test/smoke.js
+//   npm run smoke
 //
 // Verifies, in order: project → units → customers → reservation with a
 // 12-month plan → double-allocation is refused → payment settles an
@@ -17,7 +17,7 @@ const API = (process.env.RE_SMOKE_API || 'http://localhost:4000/api').replace(/\
 const TOKEN = process.env.RE_SMOKE_TOKEN;
 
 if (!TOKEN) {
-  console.error('RE_SMOKE_TOKEN is required (log in, then copy localStorage "fd_token").');
+  console.error('RE_SMOKE_TOKEN is required (a bearer token signed with this service's JWT_SECRET).');
   process.exit(1);
 }
 

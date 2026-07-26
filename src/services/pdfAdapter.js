@@ -1,14 +1,14 @@
-// pdfAdapter.js — HTML → PDF, without caring who owns the browser.
+// pdfAdapter.js — HTML → PDF.
 //
-// When this module is grafted into FlowDesk (src/re/), it uses FlowDesk's
-// existing Puppeteer service, so there is one browser configuration, one set
-// of Railway-tuned launch flags, and one place to fix Chromium problems.
-// When the module is checked out on its own, it launches its own browser with
-// the same flags so the code path stays testable in isolation.
+// The single place that knows a browser is involved. Everything else builds
+// HTML strings and hands them here, so swapping Puppeteer for a rendering
+// service later is a one-file change.
 
 const LAUNCH_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
+  // Containers give /dev/shm 64MB by default, which Chromium exhausts and
+  // then crashes mid-render. This is the flag that makes PDFs work on Render.
   '--disable-dev-shm-usage',
   '--disable-gpu',
   '--no-first-run',
@@ -16,21 +16,7 @@ const LAUNCH_ARGS = [
   '--single-process',
 ];
 
-let hostRenderer;
-
-// Resolved once, lazily: the require path only exists inside FlowDesk.
-function resolveHostRenderer() {
-  if (hostRenderer !== undefined) return hostRenderer;
-  try {
-    const host = require('../../services/pdf.service');
-    hostRenderer = typeof host.renderHtmlToPdf === 'function' ? host.renderHtmlToPdf : null;
-  } catch {
-    hostRenderer = null; // standalone checkout — expected
-  }
-  return hostRenderer;
-}
-
-async function renderLocally(html) {
+async function renderHtmlToPdf(html) {
   let puppeteer;
   try {
     puppeteer = require('puppeteer');
@@ -48,13 +34,10 @@ async function renderLocally(html) {
       margin: { top: '0', right: '0', bottom: '0', left: '0' },
     });
   } finally {
+    // Always close, or a failed render leaks a Chromium process per attempt
+    // until the container runs out of memory.
     await browser.close();
   }
-}
-
-async function renderHtmlToPdf(html) {
-  const host = resolveHostRenderer();
-  return host ? host(html) : renderLocally(html);
 }
 
 module.exports = { renderHtmlToPdf, LAUNCH_ARGS };

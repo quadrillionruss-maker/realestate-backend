@@ -1,29 +1,27 @@
-// orgContext.js — the module's single point of contact with FlowDesk auth.
+// orgContext.js — turns an authenticated user into an org scope.
 //
-// FlowDesk's src/middleware/auth.js verifies its own HS256 JWT and sets:
-//   req.user = { id, email, default_currency, team_id, role }
-// with team_id === null for solo (non-team) accounts.
-//
-// This middleware turns that into the org scope every route below uses.
-// It never verifies tokens itself — mount FlowDesk's `authenticate` in
-// front of it (see src/app.js) so there is exactly one auth implementation.
+// src/middleware/auth.js verifies the token and sets:
+//   req.user = { id, email, team_id, role }
+// with team_id === null for solo (non-team) accounts. This middleware runs
+// after it and produces req.orgId, which every query in this service filters
+// on. It never verifies tokens itself, so there is exactly one place that
+// decides who a caller is.
 
 const { createClient } = require('@supabase/supabase-js');
+const env = require('../config/env'); // also loads .env for everything downstream
 
-// Service-role client: bypasses RLS, so EVERY query in this module filters
+// Service-role client: bypasses RLS, so EVERY query in this service filters
 // organization_id explicitly. RLS stays enabled as the second lock (see
-// migrations/001). Its own instance rather than FlowDesk's so the module
-// stays copy-pasteable; the client is stateless and cheap.
+// migrations/001). One client, shared — it is stateless.
 const supabaseAdmin = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  env.supabase.url,
+  env.supabase.serviceRoleKey,
   { auth: { persistSession: false, autoRefreshToken: false } }
 );
 
-// The scope key, identical to FlowDesk's src/utils/scopeOwner.js rule:
-// a team workspace is scoped by team, a solo account by the user.
-// Keep these two definitions in step — if FlowDesk changes how it scopes
-// ownership, this is the one line here that must follow.
+// The scope key: a team workspace is scoped by team, a solo account by the
+// user. Every table carries organization_id set from this, which is why one
+// `.eq('organization_id', req.orgId)` is enough to isolate a tenant.
 function resolveOrgId(user) {
   if (!user || !user.id) return null;
   return user.team_id || user.id;
@@ -37,7 +35,7 @@ function orgContext(req, res, next) {
   req.orgId = orgId;
   req.userId = req.user.id;
   // Solo accounts own their workspace outright; team accounts carry the role
-  // FlowDesk's auth middleware read from team_members.
+  // read from team_members during authentication.
   req.orgRole = req.user.role || 'owner';
   next();
 }

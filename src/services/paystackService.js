@@ -1,11 +1,10 @@
 // paystackService.js — the only file in this module that knows Paystack exists.
 //
-// FlowDesk already owns the Paystack account, the initialize call and the
-// constant-time HMAC webhook verification. This module does NOT add a second
-// webhook endpoint. Instead every real estate transaction reference is
-// namespaced `REINST-<schedule uuid>-<timestamp>`, and FlowDesk's existing
-// verified webhook calls handleRealEstateCharge(), which returns false for
-// anything that isn't ours so subscription-billing logic proceeds untouched.
+// Every transaction reference is namespaced `REINST-<schedule uuid>-<timestamp>`.
+// That namespacing means handleRealEstateCharge() can be called from a webhook
+// shared with another product on the same Paystack account: it returns false
+// for references it does not own, so the other product's logic proceeds
+// untouched, and no second endpoint is needed.
 
 const { supabaseAdmin } = require('../middleware/orgContext');
 
@@ -121,10 +120,12 @@ async function initInstallmentPayment(orgId, scheduleId, customerEmail) {
   };
 }
 
-// ── Called from FlowDesk's EXISTING verified webhook ───────────────────────
-// Returns false when the reference is not a real estate one, which is the
-// signal for FlowDesk's subscription logic to carry on handling the event.
-// Signature verification has already happened upstream.
+// ── Called from a verified Paystack webhook ────────────────────────────────
+// Returns false when the reference is not ours, the signal for any co-hosted
+// product to carry on handling the event.
+//
+// PRECONDITION: the caller has already verified the x-paystack-signature HMAC
+// against the raw request body. This function trusts the event it is given.
 async function handleRealEstateCharge(event) {
   const reference = event?.data?.reference;
   if (!isRealEstateReference(reference)) return false;

@@ -1,21 +1,13 @@
-// routes/index.js — the whole real estate module behind one prefix.
+// routes/index.js — the whole API behind one prefix.
 //
-// MOUNTING (FlowDesk's src/app.js), and the order matters:
+// Mounted by server.js, where the order matters:
 //
-//   const { authenticate } = require('./middleware/auth');
-//   const reRoutes = require('./re/routes');
-//   ...
-//   app.use(express.json());   // already there
-//   app.use(sanitizeBody);     // already there
+//   app.use(express.json());
 //   app.use('/api/re', authenticate, reRoutes);
 //
-// It must sit AFTER express.json() and sanitizeBody, otherwise req.body is
-// undefined in every handler below — the same mounting-order bug that bit the
-// billing routes before (see the webhookRouter split in app.js).
-//
-// `authenticate` is FlowDesk's, deliberately: this module never verifies a
-// token itself, so there is exactly one auth implementation in the codebase.
-// orgContext then turns req.user into req.orgId.
+// It must sit AFTER express.json(), or req.body is undefined in every handler
+// below. `authenticate` runs in front rather than inside, so a route can never
+// be added that forgets it; orgContext then turns req.user into req.orgId.
 
 const express = require('express');
 const { orgContext } = require('../middleware/orgContext');
