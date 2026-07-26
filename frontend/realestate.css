@@ -1,0 +1,500 @@
+/* ============================================================
+   Sales Operations — visual identity
+   ------------------------------------------------------------
+   This is a SEPARATE PRODUCT from the host invoicing app and is
+   meant to look like one. Deliberately not FlowDesk's dark
+   sidebar / emerald / rounded-card language.
+
+   The concept: a printed morning dispatch. A developer's MD opens
+   this at 7am to find out what happened overnight, so the page is
+   built like an almanac page — warm paper stock, hairline rules
+   instead of cards, an editorial serif for prose, and tabular
+   monospace for money because figures should read like an
+   instrument, not like marketing.
+
+   Palette is earth: clay red for what's late, brass for what the
+   AI wrote, moss for money in. Nothing is decorative for its own
+   sake — colour here always encodes state.
+   ============================================================ */
+
+:root {
+  --paper:        #F2ECE1;
+  --paper-raised: #FAF6EE;
+  --ink:          #181310;
+  --ink-2:        #4A423A;
+  --ink-3:        #8A7F72;
+  --rule:         #D9CFBE;
+  --rule-strong:  #B9AC98;
+
+  --clay:         #B03E24;  /* overdue, at-risk */
+  --clay-soft:    #F0DFD8;
+  --brass:        #8F6716;  /* the AI's colour */
+  --brass-soft:   #F1E6CB;
+  --moss:         #3F6046;  /* collected */
+  --moss-soft:    #DEE7DD;
+
+  --shell-max:    1180px;
+  --gap:          clamp(20px, 3vw, 34px);
+
+  --font-display: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --font-ui:      'Archivo', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono:    'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:        #14100D;
+    --paper-raised: #1E1813;
+    --ink:          #F2EADC;
+    --ink-2:        #B6AA98;
+    --ink-3:        #7C7163;
+    --rule:         #332B22;
+    --rule-strong:  #4C4134;
+
+    --clay:         #E0714F;
+    --clay-soft:    #3A2118;
+    --brass:        #D6A94E;
+    --brass-soft:   #33270F;
+    --moss:         #86AE86;
+    --moss-soft:    #1E2A1F;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  font-family: var(--font-ui);
+  background: var(--paper);
+  color: var(--ink);
+  min-height: 100vh;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  position: relative;
+}
+
+/* Paper grain. Fixed, non-interactive, very low opacity — you should
+   feel the texture rather than notice it. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: .38;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E");
+  mix-blend-mode: multiply;
+}
+@media (prefers-color-scheme: dark) {
+  body::before { mix-blend-mode: screen; opacity: .16; }
+}
+
+.shell { position: relative; z-index: 1; max-width: var(--shell-max); margin: 0 auto; padding: 0 var(--gap) 72px; }
+
+/* ── Masthead ────────────────────────────────────────────────
+   Newspaper flag: rule, wordmark, dateline. The double rule under
+   the title is the one piece of pure ornament on the page. */
+.masthead { padding: clamp(22px, 4vw, 40px) 0 0; }
+
+.masthead-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.back-link {
+  font-size: 11px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--ink-3);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color .18s, border-color .18s;
+}
+.back-link:hover { color: var(--ink); border-bottom-color: var(--rule-strong); }
+
+.dateline {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.wordmark {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-weight: 600;
+  font-size: clamp(34px, 6.5vw, 58px);
+  line-height: 1;
+  letter-spacing: -.02em;
+  margin: 18px 0 14px;
+}
+.wordmark em { font-style: italic; font-weight: 400; color: var(--ink-2); }
+
+.masthead-rules { border-top: 2px solid var(--ink); border-bottom: 1px solid var(--ink); height: 4px; }
+
+/* ── The dispatch (AI brief) ─────────────────────────────────
+   The signature moment: the first thing read each morning. Given
+   the most typographic weight on the page and the brass rule that
+   marks everything the AI produced. */
+.dispatch {
+  margin-top: clamp(26px, 4vw, 44px);
+  padding: 26px 0 26px 26px;
+  border-left: 3px solid var(--brass);
+  position: relative;
+}
+
+.dispatch-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.eyebrow {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--brass);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.eyebrow::before { content: '◆'; font-size: 8px; }
+
+.dispatch-meta { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .08em; color: var(--ink-3); text-transform: uppercase; }
+
+.dispatch-body {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-size: clamp(19px, 2.3vw, 25px);
+  line-height: 1.52;
+  letter-spacing: -.01em;
+  color: var(--ink);
+  max-width: 62ch;
+  text-wrap: pretty;
+}
+.dispatch-body.is-muted { color: var(--ink-3); font-style: italic; }
+
+.risk-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+
+/* Square-cornered tags, not pills — pills read as consumer SaaS. */
+.risk-chip {
+  font-size: 11.5px;
+  line-height: 1.35;
+  padding: 6px 10px;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper-raised);
+  color: var(--ink-2);
+  max-width: 42ch;
+}
+.risk-chip b { font-weight: 600; color: var(--ink); }
+.risk-chip.high   { border-color: var(--clay);  background: var(--clay-soft);  color: var(--ink); }
+.risk-chip.medium { border-color: var(--brass); background: var(--brass-soft); color: var(--ink); }
+
+.dispatch-actions { margin-top: 22px; display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+
+/* ── Buttons: text-first, underline-driven ───────────────────── */
+.btn {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: none;
+  border: none;
+  border-bottom: 1.5px solid var(--ink);
+  padding: 4px 1px;
+  cursor: pointer;
+  transition: color .18s, border-color .18s, opacity .18s;
+}
+.btn:hover:not(:disabled) { color: var(--clay); border-bottom-color: var(--clay); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.brass { color: var(--brass); border-bottom-color: var(--brass); }
+.btn.brass:hover:not(:disabled) { color: var(--ink); border-bottom-color: var(--ink); }
+
+.btn-quiet {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--rule-strong);
+  padding: 3px 1px;
+  cursor: pointer;
+  transition: color .18s, border-color .18s;
+}
+.btn-quiet:hover { color: var(--ink); border-bottom-color: var(--ink); }
+
+/* ── Ledger (KPIs) ───────────────────────────────────────────
+   A ruled row, not four floating cards. Hairline dividers, figures
+   in tabular mono so the columns line up like a book of accounts. */
+.ledger {
+  margin-top: clamp(30px, 4vw, 46px);
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--rule);
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.ledger-cell { padding: 20px 22px 22px; border-left: 1px solid var(--rule); }
+.ledger-cell:first-child { border-left: none; padding-left: 0; }
+
+.ledger-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 12px;
+}
+
+.ledger-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(20px, 2.6vw, 29px);
+  font-weight: 500;
+  letter-spacing: -.02em;
+  line-height: 1.1;
+  color: var(--ink);
+}
+.ledger-value.moss { color: var(--moss); }
+.ledger-value.clay { color: var(--clay); }
+
+.ledger-sub { margin-top: 7px; font-size: 11.5px; color: var(--ink-3); }
+
+/* ── Inventory bar ───────────────────────────────────────────
+   Available stock is drawn as blueprint hatching rather than a
+   flat fill: unsold inventory is potential, not a quantity. */
+.inventory { margin-top: clamp(28px, 4vw, 42px); }
+
+.units-bar {
+  display: flex;
+  height: 34px;
+  border: 1px solid var(--ink);
+  overflow: hidden;
+  background: var(--paper-raised);
+}
+.units-bar > div { transition: width .5s cubic-bezier(.4, 0, .2, 1); }
+.seg-sold      { background: var(--ink); }
+.seg-reserved  { background: var(--brass); }
+.seg-available {
+  background-image: repeating-linear-gradient(
+    45deg, var(--rule-strong) 0 1px, transparent 1px 7px
+  );
+}
+
+.units-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin-top: 12px;
+  font-size: 11px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.units-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.swatch { width: 11px; height: 11px; border: 1px solid var(--ink); flex-shrink: 0; }
+.swatch.sold { background: var(--ink); }
+.swatch.reserved { background: var(--brass); }
+.swatch.available { background-image: repeating-linear-gradient(45deg, var(--rule-strong) 0 1px, transparent 1px 5px); }
+
+/* ── Section headings ────────────────────────────────────────
+   Numbered, with a rule that runs out to the margin. */
+.section { margin-top: clamp(34px, 5vw, 54px); }
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.section-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--clay);
+  letter-spacing: .04em;
+}
+.section-title {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-size: clamp(17px, 2vw, 21px);
+  font-weight: 600;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+}
+.section-rule { flex: 1; height: 1px; background: var(--rule-strong); }
+.section-hint {
+  font-size: 10px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* ── Two-column body ─────────────────────────────────────────
+   Asymmetric on purpose: the at-risk list is the day's work and
+   gets the wide measure. */
+.columns { display: grid; grid-template-columns: 1.45fr 1fr; gap: clamp(26px, 4vw, 50px); align-items: start; }
+
+/* ── Records ─────────────────────────────────────────────────
+   Rows separated by hairlines. No card, no shadow, no radius. */
+.record { padding: 16px 0; border-top: 1px solid var(--rule); }
+.record:first-child { border-top: none; }
+
+.record-top { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+
+.record-name {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+
+.record-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.record-amount {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--clay);
+  white-space: nowrap;
+}
+
+.late-tag {
+  display: inline-block;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--clay);
+  border: 1px solid var(--clay);
+  padding: 2px 6px;
+}
+
+.record-actions { display: flex; gap: 16px; margin-top: 12px; flex-wrap: wrap; }
+
+.action-link {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1.5px solid var(--rule-strong);
+  padding-bottom: 2px;
+  transition: color .18s, border-color .18s;
+  background: none;
+  cursor: pointer;
+  font-family: var(--font-ui);
+}
+.action-link:hover { color: var(--clay); border-bottom-color: var(--clay); }
+
+/* ── Drafts ──────────────────────────────────────────────────
+   Set on raised stock with a brass rule: everything brass on this
+   page was written by the AI and is waiting on a human. */
+.draft { border-top: 1px solid var(--rule); padding: 16px 0; }
+.draft:first-child { border-top: none; }
+
+.draft-text {
+  font-size: 13.5px;
+  line-height: 1.62;
+  color: var(--ink-2);
+  background: var(--paper-raised);
+  border-left: 2px solid var(--brass);
+  padding: 13px 15px;
+  margin: 10px 0 12px;
+  white-space: pre-wrap;
+}
+
+/* ── Tasks ───────────────────────────────────────────────────── */
+.task { display: flex; align-items: flex-start; gap: 13px; padding: 13px 0; border-top: 1px solid var(--rule); }
+.task:first-child { border-top: none; }
+.task-body { flex: 1; min-width: 0; }
+.task-title { font-size: 14px; line-height: 1.45; }
+.task-meta { margin-top: 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+
+.tag-ai {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  color: var(--brass);
+  border: 1px solid var(--brass);
+  padding: 1px 4px;
+  vertical-align: 2px;
+  margin-right: 6px;
+}
+
+/* ── States ──────────────────────────────────────────────────── */
+.empty { padding: 18px 0; font-size: 13.5px; font-style: italic; color: var(--ink-3); }
+
+.notice {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--clay);
+  background: var(--clay-soft);
+  color: var(--ink);
+  font-size: 13.5px;
+}
+.notice[hidden] { display: none; }
+
+/* ── Motion ──────────────────────────────────────────────────
+   One orchestrated load: the page assembles top-down, the way a
+   sheet is read. Nothing loops, nothing bounces. */
+@keyframes rise {
+  from { opacity: 0; transform: translateY(9px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.reveal {
+  opacity: 0;
+  animation: rise .58s cubic-bezier(.22, .68, .32, 1) forwards;
+  animation-delay: calc(var(--i, 0) * 75ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal { animation: none; opacity: 1; }
+  .units-bar > div { transition: none; }
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .columns { grid-template-columns: 1fr; }
+  .ledger { grid-template-columns: repeat(2, 1fr); }
+  .ledger-cell:nth-child(3) { border-left: none; padding-left: 0; }
+  .ledger-cell:nth-child(3), .ledger-cell:nth-child(4) { border-top: 1px solid var(--rule); }
+}
+
+@media (max-width: 560px) {
+  body { font-size: 14.5px; }
+  .ledger { grid-template-columns: 1fr; }
+  .ledger-cell { border-left: none; padding-left: 0; border-top: 1px solid var(--rule); }
+  .ledger-cell:first-child { border-top: none; }
+  .dispatch { padding-left: 18px; }
+  .record-top { flex-direction: column; gap: 6px; }
+}

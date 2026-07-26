@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <!-- maximum-scale=1 matches the iOS zoom fix used on the other entry points -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Sales Operations — Real Estate</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./realestate.css">
+</head>
+<body>
+<div class="shell">
+
+  <header class="masthead">
+    <div class="masthead-top">
+      <a class="back-link" href="./index.html">← FlowDesk</a>
+      <div class="dateline" id="dateline"></div>
+    </div>
+    <h1 class="wordmark">Sales <em>Operations</em></h1>
+    <div class="masthead-rules"></div>
+  </header>
+
+  <div class="notice" id="error-notice" hidden></div>
+
+  <!-- THE BRIEF — the reason someone opens this page at 7am -->
+  <section class="dispatch reveal" style="--i:0">
+    <div class="dispatch-head">
+      <span class="eyebrow">Morning Brief</span>
+      <span class="dispatch-meta" id="brief-meta"></span>
+    </div>
+    <p class="dispatch-body is-muted" id="brief-summary">Reading overnight activity…</p>
+    <div class="risk-row" id="brief-risks"></div>
+    <div class="dispatch-actions">
+      <button class="btn brass" id="btn-refresh-brief">Regenerate brief</button>
+      <span class="dispatch-meta" id="brief-status"></span>
+    </div>
+  </section>
+
+  <!-- LEDGER -->
+  <section class="ledger reveal" style="--i:1">
+    <div class="ledger-cell">
+      <div class="ledger-label">Collected this month</div>
+      <div class="ledger-value moss" id="kpi-collected">—</div>
+    </div>
+    <div class="ledger-cell">
+      <div class="ledger-label">Outstanding</div>
+      <div class="ledger-value" id="kpi-outstanding">—</div>
+    </div>
+    <div class="ledger-cell">
+      <div class="ledger-label">Overdue</div>
+      <div class="ledger-value clay" id="kpi-overdue">—</div>
+      <div class="ledger-sub" id="kpi-overdue-count"></div>
+    </div>
+    <div class="ledger-cell">
+      <div class="ledger-label">Due in 7 days</div>
+      <div class="ledger-value" id="kpi-due7">—</div>
+    </div>
+  </section>
+
+  <!-- INVENTORY -->
+  <section class="inventory reveal" style="--i:2">
+    <div class="section-head">
+      <span class="section-num">01</span>
+      <h2 class="section-title">Inventory</h2>
+      <span class="section-rule"></span>
+      <span class="section-hint" id="units-total"></span>
+    </div>
+    <div class="units-bar" id="units-bar"></div>
+    <div class="units-legend" id="units-legend"></div>
+  </section>
+
+  <div class="columns">
+    <div>
+      <!-- AT-RISK — the day's actual work -->
+      <section class="section reveal" style="--i:3">
+        <div class="section-head">
+          <span class="section-num">02</span>
+          <h2 class="section-title">At risk</h2>
+          <span class="section-rule"></span>
+          <span class="section-hint">2+ overdue</span>
+        </div>
+        <div id="at-risk-list"><div class="empty">Loading…</div></div>
+      </section>
+    </div>
+
+    <div>
+      <!-- DRAFTED FOLLOW-UPS -->
+      <section class="section reveal" style="--i:4">
+        <div class="section-head">
+          <span class="section-num">03</span>
+          <h2 class="section-title">Drafts</h2>
+          <span class="section-rule"></span>
+        </div>
+        <div id="followups-list"><div class="empty">Loading…</div></div>
+      </section>
+
+      <!-- TASKS -->
+      <section class="section reveal" style="--i:5">
+        <div class="section-head">
+          <span class="section-num">04</span>
+          <h2 class="section-title">Tasks</h2>
+          <span class="section-rule"></span>
+          <span class="section-hint" id="tasks-ai-count"></span>
+        </div>
+        <div id="tasks-list"><div class="empty">Loading…</div></div>
+      </section>
+    </div>
+  </div>
+
+</div>
+
+<script src="./realestate.js"></script>
+</body>
+</html>
