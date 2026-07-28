@@ -37,7 +37,7 @@ const env = {
 
   openai: {
     apiKey: process.env.OPENAI_API_KEY || '',
-    briefModel: process.env.OPENAI_BRIEF_MODEL || 'gpt-4o',
+    briefModel: process.env.OPENAI_BRIEF_MODEL || 'gpt-5.6-luna',
   },
 
   storage: {

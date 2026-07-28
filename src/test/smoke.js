@@ -9,9 +9,13 @@
 //   RE_SMOKE_URL=http://localhost:4000/api \
 //   npm run smoke
 //
-// RE_SMOKE_URL defaults to http://localhost:4000/api. The banner printed at
-// startup names which setting the target came from, so a fallback to
-// localhost is never mistaken for a run against staging.
+// RE_SMOKE_URL accepts either the server root (http://localhost:4000) or the
+// API base (http://localhost:4000/api) — /api is added when missing, because
+// the routes are mounted at /api/re. It defaults to http://localhost:4000/api.
+//
+// The banner printed at startup shows the endpoint root being called and which
+// setting it came from, so a fallback to localhost is never mistaken for a run
+// against staging.
 //
 // Verifies, in order: project → units → customers → reservation with a
 // 12-month plan → double-allocation is refused → payment settles an
@@ -22,7 +26,19 @@ const DEFAULT_API = 'http://localhost:4000/api';
 // RE_SMOKE_API is the previous name for this, still honoured so an already
 // exported value does not silently stop working.
 const configuredApi = process.env.RE_SMOKE_URL || process.env.RE_SMOKE_API;
-const API = (configuredApi || DEFAULT_API).replace(/\/$/, '');
+
+// Routes live at /api/re/*, so the base has to include /api. Given the setting
+// is called a URL, pasting the bare server root is the natural mistake — and
+// it fails confusingly, with every request going to /re/projects and coming
+// back 404. Accept either form: server root or API base.
+function normalizeBase(raw) {
+  const trimmed = String(raw).replace(/\/+$/, '');
+  if (/\/api\/re$/.test(trimmed)) return trimmed.replace(/\/re$/, ''); // over-specified
+  if (/\/api$/.test(trimmed)) return trimmed;
+  return `${trimmed}/api`;
+}
+
+const API = normalizeBase(configuredApi || DEFAULT_API);
 
 // Which setting won is printed in the banner below. Falling back to localhost
 // without saying so is how you end up believing you smoke-tested staging.
@@ -68,7 +84,9 @@ function check(label, condition, detail) {
 const naira = (n) => '₦' + Number(n || 0).toLocaleString('en-NG');
 
 async function run() {
-  console.log(`\nSmoke test → ${API}`);
+  // Show the endpoint root actually being called, not just the configured
+  // base — the two differ whenever normalizeBase had to add /api.
+  console.log(`\nSmoke test → ${API}/re`);
   console.log(`  target from: ${API_SOURCE}\n`);
 
   // 1 ── project

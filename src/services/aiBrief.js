@@ -9,11 +9,17 @@
 // Talks to OpenAI over fetch — no SDK dependency to install, and one less
 // package to keep current for a single HTTP call.
 
+const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { lagosToday } = require('./overdueService');
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
-const MODEL = process.env.OPENAI_BRIEF_MODEL || 'gpt-4o';
+
+// Sourced from config rather than read here, so the default lives in exactly
+// one place (src/config/env.js) and OPENAI_BRIEF_MODEL overrides it per
+// environment. It used to be defaulted in both files, which meant changing the
+// model in one left a stale value in the other.
+const MODEL = env.openai.briefModel;
 const REQUEST_TIMEOUT_MS = 45_000;
 
 const BRIEF_SCHEMA = {
