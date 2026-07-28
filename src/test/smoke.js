@@ -6,18 +6,34 @@
 // with live customers in it.
 //
 //   RE_SMOKE_TOKEN=<bearer token signed with this service's JWT_SECRET> \
-//   RE_SMOKE_API=http://localhost:4000/api \
+//   RE_SMOKE_URL=http://localhost:4000/api \
 //   npm run smoke
+//
+// RE_SMOKE_URL defaults to http://localhost:4000/api. The banner printed at
+// startup names which setting the target came from, so a fallback to
+// localhost is never mistaken for a run against staging.
 //
 // Verifies, in order: project → units → customers → reservation with a
 // 12-month plan → double-allocation is refused → payment settles an
 // installment → overdue marking feeds the brief → dashboard reflects it all.
 
-const API = (process.env.RE_SMOKE_API || 'http://localhost:4000/api').replace(/\/$/, '');
+const DEFAULT_API = 'http://localhost:4000/api';
+
+// RE_SMOKE_API is the previous name for this, still honoured so an already
+// exported value does not silently stop working.
+const configuredApi = process.env.RE_SMOKE_URL || process.env.RE_SMOKE_API;
+const API = (configuredApi || DEFAULT_API).replace(/\/$/, '');
+
+// Which setting won is printed in the banner below. Falling back to localhost
+// without saying so is how you end up believing you smoke-tested staging.
+const API_SOURCE = process.env.RE_SMOKE_URL ? 'RE_SMOKE_URL'
+  : process.env.RE_SMOKE_API ? 'RE_SMOKE_API (deprecated, use RE_SMOKE_URL)'
+  : 'default — no RE_SMOKE_URL set';
+
 const TOKEN = process.env.RE_SMOKE_TOKEN;
 
 if (!TOKEN) {
-  console.error('RE_SMOKE_TOKEN is required (a bearer token signed with this service's JWT_SECRET).');
+  console.error(`RE_SMOKE_TOKEN is required (a bearer token signed with this service's JWT_SECRET).`);
   process.exit(1);
 }
 
@@ -52,7 +68,8 @@ function check(label, condition, detail) {
 const naira = (n) => '₦' + Number(n || 0).toLocaleString('en-NG');
 
 async function run() {
-  console.log(`\nSmoke test → ${API}\n`);
+  console.log(`\nSmoke test → ${API}`);
+  console.log(`  target from: ${API_SOURCE}\n`);
 
   // 1 ── project
   const project = await call('POST', '/projects', {

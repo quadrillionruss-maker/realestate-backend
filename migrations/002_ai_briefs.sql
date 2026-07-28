@@ -44,3 +44,16 @@ create index if not exists idx_re_ai_briefs_org_date on re_ai_briefs(organizatio
 
 alter table re_ai_briefs enable row level security;
 drop policy if exists "org members access re_ai_briefs" on re_ai_briefs;
+
+-- Privileges, for the reasons documented in the Grants section of 001:
+-- bypassing RLS does not substitute for holding table privileges.
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then
+    raise notice 'service_role absent — not a Supabase database, skipping grants';
+    return;
+  end if;
+
+  grant select, insert, update, delete on public.re_ai_briefs to service_role;
+  revoke all on public.re_ai_briefs from anon, authenticated;
+end $$;

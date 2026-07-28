@@ -335,6 +335,44 @@ begin
 end $$;
 
 -- ============================================================
+-- Grants
+--
+-- RLS and privileges are two different gates, and BYPASSRLS only opens the
+-- first one. service_role still needs ordinary table privileges, and not
+-- every Supabase project grants them by default — without this block the API
+-- authenticates fine and then fails every query with
+-- "42501: permission denied for table re_projects".
+--
+-- anon and authenticated are revoked explicitly. RLS-with-no-policies already
+-- blocks them, but making it true at the privilege layer as well means the
+-- deny-by-default promise does not rest on a single mechanism. If you later
+-- add the client-side policies templated at the bottom of this file, you must
+-- re-grant to those roles — policies alone will not be enough.
+--
+-- Guarded on the roles existing so the file still runs on a plain Postgres
+-- (a local instance, or the in-process one src/test/schema.test.js uses).
+-- ============================================================
+do $$
+declare t text;
+begin
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then
+    raise notice 'service_role absent — not a Supabase database, skipping grants';
+    return;
+  end if;
+
+  execute 'grant usage on schema public to service_role';
+
+  foreach t in array array[
+    'users','teams','team_members',
+    're_projects','re_units','re_customers','re_sales_reps','re_reservations',
+    're_installment_plans','re_installment_schedule','re_payments','re_documents','re_tasks'
+  ] loop
+    execute format('grant select, insert, update, delete on public.%I to service_role', t);
+    execute format('revoke all on public.%I from anon, authenticated', t);
+  end loop;
+end $$;
+
+-- ============================================================
 -- BOOTSTRAP — a fresh install has no users, and every endpoint
 -- requires a token belonging to one. Create yourself:
 --

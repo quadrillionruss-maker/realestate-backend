@@ -100,7 +100,13 @@ first document generation.
 1. Run `migrations/001_phase1_schema.sql` then `migrations/002_ai_briefs.sql`
    in the Supabase SQL editor. `001` is self-contained — it creates the
    identity tables (`users`, `teams`, `team_members`) as well as the domain
-   ones, so an empty project is all it needs. Both are idempotent.
+   ones, so an empty project is all it needs. Both are idempotent, so
+   re-running them after a change to either file is safe and is how you pick
+   up the Grants block.
+
+   If the API returns `42501: permission denied for table re_projects`, the
+   tables exist but `service_role` holds no privileges on them — re-run `001`
+   and `002`. See the Grants section in `docs/DATABASE.md`.
 
 2. Create yourself a user, because every endpoint requires a token belonging
    to one:
@@ -131,7 +137,7 @@ this script becomes a debugging tool.
 ```bash
 npm test                # logic (23) + schema (37); no network, no database
 npm run test:schema     # migrations against a real in-process Postgres
-RE_SMOKE_TOKEN=<jwt> RE_SMOKE_API=<url> npm run smoke
+RE_SMOKE_TOKEN=<jwt> RE_SMOKE_URL=<url> npm run smoke   # URL defaults to localhost:4000/api
 ```
 
 `test:schema` runs the migrations against PGlite — Postgres compiled to WASM,

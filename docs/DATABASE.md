@@ -115,6 +115,24 @@ If client-side Supabase access is ever added, a commented policy template
 following FlowDesk's own `teams`/`team_members` shape sits at the bottom of
 `migrations/001_phase1_schema.sql`.
 
+## Grants
+
+RLS and privileges are two separate gates, and `service_role`'s BYPASSRLS only
+opens the first. It still needs ordinary table privileges, and **not every
+Supabase project grants them by default**. Without them the API authenticates
+fine and then fails every query with:
+
+```
+42501: permission denied for table re_projects
+```
+
+The Grants block at the end of `001` fixes this, and re-running the migration
+is the fix — it is idempotent, so on an existing database it changes nothing
+except the privileges. `anon` and `authenticated` are revoked explicitly, so
+deny-by-default holds at the privilege layer too and not only through RLS. If
+you later add client-side policies, you must re-grant to those roles; policies
+alone will not be enough.
+
 ## Storage
 
 Allocation letters go to a **private** bucket (`re-documents`, created on

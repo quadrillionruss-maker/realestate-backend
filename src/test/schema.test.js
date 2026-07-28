@@ -48,6 +48,53 @@ function check(name, cond, detail) {
 
   const q = async (sql, params) => (await db.query(sql, params)).rows;
 
+  // ── Grants ──────────────────────────────────────────────────────────────
+  // The runs above had no Supabase roles, so the grant block took its guarded
+  // early exit. Create the roles and apply again to exercise the path that
+  // actually runs in production — a missing grant does not fail the migration,
+  // it fails every query later with "42501: permission denied".
+  await db.exec(`
+    do $$ begin
+      if not exists (select 1 from pg_roles where rolname='service_role') then create role service_role; end if;
+      if not exists (select 1 from pg_roles where rolname='anon') then create role anon; end if;
+      if not exists (select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if;
+    end $$;
+  `);
+
+  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql']) {
+    try {
+      await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
+      passed++;
+      console.log(`  ok   ${file} applied with Supabase roles present`);
+    } catch (err) {
+      failures.push(`${file} grants`);
+      console.log(`  FAIL ${file} with roles present\n       ${err.message}`);
+    }
+  }
+
+  const granted = ['users', 'teams', 'team_members', 're_projects', 're_installment_schedule',
+    're_payments', 're_documents', 're_tasks', 're_ai_briefs'];
+
+  for (const t of granted) {
+    const [{ ok }] = await q(
+      `select has_table_privilege('service_role', $1, 'select')
+          and has_table_privilege('service_role', $1, 'insert')
+          and has_table_privilege('service_role', $1, 'update')
+          and has_table_privilege('service_role', $1, 'delete') as ok`, [`public.${t}`]);
+    check(`service_role can read and write ${t}`, ok);
+  }
+
+  const leaked = [];
+  for (const t of granted) {
+    for (const role of ['anon', 'authenticated']) {
+      const [{ any }] = await q(
+        `select has_table_privilege($2, $1, 'select')
+             or has_table_privilege($2, $1, 'insert') as any`, [`public.${t}`, role]);
+      if (any) leaked.push(`${role}→${t}`);
+    }
+  }
+  check('anon and authenticated hold no privileges on any table', leaked.length === 0, leaked.join(', '));
+
   // ── Tables exist ────────────────────────────────────────────────────────
   const tables = (await q(
     `select table_name from information_schema.tables where table_schema='public'`
