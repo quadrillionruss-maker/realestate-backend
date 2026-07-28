@@ -1,34 +1,127 @@
 -- ============================================================
 -- PHASE 1 SCHEMA — Real Estate Sales Ops (Nigeria MVP)
--- Additive to FlowDesk's existing Supabase project. Rebuilds
--- nothing: no auth, no orgs, no billing.
 --
--- TARGETED AT FLOWDESK AS IT ACTUALLY IS (verified against
--- database/schema.sql + migrations/009_teams.sql):
+-- SELF-CONTAINED. Paste this into the SQL editor of an empty
+-- Supabase project and everything the API needs exists. It
+-- depends on no pre-existing table — not even auth.users.
 --
---  * There is NO `organizations` table. Workspaces are `teams`,
---    membership is `team_members`, and a solo user has
---    `team_id = NULL`.
---  * `public.users` is the profile table (id = auth.users.id).
---  * The API authenticates with FlowDesk's OWN HS256 JWT, not a
---    Supabase Auth session, so `auth.uid()` is NULL for app
---    traffic. RLS below is therefore deny-by-default (see the
---    Row Level Security section for the full reasoning).
+-- Two sections:
+--   A. Identity  — users, teams, team_members
+--   B. Domain    — the re_* tables
+--
+-- Safe to re-run, and safe to run against a database that
+-- already has an identity schema: every CREATE is IF NOT EXISTS
+-- and every column add is ADD COLUMN IF NOT EXISTS, so existing
+-- tables are topped up rather than fought over.
 --
 -- organization_id — THE SCOPE KEY
--- Mirrors FlowDesk's existing src/utils/scopeOwner.js rule:
 --     organization_id = user.team_id ?? user.id
--- It therefore points at teams.id for team accounts and users.id
--- for solo accounts, which is why it carries NO foreign key. It
--- is denormalized onto every table on purpose: one-line org
--- filters and fast dashboard aggregates without 3-level joins.
--- The Express layer sets it explicitly on every insert
--- (src/middleware/orgContext.js) — never inferred by trigger.
---
--- Safe to re-run: every statement is idempotent.
+-- It points at teams.id for team accounts and users.id for solo
+-- accounts, which is why it carries NO foreign key. It is
+-- denormalized onto every table on purpose: one-line org filters
+-- and fast dashboard aggregates without 3-level joins. The API
+-- sets it explicitly on every insert (src/middleware/orgContext.js)
+-- — never inferred by trigger.
 -- ============================================================
 
-create extension if not exists pgcrypto;
+-- gen_random_uuid() is core Postgres from version 13, and nothing else here
+-- needs pgcrypto. The extension is attempted for older servers but its absence
+-- is not fatal — some managed platforms disallow CREATE EXTENSION entirely,
+-- and failing the whole schema over an unused dependency would be silly.
+do $$
+begin
+  create extension if not exists pgcrypto;
+exception when others then
+  raise notice 'pgcrypto unavailable; relying on built-in gen_random_uuid()';
+end $$;
+
+-- ============================================================
+-- SECTION A — IDENTITY
+--
+-- This service VERIFIES bearer tokens; it does not issue them.
+-- These tables therefore hold identity as the API needs to read
+-- it, not credentials: there is no password column, because
+-- nothing here logs anyone in.
+--
+-- users.id is a plain UUID with no foreign key. If you sign in
+-- with Supabase Auth, insert rows whose id matches the
+-- auth.users id so the `sub` in those tokens resolves here. If
+-- an external service owns login, use whatever id it puts in the
+-- token. Either works; neither is required.
+--
+-- If you later move identity somewhere else entirely, this whole
+-- section can be dropped — Section B references only users(id).
+-- ============================================================
+
+create table if not exists users (
+  id uuid primary key default gen_random_uuid(),
+  email text not null unique,
+  full_name text,
+  company_name text,
+  -- Letterhead for generated allocation letters (src/services/documentService.js)
+  brand_company_name text,
+  brand_logo_url text,
+  brand_address text,
+  brand_phone text,
+  brand_website text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Top up an identity table that already existed with the columns the
+-- letterhead builder selects. A missing column there is not a blank letter,
+-- it is a failed SELECT and a 500.
+alter table users add column if not exists full_name text;
+alter table users add column if not exists company_name text;
+alter table users add column if not exists brand_company_name text;
+alter table users add column if not exists brand_logo_url text;
+alter table users add column if not exists brand_address text;
+alter table users add column if not exists brand_phone text;
+alter table users add column if not exists brand_website text;
+alter table users add column if not exists updated_at timestamptz not null default now();
+
+create or replace function set_updated_at()
+returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists users_set_updated_at on users;
+create trigger users_set_updated_at
+  before update on users
+  for each row execute function set_updated_at();
+
+-- A workspace shared by several people. Solo accounts never create one —
+-- they are scoped by user id instead (see organization_id above).
+create table if not exists teams (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  owner_id uuid references users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+-- Read during authentication (src/middleware/auth.js) to decide whether a
+-- caller is scoped by team or as a solo account. `status` matters: only
+-- 'active' membership counts, so an invited-but-not-joined row grants nothing.
+create table if not exists team_members (
+  id uuid primary key default gen_random_uuid(),
+  team_id uuid not null references teams(id) on delete cascade,
+  user_id uuid references users(id) on delete cascade,
+  role text not null default 'member' check (role in ('owner','admin','member')),
+  status text not null default 'active' check (status in ('active','invited','removed')),
+  invited_email text,
+  joined_at timestamptz not null default now(),
+  unique (team_id, user_id)
+);
+
+create index if not exists idx_team_members_user on team_members(user_id);
+create index if not exists idx_team_members_team on team_members(team_id);
+
+-- ============================================================
+-- SECTION B — DOMAIN
+-- ============================================================
 
 -- ---------- Projects (a development, e.g. "Lekki Gardens Phase 2") ----------
 create table if not exists re_projects (
@@ -66,7 +159,7 @@ create table if not exists re_customers (
   created_at timestamptz not null default now()
 );
 
--- ---------- Sales reps (FlowDesk users tagged for this module) ----------
+-- ---------- Sales reps (platform users tagged for this product) ----------
 create table if not exists re_sales_reps (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null,
@@ -115,7 +208,7 @@ create table if not exists re_installment_schedule (
   unique (plan_id, installment_number)
 );
 
--- ---------- Actual payments (reuses FlowDesk's Paystack account) ----------
+-- ---------- Actual payments ----------
 create table if not exists re_payments (
   id uuid primary key default gen_random_uuid(),
   organization_id uuid not null,
@@ -199,21 +292,24 @@ create index if not exists idx_re_tasks_org_status on re_tasks(organization_id, 
 -- ============================================================
 -- Row Level Security — deny-by-default
 --
--- WHY NO POLICIES: FlowDesk issues its own HS256 JWT and every real
--- estate query runs server-side through the service-role client, which
--- bypasses RLS by design (that is why each query in src/ filters
--- organization_id explicitly). No browser ever talks to these tables
--- directly. Under those conditions "RLS enabled with zero policies" is
--- the strongest correct setting: the anon and authenticated keys can
--- read nothing at all, even if one leaks.
+-- WHY NO POLICIES: callers authenticate with an HS256 bearer token, not a
+-- Supabase Auth session, so auth.uid() is NULL for application traffic. Every
+-- query runs server-side through the service-role client, which bypasses RLS
+-- by design — that is why each query filters organization_id explicitly. No
+-- browser talks to these tables directly.
 --
--- A policy written against auth.uid() would be worse than useless here —
--- it would silently evaluate to NULL for FlowDesk's tokens and read as
--- protection that does not exist.
+-- Under those conditions "RLS enabled with zero policies" is the strongest
+-- correct setting: the anon and authenticated keys can read nothing at all,
+-- even if one leaks. A policy written against auth.uid() would be worse than
+-- useless — it would silently evaluate to NULL and read as protection that
+-- does not exist.
 --
--- IF you later expose these tables to a Supabase-Auth browser client,
--- uncomment the block at the bottom of this file and adapt it.
+-- IF you later expose these tables to a Supabase-Auth browser client, adapt
+-- the template at the bottom of this file.
 -- ============================================================
+alter table users enable row level security;
+alter table teams enable row level security;
+alter table team_members enable row level security;
 alter table re_projects enable row level security;
 alter table re_units enable row level security;
 alter table re_customers enable row level security;
@@ -225,8 +321,8 @@ alter table re_payments enable row level security;
 alter table re_documents enable row level security;
 alter table re_tasks enable row level security;
 
--- Drop the placeholder policies from earlier drafts of this file, which
--- referenced an org_members table that FlowDesk does not have.
+-- Remove placeholder policies from earlier drafts of this file, which
+-- referenced an org_members table that no longer exists.
 do $$
 declare t text;
 begin
@@ -238,11 +334,34 @@ begin
   end loop;
 end $$;
 
+-- ============================================================
+-- BOOTSTRAP — a fresh install has no users, and every endpoint
+-- requires a token belonging to one. Create yourself:
+--
+--   insert into users (email, full_name, company_name)
+--   values ('you@example.com', 'Your Name', 'Your Company')
+--   returning id;
+--
+-- Then mint a token for that id (see scripts/make-token.js):
+--
+--   npm run token -- <the returned uuid> you@example.com
+--
+-- That account is a solo workspace: organization_id = its user id.
+-- To make it a team workspace instead:
+--
+--   insert into teams (name, owner_id) values ('Your Company', '<user-id>')
+--   returning id;
+--   insert into team_members (team_id, user_id, role)
+--   values ('<team-id>', '<user-id>', 'owner');
+--
+-- Data created before joining a team stays scoped to the user id —
+-- see docs/DATABASE.md for the backfill.
+-- ============================================================
+
 -- ------------------------------------------------------------
 -- FUTURE: client-side access via Supabase Auth. Only meaningful
--- once users hold Supabase-issued JWTs. One policy per table,
--- following the same team-membership shape as FlowDesk's own
--- teams/team_members policies in migrations/009_teams.sql.
+-- once callers hold Supabase-issued JWTs, and only if users.id
+-- mirrors auth.users.id. One policy per table:
 --
 -- create policy "re_projects_member_access" on re_projects for all
 --   using (

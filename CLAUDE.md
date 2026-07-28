@@ -97,15 +97,48 @@ first document generation.
 
 ## Before first use
 
-Run `migrations/001_phase1_schema.sql` then `migrations/002_ai_briefs.sql` in
-the Supabase SQL editor. Both are idempotent.
+1. Run `migrations/001_phase1_schema.sql` then `migrations/002_ai_briefs.sql`
+   in the Supabase SQL editor. `001` is self-contained — it creates the
+   identity tables (`users`, `teams`, `team_members`) as well as the domain
+   ones, so an empty project is all it needs. Both are idempotent.
+
+2. Create yourself a user, because every endpoint requires a token belonging
+   to one:
+
+   ```sql
+   insert into users (email, full_name, company_name)
+   values ('you@example.com', 'Your Name', 'Your Company')
+   returning id;
+   ```
+
+3. Mint a token for that id:
+
+   ```bash
+   npm run token -- <the returned uuid> you@example.com
+   ```
+
+That account is a solo workspace (`organization_id` = its user id). The
+bootstrap block at the end of `001` shows how to make it a team workspace
+instead.
+
+`npm run token` exists because this service verifies tokens but does not issue
+them — it covers the gap while you are setting up or running the smoke test.
+Once a login service exists, it signs tokens with the same `JWT_SECRET` and
+this script becomes a debugging tool.
 
 ## Testing
 
 ```bash
-npm test                                          # 23 logic tests, offline
+npm test                # logic (23) + schema (37); no network, no database
+npm run test:schema     # migrations against a real in-process Postgres
 RE_SMOKE_TOKEN=<jwt> RE_SMOKE_API=<url> npm run smoke
 ```
+
+`test:schema` runs the migrations against PGlite — Postgres compiled to WASM,
+so constraints, triggers and RLS are real — applies them twice to prove
+idempotency, then asserts every column the application SELECTs by name exists,
+and that the database itself refuses a double allocation and a replayed
+Paystack reference.
 
 `npm test` covers what must not silently break: schedules summing to the exact
 plan total in kobo, month-end clamping (31 Jan → 28 Feb), timezone

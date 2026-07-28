@@ -19,7 +19,11 @@
 
 ## Operational — for you
 
-- [ ] Run `migrations/001` then `002` in the Supabase SQL editor
+- [ ] Run `migrations/001` then `002` in the Supabase SQL editor (`001` is
+      self-contained — it creates `users`, `teams` and `team_members` too, so
+      an empty project is all it needs)
+- [ ] Insert your first user and mint a token (`npm run token`) — every
+      endpoint requires one, and a fresh database has none
 - [ ] Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `JWT_SECRET` on the host
       (the service refuses to boot without them)
 - [ ] Set `ALLOWED_ORIGINS` to the frontend's origin — in production no

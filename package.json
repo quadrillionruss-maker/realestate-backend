@@ -7,8 +7,11 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node src/test/logic.test.js",
-    "smoke": "node src/test/smoke.js"
+    "test": "node src/test/logic.test.js && node src/test/schema.test.js",
+    "test:logic": "node src/test/logic.test.js",
+    "test:schema": "node src/test/schema.test.js",
+    "smoke": "node src/test/smoke.js",
+    "token": "node scripts/make-token.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
@@ -23,5 +26,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4"
   }
 }

@@ -1,7 +1,41 @@
 # Database Reference
 
-All tables prefixed `re_`, all carry `organization_id`. Additive to FlowDesk's
-existing schema — nothing existing is altered.
+`migrations/001_phase1_schema.sql` is **self-contained**: paste it into an
+empty Supabase project and everything the API needs exists. It depends on no
+pre-existing table, not even `auth.users`. It is also safe to run against a
+database that already has an identity schema — every CREATE is
+`IF NOT EXISTS` and every column add is `ADD COLUMN IF NOT EXISTS`, so
+existing tables are topped up rather than fought over.
+
+Run `001` then `002`. Both are idempotent; `npm run test:schema` applies them
+twice against a real Postgres to prove it.
+
+## Identity tables
+
+Created by Section A of `001`. This service **verifies** bearer tokens and
+never issues them, so these hold identity as the API reads it, not
+credentials — there is no password column, because nothing here logs anyone in.
+
+| Table | Purpose | Read by |
+|---|---|---|
+| `users` | The person a token refers to, plus letterhead branding | `documentService.resolveBranding()`; FK target for `re_sales_reps.user_id` and `re_tasks.assigned_to` |
+| `teams` | A shared workspace | `documentService.resolveBranding()` for the team branch |
+| `team_members` | Membership; only `status='active'` counts | `middleware/auth.js`, to decide team vs solo scope |
+
+`users.id` is a plain UUID with **no foreign key to `auth.users`**. If you sign
+in with Supabase Auth, insert rows whose `id` matches the `auth.users` id — the
+auth middleware accepts both the `sub` claim (what Supabase issues) and `id`.
+If an external service owns login, use whatever id it puts in the token.
+Neither is required, and the whole identity section can be dropped if you move
+identity elsewhere: Section B references only `users(id)`.
+
+A fresh install has no users, and every endpoint needs a token belonging to
+one. The bootstrap block at the end of `001` shows the insert; `npm run token`
+mints a matching token.
+
+## Domain tables
+
+All prefixed `re_`, all carrying `organization_id`.
 
 ## organization_id
 
@@ -13,9 +47,9 @@ explicitly on every insert (`src/middleware/orgContext.js`) — never inferred
 by trigger.
 
 Team membership is read from `team_members` during authentication. If that
-table does not exist, every caller is treated as a solo account and scoped by
-user id, so the service runs against a database holding only the `re_*`
-tables.
+table is absent, every caller is treated as a solo account and scoped by user
+id — so the service still runs against a database holding only the `re_*`
+tables, should you strip Section A out.
 
 One consequence worth knowing: if a solo user records data and *later* joins a
 team, their scope key changes and the earlier rows go quiet. Backfill with

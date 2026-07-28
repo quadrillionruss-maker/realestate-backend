@@ -16,8 +16,19 @@ cp .env.example .env       # SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, JWT_SECRET
 npm start                  # → http://localhost:4000  ·  health at /health
 ```
 
-Then run `migrations/001_phase1_schema.sql` and `migrations/002_ai_briefs.sql`
-in the Supabase SQL editor. Both are idempotent.
+Run `migrations/001_phase1_schema.sql` then `migrations/002_ai_briefs.sql` in
+the Supabase SQL editor. **`001` is self-contained** — it creates its own
+identity tables (`users`, `teams`, `team_members`) alongside the domain ones,
+so an empty project is all it needs. Both are idempotent.
+
+Then create a user and mint a token, since every endpoint requires one:
+
+```sql
+insert into users (email, full_name) values ('you@example.com','Your Name') returning id;
+```
+```bash
+npm run token -- <the returned uuid> you@example.com
+```
 
 **Entry point: `server.js`** at the repo root. There is no `src/app.js`.
 
@@ -34,9 +45,11 @@ in the Supabase SQL editor. Both are idempotent.
   letter generation
 - `src/middleware/` — HS256 bearer auth, org scoping, error handling
 - `src/jobs/daily.js` — 07:00 Africa/Lagos: mark overdue → brief each org
-- `src/test/` — `logic.test.js` (23 tests, offline) and `smoke.js` (live
-  8-step acceptance run)
-- `migrations/` — 2 idempotent SQL files with deny-by-default RLS
+- `src/test/` — `logic.test.js` (23 tests), `schema.test.js` (37 checks against
+  a real in-process Postgres) and `smoke.js` (live 8-step acceptance run)
+- `migrations/` — 2 idempotent SQL files: identity + domain tables, integrity
+  indexes, deny-by-default RLS
+- `scripts/make-token.js` — mint a bearer token for setup and smoke tests
 - `frontend/` — the Sales Operations screen
 - `render.yaml` — Render blueprint
 

@@ -36,7 +36,11 @@ async function authenticate(req, res, next) {
     return res.status(401).json({ success: false, error: 'Invalid token.' });
   }
 
-  if (!decoded.id) {
+  // `sub` is the standard JWT claim and what Supabase Auth issues; `id` is
+  // what hand-rolled auth services commonly use. Accept either so this API
+  // works with whichever one is put in front of it.
+  const userId = decoded.id || decoded.sub;
+  if (!userId) {
     return res.status(401).json({ success: false, error: 'Token is missing a subject.' });
   }
 
@@ -49,7 +53,7 @@ async function authenticate(req, res, next) {
     const { data: member, error } = await supabaseAdmin
       .from('team_members')
       .select('team_id, role')
-      .eq('user_id', decoded.id)
+      .eq('user_id', userId)
       .eq('status', 'active')
       .maybeSingle();
 
@@ -64,7 +68,7 @@ async function authenticate(req, res, next) {
   }
 
   req.user = {
-    id: decoded.id,
+    id: userId,
     email: decoded.email || null,
     team_id: teamId,
     role,
