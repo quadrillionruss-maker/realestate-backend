@@ -60,8 +60,13 @@ app.use(helmet({
 }));
 
 // ── CORS ───────────────────────────────────────────────────────────────────
-// Origins come from ALLOWED_ORIGINS. Never `origin: true` in production —
-// that accepts credentialed requests from any site on the internet.
+// Never `origin: true` in production — that accepts credentialed requests from
+// any site on the internet.
+//
+// Three sources, unioned:
+//   PRODUCTION_ORIGINS  the deployed frontend, baked in
+//   ALLOWED_ORIGINS     anything else, per environment
+//   DEV_ORIGINS         localhost, and only when NODE_ENV != production
 const DEV_ORIGINS = [
   'http://localhost:3000',
   'http://localhost:4000',
@@ -70,7 +75,21 @@ const DEV_ORIGINS = [
   'http://127.0.0.1:5500',
 ];
 
+// The canonical deployed frontend. In the file rather than only in
+// ALLOWED_ORIGINS so that a fresh deploy, or a service recreated from
+// render.yaml, serves a working app before anyone remembers to set the
+// variable — a forgotten env var here presents as every request failing CORS,
+// which reads like a broken API rather than a missing setting.
+//
+// Exact origins only, never a wildcard or a regex over *.vercel.app: Vercel
+// preview URLs are attacker-registerable in the general case, and `credentials:
+// true` below means an allowed origin can make authenticated requests.
+const PRODUCTION_ORIGINS = [
+  'https://realestate-frontend-pi.vercel.app',
+];
+
 const allowedOrigins = new Set([
+  ...PRODUCTION_ORIGINS,
   ...env.cors.allowedOrigins,
   ...(env.isDev ? DEV_ORIGINS : []),
 ]);
