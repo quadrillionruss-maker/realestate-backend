@@ -30,7 +30,7 @@ function check(name, cond, detail) {
 
   // ── Apply migrations, twice, to prove idempotency ───────────────────────
   for (const pass of ['first', 'second']) {
-    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql']) {
+    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -61,7 +61,7 @@ function check(name, cond, detail) {
     end $$;
   `);
 
-  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql']) {
+  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -73,7 +73,8 @@ function check(name, cond, detail) {
   }
 
   const granted = ['users', 'teams', 'team_members', 're_projects', 're_installment_schedule',
-    're_payments', 're_documents', 're_tasks', 're_ai_briefs'];
+    're_payments', 're_documents', 're_tasks', 're_ai_briefs',
+    're_org_settings', 're_commissions', 're_payment_promises', 're_audit_log', 're_notifications'];
 
   for (const t of granted) {
     const [{ ok }] = await q(
@@ -105,6 +106,7 @@ function check(name, cond, detail) {
     're_projects', 're_units', 're_customers', 're_sales_reps', 're_reservations',
     're_installment_plans', 're_installment_schedule', 're_payments', 're_documents',
     're_tasks', 're_ai_briefs',
+    're_org_settings', 're_commissions', 're_payment_promises', 're_audit_log', 're_notifications',
   ];
   for (const t of expected) {
     check(`table ${t} exists`, tables.includes(t), `have: ${tables.join(', ')}`);
@@ -138,12 +140,36 @@ function check(name, cond, detail) {
 
   const docCols = await colsOf('re_documents');
   check('re_documents has storage_path', docCols.includes('storage_path'), docCols.join(', '));
+  check('re_documents has payment_id (receipts)', docCols.includes('payment_id'), docCols.join(', '));
 
-  // ── The two integrity locks ─────────────────────────────────────────────
+  // src/services/authService.js — this service now issues tokens as well as
+  // verifying them, which means it stores a password verifier.
+  const authCols = ['password_hash', 'google_sub', 'reset_token_hash', 'reset_token_expires_at',
+    'last_login_at', 'avatar_url'];
+  check('users has every credential column authService reads',
+    authCols.every((c) => userCols.includes(c)),
+    `missing: ${authCols.filter((c) => !userCols.includes(c)).join(', ')}`);
+
+  const repCols = await colsOf('re_sales_reps');
+  check('re_sales_reps has commission_rate', repCols.includes('commission_rate'), repCols.join(', '));
+
+  const resCols = await colsOf('re_reservations');
+  check('re_reservations has escalation_stage', resCols.includes('escalation_stage'), resCols.join(', '));
+
+  const custCols = await colsOf('re_customers');
+  check('re_customers has portal_token_version (the revoke button)',
+    custCols.includes('portal_token_version'), custCols.join(', '));
+
+  const unitCols = await colsOf('re_units');
+  check('re_units has metadata (floor plans, photos)', unitCols.includes('metadata'), unitCols.join(', '));
+
+  // ── The integrity locks ─────────────────────────────────────────────────
   const indexes = (await q(`select indexname from pg_indexes where schemaname='public'`))
     .map((r) => r.indexname);
   check('double-allocation index exists', indexes.includes('uniq_re_active_reservation_per_unit'));
   check('paystack reference index exists', indexes.includes('uniq_re_payments_paystack_reference'));
+  check('one open promise per installment', indexes.includes('uniq_re_open_promise_per_schedule'));
+  check('one receipt per payment', indexes.includes('uniq_re_documents_receipt_per_payment'));
 
   // ── RLS enabled everywhere, with no policies ────────────────────────────
   const rlsOff = (await q(
@@ -264,6 +290,99 @@ function check(name, cond, detail) {
              values ($1,'2020-01-01','s','{}'::jsonb,'nonsense')`, [briefOrg]);
   } catch (err) { badGeneratedBy = /check/i.test(err.message); }
   check('generated_by is constrained to ai|fallback', badGeneratedBy);
+
+  // ── 003: the rules the operations layer depends on ──────────────────────
+
+  // Commission is idempotent on payment_id. This is what stops a replayed
+  // Paystack webhook, or a re-recorded transfer, paying a rep twice for the
+  // same money.
+  const [{ id: repId }] = await q(
+    `insert into re_sales_reps (organization_id, user_id, commission_rate)
+     values ($1,$2,2.5) returning id`, [userId, userId]);
+  const [{ id: liveReservation }] = await q(
+    `select id from re_reservations where unit_id=$1 and status='reserved' limit 1`, [unitId]);
+  const [{ id: paymentId }] = await q(
+    `select id from re_payments where schedule_id=$1 limit 1`, [schedId]);
+
+  await q(`insert into re_commissions (organization_id, sales_rep_id, reservation_id, payment_id, rate, base_amount, amount)
+           values ($1,$2,$3,$4,2.5,3750000,93750)`, [userId, repId, liveReservation, paymentId]);
+
+  let doubleAccrualBlocked = false;
+  try {
+    await q(`insert into re_commissions (organization_id, sales_rep_id, reservation_id, payment_id, rate, base_amount, amount)
+             values ($1,$2,$3,$4,2.5,3750000,93750)`, [userId, repId, liveReservation, paymentId]);
+  } catch (err) { doubleAccrualBlocked = /unique|duplicate/i.test(err.message); }
+  check('database refuses a second commission accrual for one payment', doubleAccrualBlocked);
+
+  let badRate = false;
+  try {
+    await q(`update re_sales_reps set commission_rate = 140 where id=$1`, [repId]);
+  } catch (err) { badRate = /check/i.test(err.message); }
+  check('commission_rate is constrained to 0–100', badRate);
+
+  // A second promise on the same installment supersedes the first rather than
+  // stacking — which is what "he keeps promising" means operationally.
+  await q(`insert into re_payment_promises (organization_id, schedule_id, promised_date)
+           values ($1,$2,'2026-03-15')`, [userId, schedId]);
+
+  let secondOpenPromiseBlocked = false;
+  try {
+    await q(`insert into re_payment_promises (organization_id, schedule_id, promised_date)
+             values ($1,$2,'2026-04-01')`, [userId, schedId]);
+  } catch (err) { secondOpenPromiseBlocked = /unique|duplicate/i.test(err.message); }
+  check('only one promise can be open against an installment', secondOpenPromiseBlocked);
+
+  // Resolving the first must free the slot, or a buyer could never make a
+  // second promise after breaking one.
+  await q(`update re_payment_promises set status='broken', resolved_at=now() where schedule_id=$1`, [schedId]);
+  let promiseAfterBroken = true;
+  try {
+    await q(`insert into re_payment_promises (organization_id, schedule_id, promised_date)
+             values ($1,$2,'2026-04-01')`, [userId, schedId]);
+  } catch (err) { promiseAfterBroken = false; console.log(`       ${err.message}`); }
+  check('a resolved promise frees the slot for the next one', promiseAfterBroken);
+
+  let badStage = false;
+  try {
+    await q(`update re_reservations set escalation_stage='nuclear' where id=$1`, [liveReservation]);
+  } catch (err) { badStage = /check/i.test(err.message); }
+  check('escalation_stage is constrained to the five known stages', badStage);
+
+  // The audit log must outlive the person who wrote it, or it destroys its own
+  // evidence the first time somebody leaves the company.
+  await q(`insert into re_audit_log (organization_id, actor_id, actor_email, action, entity_type, entity_id, summary)
+           values ($1,$2,'dev@example.com','payment.recorded','re_payments',$3,'₦3,750,000 received')`,
+    [userId, userId, paymentId]);
+  // actor_id deliberately carries NO foreign key: an audit row must survive
+  // the deletion of the user who made it, or the log erases its own evidence
+  // the first time somebody leaves the company.
+  const [{ fkCount }] = await q(
+    `select count(*)::int as "fkCount" from pg_constraint
+     where conrelid = 'public.re_audit_log'::regclass and contype = 'f'`);
+  check('re_audit_log has no foreign keys (rows outlive their actor)', fkCount === 0, `found ${fkCount}`);
+
+  const [{ auditCount }] = await q(
+    `select count(*)::int as "auditCount" from re_audit_log where entity_id=$1`, [paymentId]);
+  check('audit entries are queryable by entity', auditCount === 1, `found ${auditCount}`);
+
+  // One receipt per payment.
+  await q(`insert into re_documents (organization_id, reservation_id, payment_id, doc_type)
+           values ($1,$2,$3,'receipt')`, [userId, liveReservation, paymentId]);
+  let secondReceiptBlocked = false;
+  try {
+    await q(`insert into re_documents (organization_id, reservation_id, payment_id, doc_type)
+             values ($1,$2,$3,'receipt')`, [userId, liveReservation, paymentId]);
+  } catch (err) { secondReceiptBlocked = /unique|duplicate/i.test(err.message); }
+  check('database refuses a second receipt for one payment', secondReceiptBlocked);
+
+  // …but a payment may still have an allocation letter alongside its receipt,
+  // because the index is partial on doc_type.
+  let otherDocOk = true;
+  try {
+    await q(`insert into re_documents (organization_id, reservation_id, doc_type)
+             values ($1,$2,'allocation_letter')`, [userId, liveReservation]);
+  } catch (err) { otherDocOk = false; console.log(`       ${err.message}`); }
+  check('the receipt lock does not block other document types', otherDocOk);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

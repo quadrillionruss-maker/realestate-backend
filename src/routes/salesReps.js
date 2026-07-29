@@ -22,7 +22,7 @@ router.get('/', async (req, res, next) => {
 
 router.post('/', async (req, res, next) => {
   try {
-    const { user_id } = req.body || {};
+    const { user_id, commission_rate } = req.body || {};
     if (!user_id) return res.status(400).json({ error: 'user_id is required' });
 
     // Only real users can be reps — the FK would reject anything else anyway,
@@ -31,9 +31,25 @@ router.post('/', async (req, res, next) => {
       .from('users').select('id').eq('id', user_id).maybeSingle();
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    // Falls back to the workspace default, so a developer sets "our reps get
+    // 2.5%" once in Settings rather than on every rep they add.
+    let rate = commission_rate;
+    if (rate == null) {
+      const { data: settings } = await supabaseAdmin
+        .from('re_org_settings').select('default_commission_rate')
+        .eq('organization_id', req.orgId).maybeSingle();
+      rate = Number(settings?.default_commission_rate || 0);
+    }
+    if (!Number.isFinite(Number(rate)) || Number(rate) < 0 || Number(rate) > 100) {
+      return res.status(400).json({ error: 'commission_rate must be a percentage between 0 and 100' });
+    }
+
     const { data, error } = await supabaseAdmin
       .from('re_sales_reps')
-      .upsert({ organization_id: req.orgId, user_id, active: true }, { onConflict: 'organization_id,user_id' })
+      .upsert(
+        { organization_id: req.orgId, user_id, active: true, commission_rate: Number(rate) },
+        { onConflict: 'organization_id,user_id' }
+      )
       .select('*, users(id, full_name, email)')
       .single();
     if (error) throw error;
@@ -45,14 +61,35 @@ router.post('/', async (req, res, next) => {
 // what stays true after someone leaves.
 router.patch('/:id', async (req, res, next) => {
   try {
-    const { active } = req.body || {};
-    if (typeof active !== 'boolean') {
-      return res.status(400).json({ error: 'active must be true or false' });
+    const { active, commission_rate } = req.body || {};
+    const updates = {};
+
+    if (active !== undefined) {
+      if (typeof active !== 'boolean') {
+        return res.status(400).json({ error: 'active must be true or false' });
+      }
+      updates.active = active;
+    }
+
+    // Changing the rate affects FUTURE accruals only. Every commission row
+    // carries the rate that applied when it was earned (see
+    // commissionService), so raising a rep's percentage does not quietly
+    // rewrite what they were owed last quarter.
+    if (commission_rate !== undefined) {
+      const rate = Number(commission_rate);
+      if (!Number.isFinite(rate) || rate < 0 || rate > 100) {
+        return res.status(400).json({ error: 'commission_rate must be a percentage between 0 and 100' });
+      }
+      updates.commission_rate = rate;
+    }
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ error: 'No updatable fields provided' });
     }
 
     const { data, error } = await supabaseAdmin
       .from('re_sales_reps')
-      .update({ active })
+      .update(updates)
       .eq('id', req.params.id)
       .eq('organization_id', req.orgId)
       .select()

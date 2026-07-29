@@ -20,6 +20,11 @@ const { parseInstallmentReference, isRealEstateReference, buildReference } = req
 const { buildAllocationLetterHtml, describePaymentPlan } = require('../services/documentService');
 const { buildFallbackBrief } = require('../services/aiBrief');
 const { lagosToday } = require('../services/overdueService');
+const { buildReceiptHtml } = require('../services/receiptService');
+const { amountInWords } = require('../utils/amountInWords');
+const { parseCsvToObjects, parseAmount, parseDate } = require('../utils/csv');
+const { stageForOverdueCount, describeStage } = require('../services/escalationService');
+const { normalizeNigerianPhone } = require('../services/notificationService');
 
 let passed = 0;
 const failures = [];
@@ -141,7 +146,7 @@ test('round-trips a schedule id through a reference', () => {
 test('claims REINST references and leaves billing references alone', () => {
   assert.strictEqual(isRealEstateReference('REINST-9f8b7c6d-1234-4a5b-8c9d-0e1f2a3b4c5d-1750000000000'), true);
   assert.strictEqual(isRealEstateReference('T123456789'), false);
-  assert.strictEqual(isRealEstateReference('flowdesk_sub_abc123'), false);
+  assert.strictEqual(isRealEstateReference('sub_abc123'), false);
   assert.strictEqual(isRealEstateReference(undefined), false);
 });
 
@@ -277,6 +282,187 @@ test('uses the Lagos day, not the host timezone day', () => {
     utcDate.toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' }),
     '2026-07-27'
   );
+});
+
+// ── Promises and escalation ──────────────────────────────────────────────
+section('Escalation and promises');
+
+test('escalates by how many installments have been missed, not by feel', () => {
+  assert.strictEqual(stageForOverdueCount(0).key, 'none');
+  assert.strictEqual(stageForOverdueCount(1).key, 'reminder');
+  assert.strictEqual(stageForOverdueCount(2).key, 'reminder');
+  assert.strictEqual(stageForOverdueCount(3).key, 'formal_notice');
+  assert.strictEqual(stageForOverdueCount(5).key, 'final_notice');
+  assert.strictEqual(stageForOverdueCount(9).key, 'legal');
+});
+
+test('an unknown stage reads as "none" rather than throwing', () => {
+  assert.strictEqual(describeStage('nonsense').key, 'none');
+  assert.strictEqual(describeStage(null).key, 'none');
+});
+
+const promiseState = {
+  today: '2026-07-26',
+  overdue: [
+    { reservation_id: 'r1', customer_name: 'Mrs Adeyemi', project: 'Lekki Gardens', unit_number: 'B12', amount: 500_000, days_late: 12, escalation_stage: 'reminder' },
+    { reservation_id: 'r1', customer_name: 'Mrs Adeyemi', project: 'Lekki Gardens', unit_number: 'B12', amount: 500_000, days_late: 42, escalation_stage: 'reminder' },
+  ],
+  upcomingWeek: [],
+  pendingDocuments: [],
+  promises: [
+    { customer_name: 'Mrs Adeyemi', promised_date: '2026-07-15', promised_amount: 500_000, status: 'broken' },
+  ],
+};
+
+test('a broken promise raises severity and is named in the brief', () => {
+  const brief = buildFallbackBrief(promiseState);
+  const risk = brief.risks[0];
+  assert.strictEqual(risk.severity, 'high');
+  assert.match(risk.reason, /promised to pay by 2026-07-15 and did not/);
+  assert.match(brief.summary, /1 buyer has broken a promise to pay/);
+});
+
+test('the drafted message references the date the buyer chose, not the due date', () => {
+  const draft = buildFallbackBrief(promiseState).follow_ups[0];
+  assert.ok(draft.whatsapp_draft.includes('2026-07-15'));
+  assert.ok(!/pay immediately|debt/i.test(draft.whatsapp_draft), 'tone stays non-threatening');
+});
+
+test('a buyer at legal stage gets no drafted message at all', () => {
+  const legal = {
+    today: '2026-07-26',
+    overdue: Array.from({ length: 8 }, (_, i) => ({
+      reservation_id: 'r9', customer_name: 'Mr Silent', amount: 250_000,
+      days_late: 200 - i * 10, escalation_stage: 'legal',
+    })),
+    upcomingWeek: [], pendingDocuments: [], promises: [],
+  };
+  const brief = buildFallbackBrief(legal);
+  assert.strictEqual(brief.follow_ups.length, 0, 'nothing written to a buyer whose file is with a lawyer');
+  assert.match(brief.recommendations[0].title, /Refer Mr Silent to legal review/);
+});
+
+// ── Amounts in words ─────────────────────────────────────────────────────
+section('Amount in words (receipts)');
+
+test('writes Naira amounts the way a receipt must state them', () => {
+  assert.strictEqual(amountInWords(0), 'Zero Naira Only');
+  assert.strictEqual(amountInWords(1), 'One Naira Only');
+  assert.strictEqual(amountInWords(105), 'One Hundred and Five Naira Only');
+  assert.strictEqual(amountInWords(2_500_000), 'Two Million, Five Hundred Thousand Naira Only');
+  assert.strictEqual(amountInWords(45_000_000), 'Forty-Five Million Naira Only');
+});
+
+test('states kobo rather than dropping them', () => {
+  assert.strictEqual(amountInWords(1500.5), 'One Thousand, Five Hundred Naira and Fifty Kobo Only');
+});
+
+test('rounds in kobo, so floating point never reaches the paper', () => {
+  // 0.1 + 0.2 is 0.30000000000000004; the receipt must say thirty kobo.
+  assert.strictEqual(amountInWords(0.1 + 0.2), 'Zero Naira and Thirty Kobo Only');
+});
+
+// ── Receipt ──────────────────────────────────────────────────────────────
+section('Payment receipt');
+
+const receiptContext = {
+  payment: {
+    id: 'p1', amount: 3_750_000, method: 'bank_transfer',
+    paystack_reference: 'GTB/2026/0042', paid_at: '2026-07-20T09:00:00Z',
+  },
+  schedule: { id: 's1', installment_number: 3, due_date: '2026-07-01', amount_due: 3_750_000, status: 'paid' },
+  plan: { id: 'pl1', total_amount: 45_000_000, number_of_installments: 12 },
+  reservation: { id: 'r1' },
+  customer: { full_name: 'Mrs Adeyemi Okonkwo', email: 'a@example.com' },
+  unit: { unit_number: 'B12', unit_type: '3-bed terrace' },
+  project: { name: 'Lekki Gardens Phase 2', location: 'Ajah, Lagos' },
+  totalPaid: 11_250_000,
+  balance: 33_750_000,
+};
+
+test('renders the buyer, the amount, the words and the balance', () => {
+  const html = buildReceiptHtml(receiptContext, { company_name: 'Adron Homes' }, 'RCPT-ABC12345');
+  assert.ok(html.includes('Mrs Adeyemi Okonkwo'));
+  assert.ok(html.includes('₦3,750,000'));
+  assert.ok(html.includes('Three Million, Seven Hundred and Fifty Thousand Naira Only'));
+  assert.ok(html.includes('₦33,750,000'), 'the balance is what stops the follow-up phone call');
+  assert.ok(html.includes('RCPT-ABC12345'));
+  assert.ok(html.includes('Adron Homes'));
+  assert.ok(!html.includes('{{'), 'every placeholder should be substituted');
+});
+
+test('escapes a hostile bank reference instead of injecting it as markup', () => {
+  const hostile = JSON.parse(JSON.stringify(receiptContext));
+  hostile.payment.paystack_reference = '<img src=x onerror=alert(1)>';
+  const html = buildReceiptHtml(hostile, {}, 'RCPT-1');
+  assert.ok(!html.includes('<img src=x'));
+  assert.ok(html.includes('&lt;img'));
+});
+
+test('omits the reference row rather than printing an empty one', () => {
+  const noRef = JSON.parse(JSON.stringify(receiptContext));
+  noRef.payment.paystack_reference = null;
+  assert.ok(!buildReceiptHtml(noRef, {}, 'RCPT-1').includes('<td>Reference</td>'));
+});
+
+test('ignores a non-https logo url', () => {
+  const html = buildReceiptHtml(receiptContext, { logo_url: 'file:///etc/passwd' }, 'RCPT-1');
+  assert.ok(!html.includes('etc/passwd'));
+});
+
+// ── CSV import ───────────────────────────────────────────────────────────
+section('CSV import');
+
+test('keeps a quoted comma inside one field', () => {
+  const { records } = parseCsvToObjects('full_name,phone\n"Okonkwo, Adeyemi",08031234567');
+  assert.strictEqual(records[0].full_name, 'Okonkwo, Adeyemi');
+  assert.strictEqual(records[0].phone, '08031234567');
+});
+
+test('handles escaped quotes and embedded newlines', () => {
+  const { records } = parseCsvToObjects('name,note\n"Bello","He said ""Friday""\nthen went quiet"');
+  assert.strictEqual(records[0].note, 'He said "Friday"\nthen went quiet');
+});
+
+test('strips the BOM Excel writes, so the first column still matches', () => {
+  const { headers } = parseCsvToObjects('﻿full_name,phone\nA,1');
+  assert.strictEqual(headers[0], 'full_name');
+});
+
+test('normalizes header capitalization and spacing', () => {
+  const { records } = parseCsvToObjects('Full Name,Unit Number\nAda,B12');
+  assert.strictEqual(records[0].full_name, 'Ada');
+  assert.strictEqual(records[0].unit_number, 'B12');
+});
+
+test('reports the spreadsheet row number, not the array index', () => {
+  const { records } = parseCsvToObjects('name\nA\nB');
+  assert.strictEqual(records[0].__row, 2, 'the header is row 1');
+  assert.strictEqual(records[1].__row, 3);
+});
+
+test('reads amounts as developers actually paste them', () => {
+  assert.strictEqual(parseAmount('₦45,000,000'), 45_000_000);
+  assert.strictEqual(parseAmount('45000000.50'), 45_000_000.5);
+  assert.strictEqual(parseAmount(''), null);
+  assert.strictEqual(parseAmount('not a number'), null);
+});
+
+test('reads dates day-first, which is the local convention', () => {
+  assert.strictEqual(parseDate('2026-03-01'), '2026-03-01');
+  assert.strictEqual(parseDate('01/03/2026'), '2026-03-01');
+  assert.strictEqual(parseDate(''), null);
+});
+
+// ── Phone numbers ────────────────────────────────────────────────────────
+section('Nigerian phone numbers');
+
+test('normalizes every form a buyer list contains', () => {
+  assert.strictEqual(normalizeNigerianPhone('08031234567'), '2348031234567');
+  assert.strictEqual(normalizeNigerianPhone('+234 803 123 4567'), '2348031234567');
+  assert.strictEqual(normalizeNigerianPhone('234-803-123-4567'), '2348031234567');
+  assert.strictEqual(normalizeNigerianPhone('8031234567'), '2348031234567');
+  assert.strictEqual(normalizeNigerianPhone(''), null);
 });
 
 // ── Report ───────────────────────────────────────────────────────────────

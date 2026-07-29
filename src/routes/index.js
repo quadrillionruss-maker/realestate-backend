@@ -26,5 +26,12 @@ router.use('/documents', require('./documents'));
 router.use('/tasks', require('./tasks'));
 router.use('/dashboard', require('./dashboard'));
 router.use('/brief', require('./brief'));
+router.use('/promises', require('./promises'));
+router.use('/commissions', require('./commissions'));
+router.use('/search', require('./search'));
+router.use('/imports', require('./imports'));
+router.use('/reports', require('./reports'));
+router.use('/audit', require('./audit'));
+router.use('/settings', require('./settings'));
 
 module.exports = router;

@@ -1,6 +1,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { generateDocument, getDownloadUrl } = require('../services/documentService');
+const { audit } = require('../services/auditService');
 const router = express.Router();
 
 const DOC_TYPES = ['allocation_letter', 'deed_of_assignment', 'receipt', 'other'];
@@ -15,6 +16,7 @@ router.get('/', async (req, res, next) => {
       .order('created_at', { ascending: false });
 
     if (req.query.status) query = query.eq('status', req.query.status);
+    if (req.query.doc_type) query = query.eq('doc_type', req.query.doc_type);
     if (req.query.reservation_id) query = query.eq('reservation_id', req.query.reservation_id);
 
     const { data, error } = await query;
@@ -57,9 +59,17 @@ router.post('/:id/generate', async (req, res, next) => {
     if (result.notFound) return res.status(404).json({ error: 'Document not found' });
     if (result.unsupported) {
       return res.status(400).json({
-        error: `No template for "${result.docType}" yet. v1 generates allocation letters only.`,
+        error: `No template for "${result.docType}" yet. Allocation letters and receipts are the two that render.`,
       });
     }
+
+    audit(req, {
+      action: 'document.generated',
+      entityType: 're_documents',
+      entityId: req.params.id,
+      summary: `${result.document.doc_type.replace(/_/g, ' ')} generated`,
+      metadata: { reservation_id: result.document.reservation_id, doc_type: result.document.doc_type },
+    });
 
     res.json({ ...result.document, download_url: result.download_url });
   } catch (e) { next(e); }

@@ -12,6 +12,8 @@
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { lagosToday } = require('./overdueService');
+const { openAndBrokenForBrief } = require('./promiseService');
+const { describeStage } = require('./escalationService');
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 
@@ -94,13 +96,13 @@ async function gatherOrgState(orgId) {
     re_installment_plans!inner(
       id, reservation_id,
       re_reservations!inner(
-        id,
+        id, escalation_stage,
         re_customers(id, full_name, phone, email),
         re_units(unit_number, re_projects(name))
       )
     )`;
 
-  const [overdue, upcoming, documents] = await Promise.all([
+  const [overdue, upcoming, documents, promises] = await Promise.all([
     supabaseAdmin
       .from('re_installment_schedule')
       .select(scheduleSelect)
@@ -120,6 +122,13 @@ async function gatherOrgState(orgId) {
       .select('id, doc_type, status, reservation_id, re_reservations(re_customers(full_name), re_units(unit_number))')
       .eq('organization_id', orgId)
       .eq('status', 'pending'),
+    // What buyers said they would do. "Promised the 15th, still nothing" is a
+    // sharper line than "overdue since the 1st", because the buyer chose the
+    // date themselves and the model can say so.
+    openAndBrokenForBrief(orgId).catch((err) => {
+      console.warn('[re-brief] could not read promises:', err.message);
+      return [];
+    }),
   ]);
 
   // Flatten the join shape into something compact enough to put in a prompt
@@ -139,6 +148,10 @@ async function gatherOrgState(orgId) {
       due_date: row.due_date,
       amount: Number(row.amount_due),
       days_late: row.status === 'overdue' ? daysBetween(row.due_date, today) : 0,
+      // The tone this buyer should be written to. One missed installment and
+      // five are the same word ("overdue") without it, and the model happily
+      // writes the same warm nudge to both.
+      escalation_stage: reservation.escalation_stage || 'none',
     };
   });
 
@@ -146,6 +159,7 @@ async function gatherOrgState(orgId) {
     today,
     overdue: flatten(overdue.data),
     upcomingWeek: flatten(upcoming.data),
+    promises: promises || [],
     pendingDocuments: (documents.data || []).map((d) => ({
       id: d.id,
       doc_type: d.doc_type,
@@ -162,6 +176,17 @@ async function gatherOrgState(orgId) {
 // numbers and a usable draft either way — the AI improves the wording, it
 // isn't load-bearing for the operational facts.
 function buildFallbackBrief(state) {
+  // Promises are keyed by buyer name, which is what the overdue rows carry.
+  // Absent entirely on older callers (and in the offline fixtures), hence the
+  // default — this function has to keep working on a state object that
+  // predates the feature.
+  const promiseByCustomer = new Map();
+  for (const promise of state.promises || []) {
+    const existing = promiseByCustomer.get(promise.customer_name);
+    // A broken promise is the more useful of the two to surface.
+    if (!existing || promise.status === 'broken') promiseByCustomer.set(promise.customer_name, promise);
+  }
+
   const byCustomer = new Map();
   for (const row of state.overdue) {
     const key = row.customer_name;
@@ -173,14 +198,26 @@ function buildFallbackBrief(state) {
       count: 0,
       amount: 0,
       max_days_late: 0,
+      escalation_stage: row.escalation_stage || null,
     };
     entry.count += 1;
     entry.amount += row.amount;
     entry.max_days_late = Math.max(entry.max_days_late, row.days_late);
+    if (row.escalation_stage && row.escalation_stage !== 'none') entry.escalation_stage = row.escalation_stage;
     byCustomer.set(key, entry);
   }
 
-  const behind = [...byCustomer.values()].sort((a, b) => b.amount - a.amount);
+  // Attach the promise and settle each buyer's stage. Where the reservation
+  // has no stage recorded yet (an import, or a sweep that has not run), it is
+  // derived from the missed-installment count using the same thresholds, so
+  // the wording is never harsher than the data justifies.
+  const behind = [...byCustomer.values()].map((c) => ({
+    ...c,
+    promise: promiseByCustomer.get(c.customer_name) || null,
+    stage: describeStage(c.escalation_stage || stageKeyForCount(c.count)),
+  })).sort((a, b) => b.amount - a.amount);
+
+  const brokenPromises = behind.filter((c) => c.promise?.status === 'broken');
   const overdueTotal = state.overdue.reduce((sum, r) => sum + r.amount, 0);
   const upcomingTotal = state.upcomingWeek.reduce((sum, r) => sum + r.amount, 0);
 
@@ -195,42 +232,107 @@ function buildFallbackBrief(state) {
   if (state.upcomingWeek.length) {
     sentences.push(`${state.upcomingWeek.length} payment${state.upcomingWeek.length > 1 ? 's' : ''} totalling ${naira(upcomingTotal)} fall${state.upcomingWeek.length > 1 ? '' : 's'} due in the next 7 days.`);
   }
+  if (brokenPromises.length) {
+    sentences.push(`${brokenPromises.length} buyer${brokenPromises.length > 1 ? 's have' : ' has'} broken a promise to pay.`);
+  }
   if (state.pendingDocuments.length) {
     sentences.push(`${state.pendingDocuments.length} document${state.pendingDocuments.length > 1 ? 's are' : ' is'} still waiting to be issued.`);
   }
   if (behind.length) {
-    sentences.push(`Start with ${behind[0].customer_name} — ${naira(behind[0].amount)}, ${behind[0].max_days_late} day${behind[0].max_days_late === 1 ? '' : 's'} late.`);
+    // A broken promise jumps the queue over a bigger number: the buyer named
+    // the date themselves, so it is the call most likely to go somewhere.
+    const first = brokenPromises[0] || behind[0];
+    sentences.push(`Start with ${first.customer_name} — ${naira(first.amount)}, ${first.max_days_late} day${first.max_days_late === 1 ? '' : 's'} late.`);
   }
 
   return {
     summary: sentences.join(' '),
     risks: behind.map((c) => ({
       customer_name: c.customer_name,
-      reason: `${c.count} missed installment${c.count > 1 ? 's' : ''} totalling ${naira(c.amount)}, oldest ${c.max_days_late} day${c.max_days_late === 1 ? '' : 's'} late`,
-      severity: c.count >= 3 || c.max_days_late > 60 ? 'high' : c.count >= 2 || c.max_days_late > 30 ? 'medium' : 'low',
+      reason: `${c.count} missed installment${c.count > 1 ? 's' : ''} totalling ${naira(c.amount)}, oldest ${c.max_days_late} day${c.max_days_late === 1 ? '' : 's'} late`
+        + (c.promise?.status === 'broken' ? `; promised to pay by ${c.promise.promised_date} and did not` : '')
+        + (c.promise?.status === 'open' ? `; promised to pay by ${c.promise.promised_date}` : ''),
+      severity: severityFor(c),
     })),
-    follow_ups: behind.slice(0, 10).map((c) => ({
+    // Nobody at legal stage gets a drafted message. Anything written to a
+    // buyer whose file is with a lawyer can be read back in court, and that
+    // is not a sentence an automated draft should be composing.
+    follow_ups: behind.filter((c) => c.stage.key !== 'legal').slice(0, 10).map((c) => ({
       customer_name: c.customer_name,
       reservation_id: c.reservation_id,
-      whatsapp_draft:
-        `Good morning ${c.customer_name}, this is a gentle reminder from the sales team regarding ` +
-        `${c.unit_number ? `Unit ${c.unit_number}` : 'your unit'}${c.project ? ` at ${c.project}` : ''}. ` +
-        `We have ${naira(c.amount)} outstanding on your payment plan. ` +
-        `Kindly let us know when we should expect it, or reply here if you would like to discuss the schedule. Thank you.`,
-      email_subject: `Outstanding installment — ${c.unit_number ? `Unit ${c.unit_number}` : 'your allocation'}`,
-      email_draft:
-        `Dear ${c.customer_name},\n\n` +
-        `We hope this message finds you well. Our records show ${naira(c.amount)} outstanding across ` +
-        `${c.count} installment${c.count > 1 ? 's' : ''} on ${c.unit_number ? `Unit ${c.unit_number}` : 'your unit'}` +
-        `${c.project ? ` at ${c.project}` : ''}.\n\n` +
-        `Please let us know when we can expect payment, or contact us if you would like to review the schedule.\n\n` +
-        `Kind regards,\nSales Team`,
+      whatsapp_draft: draftFor(c),
+      email_subject: c.stage.key === 'reminder'
+        ? `Outstanding installment — ${c.unit_number ? `Unit ${c.unit_number}` : 'your allocation'}`
+        : `Arrears notice — ${c.unit_number ? `Unit ${c.unit_number}` : 'your allocation'}`,
+      email_draft: emailFor(c),
     })),
     recommendations: behind.slice(0, 5).map((c) => ({
-      title: `Call ${c.customer_name} about ${c.count} missed installment${c.count > 1 ? 's' : ''} (${naira(c.amount)})`,
+      title: c.stage.key === 'legal'
+        ? `Refer ${c.customer_name} to legal review — ${c.count} missed installments (${naira(c.amount)})`
+        : c.promise?.status === 'broken'
+          ? `Call ${c.customer_name} — broke a promise to pay by ${c.promise.promised_date} (${naira(c.amount)})`
+          : `Call ${c.customer_name} about ${c.count} missed installment${c.count > 1 ? 's' : ''} (${naira(c.amount)})`,
       reservation_id: c.reservation_id,
     })),
   };
+}
+
+// Same thresholds as escalationService, applied to a buyer whose reservation
+// has no stage recorded yet.
+const stageKeyForCount = (count) =>
+  count >= 7 ? 'legal' : count >= 5 ? 'final_notice' : count >= 3 ? 'formal_notice' : count >= 1 ? 'reminder' : 'none';
+
+function severityFor(c) {
+  // A broken promise is worse than the same arrears without one: the buyer
+  // was asked, gave a date, and let it pass.
+  if (c.promise?.status === 'broken') return 'high';
+  if (c.count >= 3 || c.max_days_late > 60) return 'high';
+  if (c.count >= 2 || c.max_days_late > 30) return 'medium';
+  return 'low';
+}
+
+const where = (c) =>
+  `${c.unit_number ? `Unit ${c.unit_number}` : 'your unit'}${c.project ? ` at ${c.project}` : ''}`;
+
+function draftFor(c) {
+  if (c.promise?.status === 'broken') {
+    return `Good morning ${c.customer_name}. We spoke about ${where(c)} and understood payment would come through by `
+      + `${c.promise.promised_date}. We have not seen it yet — is there anything holding it up? `
+      + `${naira(c.amount)} is currently outstanding. Do let us know a date that works and we will note it. Thank you.`;
+  }
+
+  if (c.stage.key === 'final_notice') {
+    return `Dear ${c.customer_name}, our records show ${naira(c.amount)} outstanding across ${c.count} installments on `
+      + `${where(c)}. Under the terms of your Contract of Sale, continued arrears place this allocation at risk. `
+      + `Please contact us before the end of this week to settle the balance or agree a revised schedule.`;
+  }
+
+  if (c.stage.key === 'formal_notice') {
+    return `Dear ${c.customer_name}, this is a formal reminder that ${naira(c.amount)} is outstanding across `
+      + `${c.count} installments on ${where(c)}, as scheduled in your Contract of Sale. `
+      + `Kindly confirm a specific date on which we should expect payment, or contact us to discuss the schedule.`;
+  }
+
+  return `Good morning ${c.customer_name}, this is a gentle reminder from the sales team regarding ${where(c)}. `
+    + `We have ${naira(c.amount)} outstanding on your payment plan. `
+    + `Kindly let us know when we should expect it, or reply here if you would like to discuss the schedule. Thank you.`;
+}
+
+function emailFor(c) {
+  const opening = c.stage.key === 'reminder'
+    ? 'We hope this message finds you well. Our records show'
+    : 'Our records show';
+
+  const body = `Dear ${c.customer_name},\n\n`
+    + `${opening} ${naira(c.amount)} outstanding across ${c.count} installment${c.count > 1 ? 's' : ''} on ${where(c)}.\n\n`
+    + (c.promise?.status === 'broken'
+      ? `We understood from our last conversation that payment would be made by ${c.promise.promised_date}.\n\n`
+      : '')
+    + (c.stage.key === 'final_notice'
+      ? 'Under the terms of your Contract of Sale, continued arrears place this allocation at risk. Please settle the balance or contact us to agree a revised schedule before the end of this week.\n\n'
+      : 'Please let us know when we can expect payment, or contact us if you would like to review the schedule.\n\n');
+
+  return `${body}Kind regards,\nSales Team`;
 }
 
 // ── Model call ─────────────────────────────────────────────────────────────
@@ -251,10 +353,22 @@ async function requestBriefFromModel(state) {
           content:
             'You are the Sales Operations Manager for a Nigerian real estate developer. ' +
             'You write a concise morning brief for the MD/CEO. Currency is Naira (₦). ' +
-            'WhatsApp drafts must be warm but professional, under 80 words, and never threatening — ' +
-            'these are valued installment customers, not debtors. ' +
             'Only reference customers present in the data, never invent names, amounts or dates. ' +
-            'Use reservation_id values exactly as given.',
+            'Use reservation_id values exactly as given.\n\n' +
+            // Without this the model writes one tone for everybody: the same
+            // warm nudge to a buyer one week late and to one eight months in
+            // arrears. Both are wrong, and expensively so.
+            'MATCH THE TONE TO escalation_stage on each overdue row:\n' +
+            '- reminder: warm and brief, under 80 words. Assume they forgot. No consequences mentioned.\n' +
+            '- formal_notice: polite but formal. Reference the Contract of Sale and the arrears total. Ask for a specific date.\n' +
+            '- final_notice: formal and direct. State that the allocation is at risk under the contract. Request settlement or a revised plan by a stated date.\n' +
+            '- legal: do NOT write a follow_up for this buyer at all. Add a recommendation to refer the file to the legal team.\n\n' +
+            'These are valued installment customers, not debtors — never threaten, never use the word "debt", ' +
+            'and never state a consequence the contract does not provide for.\n\n' +
+            'The `promises` array is what buyers themselves said they would do. A buyer with a status:"broken" ' +
+            'promise should be high severity and appear first: they named the date, not us. Reference it directly ' +
+            '("we understood payment would come through by the 15th"), and never repeat a due date they have ' +
+            'already acknowledged as though they had not.',
         },
         {
           role: 'user',

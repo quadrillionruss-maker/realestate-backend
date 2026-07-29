@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <!-- A personal link. Keep it out of search results and out of the referrer
+       header when the buyer clicks through to Paystack. -->
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Your payment account</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600&family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./realestate.css">
+
+  <script src="./config.js"></script>
+</head>
+
+<!-- ══ THE BUYER'S OWN VIEW ═══════════════════════════════════════════════
+     Three questions, answered without a phone call:
+       how much have I paid so far?
+       when is my next installment?
+       can I get a copy of my allocation letter?
+
+     Deliberately not the operator app. Same typography and palette so it is
+     recognisably the same company, but one column, larger type, no sidebar
+     and no navigation — a buyer opens this twice a year on a phone.
+
+     The access token arrives in the URL FRAGMENT, not the query string: a
+     fragment is never sent to a server, so the link cannot leak through
+     access logs or a referrer header. -->
+<body style="background:var(--ink)">
+
+<div style="max-width:640px;margin:0 auto;padding:26px 18px 70px">
+
+  <header style="display:flex;align-items:center;gap:10px;padding-bottom:18px;border-bottom:1px solid var(--line);margin-bottom:26px">
+    <span style="width:24px;height:24px;display:grid;place-items:center;border:1px solid var(--line-gold);border-radius:5px;color:var(--gold);font-size:11px">◆</span>
+    <span class="serif" style="font-size:16px;letter-spacing:.03em" id="developer-name">Your account</span>
+  </header>
+
+  <div id="portal-view">
+    <div class="skeleton" style="width:60%;height:26px"></div>
+    <div class="skeleton" style="width:85%"></div>
+    <div class="skeleton" style="width:70%"></div>
+  </div>
+
+  <footer style="margin-top:44px;padding-top:18px;border-top:1px solid var(--line);font-size:11.5px;color:var(--text-faint)" id="portal-foot"></footer>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<div id="overlay"></div>
+
+<script src="./portal.js"></script>
+</body>
+</html>

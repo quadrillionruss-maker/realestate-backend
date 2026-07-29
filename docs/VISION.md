@@ -21,7 +21,7 @@ on top of solid installment/allocation rails.
 
 ## Why we win
 1. **Reused infrastructure** — payments (Paystack), PDF generation, auth,
-   email already exist and are battle-tested in FlowDesk.
+   email are proven, reused infrastructure rather than new surface area.
 2. **AI-native, not AI-bolted-on** — the daily brief job is the embryonic
    Deal Manager; every future agent reports into the same brain.
 3. **Founder proximity** — we can sit in a Lagos/Abuja sales office and

@@ -10,13 +10,18 @@
 // `node --check` parses without executing, so it costs milliseconds and needs
 // no environment. It catches only syntax, not behaviour, which is exactly the
 // class of error that otherwise waits until someone runs the script by hand.
+//
+// frontend/ IS included. It is plain browser script — no modules, no JSX, no
+// build step — so `node --check` parses it exactly as a browser would, and
+// those files have no test of their own. A typo there is a blank page rather
+// than a stack trace, which makes it the code most worth parsing cheaply.
 
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '../..');
-const SKIP = new Set(['node_modules', '.git', 'frontend']);
+const SKIP = new Set(['node_modules', '.git']);
 
 function collect(dir) {
   const found = [];

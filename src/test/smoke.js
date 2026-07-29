@@ -19,7 +19,11 @@
 //
 // Verifies, in order: project → units → customers → reservation with a
 // 12-month plan → double-allocation is refused → payment settles an
-// installment → overdue marking feeds the brief → dashboard reflects it all.
+// installment → overdue marking feeds the brief → dashboard reflects it all →
+// receipt, promise-to-pay, search, buyer portal, investor report, audit log.
+//
+// The portal step also asserts the boundary in the direction that matters:
+// a buyer's portal token must be REFUSED by the staff API.
 
 const DEFAULT_API = 'http://localhost:4000/api';
 
@@ -179,9 +183,82 @@ async function run() {
   const atRisk = await call('GET', '/dashboard/at-risk');
   check('at-risk endpoint responds', atRisk.status === 200 && Array.isArray(atRisk.body), atRisk.body);
 
+  // 9 ── the operations layer. Everything below was added after the original
+  // eight steps and is exercised here because none of it can be proved
+  // offline: it all crosses the database, and two of the four cross Puppeteer
+  // or a payment provider.
+
+  // The payment above should have produced a receipt and, if a rep was
+  // assigned, a commission accrual. `effects` is what the record endpoint
+  // reports back — a receipt that failed to render is stated, not hidden.
+  const effects = payment.body?.effects || {};
+  console.log(`     effects: receipt=${effects.receipt} · email=${effects.buyer_email} · commission=${effects.commission}`);
+  check('the payment reported what it triggered', typeof effects.receipt === 'string', effects);
+
+  const receipt = await call('GET', `/payments/${payment.body.id}/receipt`);
+  // 404 is a legitimate outcome on a runtime without Chromium — the payment is
+  // still recorded, which is the property that matters. Anything else is not.
+  check('receipt is downloadable, or absent for a stated reason',
+    (receipt.status === 200 && receipt.body.download_url) || receipt.status === 404,
+    receipt.body);
+  if (receipt.status === 404) console.log('     (no receipt — Puppeteer unavailable or RE_AUTO_RECEIPTS=false)');
+
+  // Promise to pay: log one against installment 2, then read it back.
+  const secondInstallment = schedule[1];
+  const promised = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+  const promise = await call('POST', '/promises', {
+    schedule_id: secondInstallment.id,
+    promised_date: promised,
+    promised_amount: 3_750_000,
+    spoke_to: 'the buyer',
+  });
+  check('log a promise to pay', promise.status === 201 && promise.body.id, promise.body);
+
+  const openPromises = await call('GET', '/promises?status=open');
+  check('the promise reads back as open',
+    openPromises.status === 200 && openPromises.body.some((p) => p.id === promise.body.id),
+    openPromises.body);
+
+  // Search is the feature that decides whether the product survives past
+  // forty buyers, so it gets asserted rather than assumed.
+  const found = await call('GET', `/search?q=${encodeURIComponent(`Test Buyer A ${stamp}`.slice(0, 20))}`);
+  check('search finds the buyer by name',
+    found.status === 200 && found.body.customers.some((c) => c.id === created.customerA),
+    found.body);
+
+  // A portal link, and proof it does not double as a staff token.
+  const portalLink = await call('POST', `/customers/${created.customerA}/portal-link`, { send_email: false });
+  check('issue a buyer portal link', portalLink.status === 200 && portalLink.body.url, portalLink.body);
+
+  const portalMe = await fetch(`${API}/portal/me`, {
+    headers: { Authorization: `Bearer ${portalLink.body.token}` },
+  });
+  const portalBody = await portalMe.json().catch(() => ({}));
+  check('the buyer can read their own account',
+    portalMe.status === 200 && portalBody.customer?.id === created.customerA,
+    portalBody);
+
+  const portalAsStaff = await fetch(`${API}/re/dashboard`, {
+    headers: { Authorization: `Bearer ${portalLink.body.token}` },
+  });
+  check('a portal token is REFUSED by the staff API', portalAsStaff.status === 401,
+    { status: portalAsStaff.status });
+
+  const investor = await call('GET', `/reports/investor?project_id=${created.projectId}`);
+  check('investor report totals the project',
+    investor.status === 200 && investor.body.projects.length === 1 &&
+    investor.body.totals.units_total >= 5,
+    investor.body.totals);
+
+  const audit = await call('GET', '/audit?limit=20');
+  check('the run is on the audit log',
+    audit.status === 200 && audit.body.some((row) => row.action === 'payment.recorded'),
+    audit.body?.slice(0, 3));
+
   console.log(`\nAll checks passed. Test data is left in place for inspection:`);
-  console.log(`  project    ${created.projectId}  ("Test Estate ${stamp}")`);
-  console.log(`  reservation ${created.reservationId}\n`);
+  console.log(`  project     ${created.projectId}  ("Test Estate ${stamp}")`);
+  console.log(`  reservation ${created.reservationId}`);
+  console.log(`  portal      ${portalLink.body.url}\n`);
   console.log('To exercise overdue handling, set an installment due_date to a past');
   console.log('date in the SQL editor, run markOverdue(), then regenerate the brief.\n');
 }

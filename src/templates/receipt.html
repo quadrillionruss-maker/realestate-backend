@@ -1,0 +1,88 @@
+<!-- Payment receipt — rendered by src/services/receiptService.js and printed
+     by src/services/pdfAdapter.js (Puppeteer).
+
+     Same conventions as allocation_letter.html: uppercase tokens in double
+     braces, substituted by plain string replacement, no conditional syntax.
+     Anything optional is assembled in the service as a pre-built _BLOCK token
+     so this file stays a document rather than a program.
+
+     Every interpolated value is escaped in the service. A buyer's name and a
+     bank reference are both attacker-influenced text arriving in an HTML
+     document — treat them as such.
+
+     A Nigerian buyer expects paper for money handed over. The layout is
+     deliberately plain and photocopy-safe: this gets printed, stamped, and put
+     in a file, and it may be produced in a dispute years later. -->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 22mm 20mm; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; font-size: 12pt; line-height: 1.6; }
+  .letterhead { display: flex; justify-content: space-between; align-items: center; border-bottom: 3px double #1a1a1a; padding-bottom: 12px; margin-bottom: 26px; }
+  .letterhead img { max-height: 60px; max-width: 200px; object-fit: contain; }
+  .letterhead .company { font-size: 15pt; font-weight: bold; letter-spacing: 0.5px; }
+  h1 { font-size: 13pt; text-align: center; text-transform: uppercase; letter-spacing: 2px; margin: 22px 0 6px; }
+  .ref-date { display: flex; justify-content: space-between; margin-bottom: 24px; font-size: 11pt; }
+  .amount-box { border: 2px solid #1a1a1a; padding: 16px 20px; margin: 22px 0; text-align: center; }
+  .amount-box .label { font-size: 10pt; letter-spacing: 2px; text-transform: uppercase; color: #555; }
+  .amount-box .value { font-size: 24pt; font-weight: bold; margin-top: 4px; }
+  .amount-box .words { font-size: 10.5pt; font-style: italic; color: #444; margin-top: 6px; }
+  table.details { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 11pt; }
+  table.details td { padding: 7px 12px; border: 1px solid #999; }
+  table.details td:first-child { font-weight: bold; width: 40%; background: #f5f5f0; }
+  .balance { margin: 18px 0; font-size: 11pt; }
+  .signature-block { margin-top: 46px; display: flex; justify-content: space-between; }
+  .signature-line { border-top: 1px solid #1a1a1a; width: 220px; padding-top: 6px; font-size: 10.5pt; }
+  .fineprint { margin-top: 24px; font-size: 9.5pt; color: #555; border-top: 1px solid #ccc; padding-top: 10px; }
+</style>
+</head>
+<body>
+  <div class="letterhead">
+    <div class="company">{{COMPANY_NAME}}</div>
+    {{LOGO_BLOCK}}
+  </div>
+
+  <h1>Official Payment Receipt</h1>
+
+  <div class="ref-date">
+    <span>Receipt No: {{RECEIPT_NUMBER}}</span>
+    <span>{{DATE}}</span>
+  </div>
+
+  <p>Received with thanks from <strong>{{CUSTOMER_NAME}}</strong> the sum of:</p>
+
+  <div class="amount-box">
+    <div class="label">Amount Received</div>
+    <div class="value">{{AMOUNT_FORMATTED}}</div>
+    <div class="words">{{AMOUNT_IN_WORDS}}</div>
+  </div>
+
+  <table class="details">
+    <tr><td>Project</td><td>{{PROJECT_LINE}}</td></tr>
+    <tr><td>Unit Number</td><td>{{UNIT_NUMBER}}</td></tr>
+    <tr><td>Being payment for</td><td>{{PAYMENT_PURPOSE}}</td></tr>
+    <tr><td>Payment Method</td><td>{{PAYMENT_METHOD}}</td></tr>
+    {{REFERENCE_ROW_BLOCK}}
+    <tr><td>Date Received</td><td>{{PAID_AT}}</td></tr>
+  </table>
+
+  <div class="balance">
+    <strong>Installment status:</strong> {{INSTALLMENT_STATUS}}<br>
+    <strong>Total paid to date:</strong> {{TOTAL_PAID}} of {{PLAN_TOTAL}} &nbsp;·&nbsp;
+    <strong>Balance outstanding:</strong> {{BALANCE_OUTSTANDING}}
+  </div>
+
+  <p>This receipt acknowledges the sum stated above only. It is issued subject to
+  the terms of your Contract of Sale and does not by itself transfer title.
+  Kindly retain it as part of your records.</p>
+
+  <div class="signature-block">
+    <div class="signature-line">Received by / Authorised Signatory<br>{{COMPANY_NAME}}</div>
+    <div class="signature-line">Official Stamp</div>
+  </div>
+
+  <div class="fineprint">{{FINEPRINT}}</div>
+</body>
+</html>

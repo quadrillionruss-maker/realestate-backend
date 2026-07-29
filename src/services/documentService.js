@@ -12,11 +12,11 @@ const path = require('path');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { renderHtmlToPdf } = require('./pdfAdapter');
 const { escapeHtml } = require('../utils/escapeHtml');
+const { resolveBranding } = require('./brandingService');
+const { BUCKET, SIGNED_URL_TTL_SECONDS, ensureBucket, uploadPdf, createSignedUrl } = require('./documentStorage');
 
 // Template lives inside src/ so it travels with the code.
 const TEMPLATE_PATH = path.join(__dirname, '../templates/allocation_letter.html');
-const BUCKET = process.env.RE_DOCUMENTS_BUCKET || 're-documents';
-const SIGNED_URL_TTL_SECONDS = 300;
 
 const naira = (amount) =>
   '₦' + Number(amount || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
@@ -24,45 +24,16 @@ const naira = (amount) =>
 const formatDate = (value) =>
   new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 
-// ── Branding ───────────────────────────────────────────────────────────────
-// organization_id is a team id or a user id (see migrations/001). Letterhead
-// details live on the user profile, so resolve whichever it is. Missing tables
-// or rows fall through to an empty object — a letter with a plain heading
-// beats no letter at all.
-async function resolveBranding(orgId) {
-  const profileColumns = 'full_name, company_name, brand_company_name, brand_logo_url, brand_address, brand_phone, brand_website';
-
-  const { data: soloUser } = await supabaseAdmin
-    .from('users')
-    .select(profileColumns)
-    .eq('id', orgId)
-    .maybeSingle();
-  if (soloUser) return soloUser;
-
-  const { data: team } = await supabaseAdmin
-    .from('teams')
-    .select('name, owner_id')
-    .eq('id', orgId)
-    .maybeSingle();
-
-  if (team?.owner_id) {
-    const { data: owner } = await supabaseAdmin
-      .from('users')
-      .select(profileColumns)
-      .eq('id', team.owner_id)
-      .maybeSingle();
-    // The team's own name wins over the owner's personal company name.
-    if (owner) return { ...owner, company_name: team.name || owner.company_name };
-  }
-
-  return team ? { company_name: team.name } : {};
-}
+// Branding moved to brandingService once receipts needed the same answer —
+// two copies of "whose company name wins" is how a receipt ends up branded
+// differently from the letter that accompanies it. Re-exported below so
+// existing callers of documentService.resolveBranding keep working.
 
 async function loadDocumentContext(orgId, documentId) {
   const { data: doc, error } = await supabaseAdmin
     .from('re_documents')
     .select(`
-      id, doc_type, status, storage_path, created_at,
+      id, doc_type, status, storage_path, payment_id, created_at,
       re_reservations(
         id, reserved_at,
         re_customers(full_name, email, phone),
@@ -95,12 +66,18 @@ function buildAllocationLetterHtml(doc, branding) {
   const unit = reservation.re_units || {};
   const project = unit.re_projects || {};
 
-  const companyName = branding.brand_company_name || branding.company_name || branding.full_name || 'Our Company';
+  // Accepts both branding shapes: the normalized one brandingService returns,
+  // and the raw users-row shape this function was originally written against.
+  // The brand_* fields keep their old precedence so a profile that has both
+  // still renders the way it always did.
+  const companyName = branding.brand_company_name || branding.company_name
+    || branding.full_name || 'Our Company';
+  const logoUrl = branding.brand_logo_url || branding.logo_url;
 
   // Only https logos are embedded — a data: or file: URL in a Puppeteer page
   // is a way to pull local content into a customer-facing document.
-  const logoBlock = (branding.brand_logo_url && branding.brand_logo_url.startsWith('https://'))
-    ? `<img src="${escapeHtml(branding.brand_logo_url)}" alt="${escapeHtml(companyName)}">`
+  const logoBlock = (logoUrl && String(logoUrl).startsWith('https://'))
+    ? `<img src="${escapeHtml(logoUrl)}" alt="${escapeHtml(companyName)}">`
     : '';
 
   const contactLines = [customer.email, customer.phone].filter(Boolean);
@@ -114,8 +91,11 @@ function buildAllocationLetterHtml(doc, branding) {
 
   const projectLine = [project.name, project.location].filter(Boolean).map(escapeHtml).join(', ');
 
-  const senderContact = [branding.brand_address, branding.brand_phone, branding.brand_website]
-    .filter(Boolean).map(escapeHtml).join(' · ');
+  const senderContact = [
+    branding.brand_address || branding.address,
+    branding.brand_phone || branding.phone,
+    branding.brand_website || branding.website,
+  ].filter(Boolean).map(escapeHtml).join(' · ');
 
   return template
     .replace(/{{COMPANY_NAME}}/g, escapeHtml(companyName))
@@ -135,36 +115,30 @@ function buildAllocationLetterHtml(doc, branding) {
     .replace(/{{FINEPRINT}}/g, senderContact);
 }
 
-// Created on first use so deployment doesn't need a manual Storage step.
-// Private: these documents are only ever reachable through a signed URL.
-async function ensureBucket() {
-  const { data: buckets } = await supabaseAdmin.storage.listBuckets();
-  if ((buckets || []).some((b) => b.name === BUCKET)) return;
-
-  const { error } = await supabaseAdmin.storage.createBucket(BUCKET, {
-    public: false,
-    fileSizeLimit: '10MB',
-    allowedMimeTypes: ['application/pdf'],
-  });
-  // A parallel request may have created it between the check and the call.
-  if (error && !/already exists/i.test(error.message)) throw error;
-}
-
-async function createSignedUrl(storagePath) {
-  const { data, error } = await supabaseAdmin.storage
-    .from(BUCKET)
-    .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
-  if (error) throw error;
-  return data.signedUrl;
-}
+// Bucket creation, upload and signed-URL minting moved to documentStorage so
+// receipts land in the same private bucket under the same rules. A receipt
+// that is more public than an allocation letter is a bug nobody would notice.
 
 // ── The one public entry point ─────────────────────────────────────────────
 async function generateDocument(orgId, documentId) {
   const doc = await loadDocumentContext(orgId, documentId);
   if (!doc) return { notFound: true };
 
-  // v1 ships one template. Saying so beats generating a letter with the wrong
-  // wording on it and calling the document 'generated'.
+  // Receipts have their own template and their own idempotency (one per
+  // payment), so they are rendered by receiptService. Required lazily: the two
+  // modules would otherwise reference each other at load time.
+  if (doc.doc_type === 'receipt') {
+    if (!doc.payment_id) {
+      return { unsupported: true, docType: 'receipt (not linked to a payment)' };
+    }
+    const { generateReceipt } = require('./receiptService');
+    const result = await generateReceipt(orgId, doc.payment_id);
+    if (result.notFound) return { notFound: true };
+    return { document: result.document, download_url: result.download_url };
+  }
+
+  // Two templates ship today. Saying so beats generating a document with the
+  // wrong wording on it and calling it 'generated'.
   if (doc.doc_type !== 'allocation_letter') {
     return { unsupported: true, docType: doc.doc_type };
   }
@@ -173,13 +147,7 @@ async function generateDocument(orgId, documentId) {
   const html = buildAllocationLetterHtml(doc, branding);
   const pdf = await renderHtmlToPdf(html);
 
-  await ensureBucket();
-  const storagePath = `${orgId}/${documentId}.pdf`;
-
-  const { error: uploadError } = await supabaseAdmin.storage
-    .from(BUCKET)
-    .upload(storagePath, pdf, { contentType: 'application/pdf', upsert: true });
-  if (uploadError) throw uploadError;
+  const storagePath = await uploadPdf(`${orgId}/${documentId}.pdf`, pdf);
 
   const { data: updated, error: updateError } = await supabaseAdmin
     .from('re_documents')

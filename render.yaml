@@ -7,10 +7,16 @@
 #    root directory to the folder holding this file, or Render will build the
 #    wrong tree and fail with "Cannot find module".
 #
-# 2. PUPPETEER. Allocation letters render with headless Chromium, which is not
-#    present on Render's default Node runtime. The Docker runtime below ships
-#    it. On the plain Node runtime, PDF generation is the one endpoint that
-#    will fail — everything else works.
+# 2. PUPPETEER. Allocation letters and receipts render with headless Chromium,
+#    which is not present on Render's default Node runtime. On the plain Node
+#    runtime, PDF generation is the one thing that will fail — payments are
+#    still recorded, the buyer is still emailed, and the receipt is simply
+#    absent (set RE_AUTO_RECEIPTS=false to stop trying).
+#
+# 3. THE PAYSTACK WEBHOOK. Point Paystack at
+#    https://<your-service>.onrender.com/api/webhooks/paystack
+#    Without it, online payments never settle the installment schedule and
+#    staff have to record every card payment by hand.
 
 services:
   - type: web
@@ -42,4 +48,22 @@ services:
       - key: PAYSTACK_SECRET_KEY
         sync: false
       - key: OPENAI_API_KEY
+        sync: false
+
+      # Where the browser app lives. Password-reset and buyer-portal links are
+      # built from this, and both point at the wrong place without it.
+      - key: APP_URL
+        sync: false
+
+      # Optional. Absent → no Google button, no third-party script loaded.
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+
+      # Optional. Absent → notifications are recorded as 'skipped' rather than
+      # failing the request that triggered them.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM
+        sync: false
+      - key: TERMII_API_KEY
         sync: false

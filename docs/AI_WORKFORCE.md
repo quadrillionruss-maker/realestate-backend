@@ -29,7 +29,7 @@ specialist agents below.
 | **Collections Agent** | Owns overdue installments end-to-end: escalation ladders (gentle WhatsApp → email → call task → management flag), promise-to-pay tracking | Follow-up Agent |
 | **Sales Agent** | Lead nurture pre-reservation: inquiry responses, site-visit scheduling, unit recommendations from budget | Buyer Agent |
 | **Document Agent** | Allocation letters, contracts of sale, deeds of assignment: generation, delivery, signature chasing, missing-doc alerts | Legal Agent |
-| **Finance/Reporting Agent** | Investor & partner reporting, project cash-flow projections from installment schedules, bank-facing summaries | (new — leverages FlowDesk DNA) |
+| **Finance/Reporting Agent** | Investor & partner reporting, project cash-flow projections from installment schedules, bank-facing summaries | (new) |
 | **Scheduling Agent** | Site inspections, allocation ceremonies, buyer meetings | Scheduling Agent |
 | **Market Intelligence Agent** | Land/unit price trends by area, competitor launch monitoring, demand signals | Market Intelligence + Pricing Agent |
 

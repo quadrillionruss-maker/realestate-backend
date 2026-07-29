@@ -1,6 +1,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { createPlanWithSchedule } = require('../services/installmentService');
+const { audit } = require('../services/auditService');
 const router = express.Router();
 
 const RESERVATION_STATUSES = ['reserved', 'confirmed', 'cancelled', 'completed'];
@@ -121,6 +122,26 @@ router.post('/', async (req, res, next) => {
       }
     }
 
+    // Who allocated which unit to whom is the single most disputed fact in
+    // Nigerian off-plan sales. It gets written down.
+    audit(req, {
+      action: 'reservation.created',
+      entityType: 're_reservations',
+      entityId: reservation.id,
+      summary: `Unit reserved for a buyer${planResult ? ` on a ${plan.number_of_installments}-installment plan` : ' (no payment plan)'}`,
+      metadata: {
+        unit_id,
+        customer_id,
+        sales_rep_id: sales_rep_id || null,
+        plan: planResult ? {
+          total_amount: plan.total_amount,
+          number_of_installments: plan.number_of_installments,
+          frequency: plan.frequency || 'monthly',
+          start_date: plan.start_date,
+        } : null,
+      },
+    });
+
     res.status(201).json({ reservation, plan: planResult });
   } catch (e) { next(e); }
 });
@@ -161,6 +182,14 @@ router.patch('/:id/status', async (req, res, next) => {
       .eq('id', reservation.unit_id)
       .eq('organization_id', req.orgId);
     if (unitErr) throw unitErr;
+
+    audit(req, {
+      action: `reservation.${status}`,
+      entityType: 're_reservations',
+      entityId: reservation.id,
+      summary: `Reservation moved from ${existing.status} to ${status}; unit marked ${unitStatus}`,
+      metadata: { from: existing.status, to: status, unit_id: reservation.unit_id, unit_status: unitStatus },
+    });
 
     res.json(reservation);
   } catch (e) { next(e); }

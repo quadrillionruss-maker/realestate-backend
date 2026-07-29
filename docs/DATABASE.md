@@ -7,14 +7,39 @@ database that already has an identity schema — every CREATE is
 `IF NOT EXISTS` and every column add is `ADD COLUMN IF NOT EXISTS`, so
 existing tables are topped up rather than fought over.
 
-Run `001` then `002`. Both are idempotent; `npm run test:schema` applies them
-twice against a real Postgres to prove it.
+Run `001`, then `002`, then `003`. All three are idempotent; `npm run
+test:schema` applies them twice against a real Postgres to prove it.
 
 ## Identity tables
 
-Created by Section A of `001`. This service **verifies** bearer tokens and
-never issues them, so these hold identity as the API reads it, not
-credentials — there is no password column, because nothing here logs anyone in.
+Created by Section A of `001`, extended by Section A of `003`.
+
+`001` said plainly that there is no password column, because nothing here
+logged anyone in. **That is no longer true.** `003` adds `password_hash`,
+`google_sub`, `reset_token_hash`, `reset_token_expires_at`, `avatar_url` and
+`last_login_at`, because this service now issues tokens as well as verifying
+them.
+
+What is stored is a password **verifier**, never a password:
+
+```
+scrypt$16384$8$1$<salt-hex>$<key-hex>
+```
+
+The cost parameters travel with the hash, so raising them later leaves
+existing rows verifiable. scrypt rather than bcrypt because bcrypt means a
+native module, which means a compiler on the deploy host and a class of build
+failure that has nothing to do with this product.
+
+**A NULL `password_hash` is not "no password required".** It is a Google-only
+account, or one created before `003`. `verifyPassword` returns false for it
+unconditionally; the only ways in are Google or the reset flow.
+
+`uniq_users_email_lower` makes sign-in case-insensitive, because nobody types
+the capital letter they registered with. It is created inside an exception
+guard: an existing table may already hold two rows differing only in case, and
+failing the whole migration over that would be worse than leaving the plain
+unique constraint alone.
 
 | Table | Purpose | Read by |
 |---|---|---|
@@ -63,7 +88,7 @@ team, their scope key changes and the earlier rows go quiet. Backfill with
 | `re_projects` | A development (e.g. "Lekki Gardens Ph 2") | status: planning/active/sold_out/archived |
 | `re_units` | Sellable units | unique (project, unit_number); status: available/reserved/sold |
 | `re_customers` | Buyers | name, phone (WhatsApp), email, source |
-| `re_sales_reps` | FlowDesk users tagged as reps | unique (org, user); FK → `public.users`; deactivated, never deleted |
+| `re_sales_reps` | Users tagged as reps | unique (org, user); FK → `public.users`; deactivated, never deleted |
 | `re_reservations` | Unit + customer + rep | status: reserved/confirmed/cancelled/completed; cancelling frees the unit |
 | `re_installment_plans` | Plan attached to a reservation | total, count (1–120), frequency (monthly/quarterly), start_date |
 | `re_installment_schedule` | Individual dues | unique (plan, number); status: pending/paid/overdue/waived; kobo-precise generation |
@@ -112,7 +137,7 @@ which is why each one filters `organization_id` explicitly. No browser touches
 these tables directly.
 
 If client-side Supabase access is ever added, a commented policy template
-following FlowDesk's own `teams`/`team_members` shape sits at the bottom of
+following the `teams`/`team_members` shape sits at the bottom of
 `migrations/001_phase1_schema.sql`.
 
 ## Grants
@@ -135,7 +160,55 @@ alone will not be enough.
 
 ## Storage
 
-Allocation letters go to a **private** bucket (`re-documents`, created on
-first use), not the public `logos` bucket — they carry a buyer's name and what
-they paid. Rows persist the object path; `GET /documents/:id/download` mints a
-5-minute signed URL on demand.
+Allocation letters and receipts go to a **private** bucket (`re-documents`,
+created on first use) — they carry a buyer's name and what they paid. Rows
+persist the object path, never a bearer link; `GET /documents/:id/download`
+mints a 5-minute signed URL on demand. Receipts land under
+`<org>/receipts/<document-id>.pdf` in the same bucket under the same rules,
+because a receipt that is more public than an allocation letter is a bug
+nobody would notice.
+
+## What `003` adds
+
+| Table | Purpose | Written by |
+|---|---|---|
+| `re_org_settings` | Letterhead and notification preferences, keyed by `organization_id` — so it answers the same way for a solo account and a team | `routes/settings.js` |
+| `re_commissions` | One accrual per payment, with the rate copied onto the row | `commissionService.accrueForPayment()` |
+| `re_payment_promises` | "I'll transfer on Friday", with a date the sweep can check | `promiseService` |
+| `re_audit_log` | Who did what, when, from where | `auditService` |
+| `re_notifications` | Every send attempt, including the ones skipped for want of an API key | `notificationService` |
+
+Plus columns: `re_sales_reps.commission_rate`,
+`re_reservations.escalation_stage`, `re_units.metadata`,
+`re_documents.payment_id`, `re_customers.portal_token_version`.
+
+### The three new locks
+
+```sql
+unique (payment_id) on re_commissions
+uniq_re_open_promise_per_schedule    -- partial: where status = 'open'
+uniq_re_documents_receipt_per_payment -- partial: where doc_type = 'receipt'
+```
+
+Each exists because the application must not be the only thing preventing it:
+paying a rep twice for one payment, a stack of promises instead of the buyer's
+latest word, and two receipts for one ₦5m transfer.
+
+### `re_audit_log` has no foreign keys, on purpose
+
+`actor_id` is a bare UUID and `actor_email` is denormalized alongside it. An
+audit row has to survive the deletion of the user who made it — a log that
+cascades away when somebody leaves the company destroys its own evidence.
+`npm run test:schema` asserts the table has zero foreign-key constraints, so
+this cannot be "tidied up" by accident.
+
+Nothing in the service updates or deletes from this table, and no route
+exposes a way to. Append-only is the point.
+
+### Escalation
+
+`re_reservations.escalation_stage` is one of `none`, `reminder`,
+`formal_notice`, `final_notice`, `legal`. It lives on the reservation rather
+than the installment because it describes the relationship, not a single
+missed date. The 07:00 sweep only ever raises it; the only thing that lowers
+it is money (`paymentEvents.maybeDeescalate`).
