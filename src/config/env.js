@@ -34,6 +34,22 @@ const env = {
     // when verifying the ID token here. Absent → the button is not rendered.
     googleClientId: process.env.GOOGLE_CLIENT_ID || '',
     resetTokenTtlMinutes: parseInt(process.env.RESET_TOKEN_TTL_MINUTES || '60', 10),
+
+    // Registration used to accept any address, so anyone could sign up as
+    // ceo@somedeveloper.com and be inside the product immediately. In a market
+    // where a developer's name is the whole asset, that is an impersonation
+    // problem before it is a security one.
+    //
+    // DEFAULTS TO WHETHER EMAIL CAN ACTUALLY BE SENT. Requiring verification on
+    // a deployment with no RESEND_API_KEY would brick the product: nobody could
+    // ever receive the link, so nobody could ever get in — a self-inflicted
+    // outage dressed as a security feature. Set REQUIRE_EMAIL_VERIFICATION
+    // explicitly to override in either direction.
+    requireEmailVerification: process.env.REQUIRE_EMAIL_VERIFICATION
+      ? process.env.REQUIRE_EMAIL_VERIFICATION === 'true'
+      : Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM),
+
+    verifyTokenTtlHours: parseInt(process.env.VERIFY_TOKEN_TTL_HOURS || '48', 10),
   },
 
   // Where the browser app lives. Used to build password-reset and buyer-portal
@@ -43,7 +59,14 @@ const env = {
   portal: {
     // A buyer signs in twice a year; a 60-day link is the difference between
     // "click here" and a support call.
-    tokenTtlDays: parseInt(process.env.PORTAL_TOKEN_TTL_DAYS || '60', 10),
+    //
+    // Hard-capped at 90 days, and the cap is the point: revoking a link is a
+    // manual act, and the links that most need revoking — a dispute, a deal
+    // that fell through — are exactly the ones nobody remembers to revoke. A
+    // ceiling means every link eventually stops working on its own. Floored at
+    // 1 so a typo cannot mint a link that is already expired.
+    tokenTtlDays: Math.min(90, Math.max(1,
+      parseInt(process.env.PORTAL_TOKEN_TTL_DAYS || '60', 10) || 60)),
   },
 
   // Transactional email. Absent → notifications are recorded as 'skipped'

@@ -57,6 +57,37 @@ if (!TOKEN) {
   process.exit(1);
 }
 
+// ── Refuse to run against production without being told twice ─────────────
+// This script writes REAL rows: a project, five units, two buyers, a
+// reservation, a payment, a receipt, a commission accrual. Run against the live
+// URL it puts "Test Estate 20260729…" into a developer's actual inventory and
+// its ₦3.75m into their actual collected-this-month figure — polluting the one
+// number the product exists to report, in a way that is tedious to unpick.
+//
+// Anything that is not localhost is treated as possibly-real. RE_SMOKE_CONFIRM
+// is the second word, and it has to name the host, so it cannot be left
+// exported in a shell and forgotten.
+const targetHost = (() => {
+  try { return new URL(API).hostname; } catch { return ''; }
+})();
+
+const isLocal = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(targetHost);
+const confirmed = process.env.RE_SMOKE_CONFIRM === targetHost;
+
+if (!isLocal && !confirmed) {
+  console.error(`
+  ✋ ${API} is not localhost, so this may be a live workspace.
+
+  This test writes real rows — a project, units, buyers, a reservation and a
+  payment — which will show up in dashboards and KPIs. Point it at staging.
+
+  If ${targetHost} IS the staging environment, confirm by naming it:
+
+      RE_SMOKE_CONFIRM=${targetHost} RE_SMOKE_TOKEN=… npm run smoke
+`);
+  process.exit(1);
+}
+
 const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
 let step = 0;
 const created = {};
@@ -91,7 +122,8 @@ async function run() {
   // Show the endpoint root actually being called, not just the configured
   // base — the two differ whenever normalizeBase had to add /api.
   console.log(`\nSmoke test → ${API}/re`);
-  console.log(`  target from: ${API_SOURCE}\n`);
+  console.log(`  target from: ${API_SOURCE}`);
+  console.log(`  writes real rows: ${isLocal ? 'local database' : `CONFIRMED against ${targetHost}`}\n`);
 
   // 1 ── project
   const project = await call('POST', '/projects', {

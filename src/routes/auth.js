@@ -40,8 +40,40 @@ router.get('/config', (_req, res) => {
     google_client_id: env.auth.googleClientId || null,
     allow_registration: env.auth.allowRegistration,
     min_password_length: auth.MIN_PASSWORD_LENGTH,
+    // The sign-up form tells people to expect an email only when one is
+    // actually going to be sent.
+    require_email_verification: env.auth.requireEmailVerification,
   });
 });
+
+// Sends (or re-sends) the confirmation link. Shared by registration and by the
+// "didn't get it?" button on the verify screen, so there is one place that
+// decides what that email says.
+async function sendVerificationEmail(user) {
+  const link = await auth.issueVerificationToken(user.id);
+
+  const result = await notify.sendEmail({
+    orgId: user.id,
+    to: user.email,
+    subject: 'Confirm your email address',
+    html: notify.emailShell({
+      heading: 'Confirm your email address',
+      intro: `Click below to confirm ${user.email} and start using Realtika. The link expires in ${env.auth.verifyTokenTtlHours} hours.`,
+      ctaLabel: 'Confirm my email',
+      ctaUrl: link.url,
+      footer: 'If you did not create a Realtika account, ignore this email — nothing will happen.',
+    }),
+    text: `Confirm your email address: ${link.url}`,
+    template: 'email_verification',
+  });
+
+  // Returned only outside production and only when email is unconfigured, so
+  // the flow stays testable locally without a Resend key.
+  return {
+    status: result.status,
+    dev_url: env.isDev && !env.resend.apiKey ? link.url : undefined,
+  };
+}
 
 router.post('/register', credentialLimiter, async (req, res, next) => {
   try {
@@ -55,7 +87,51 @@ router.post('/register', credentialLimiter, async (req, res, next) => {
       .upsert({ organization_id: result.user.id, company_name: company_name || null },
               { onConflict: 'organization_id' });
 
-    res.status(201).json(result);
+    // The account exists either way. If the email fails to send they can ask
+    // for another from the verify screen — failing the registration over an
+    // unreachable mail provider would lose the account entirely.
+    let verification = null;
+    if (!result.email_verified) {
+      verification = await sendVerificationEmail(result.user).catch((err) => {
+        console.warn('[auth] verification email failed:', err.message);
+        return { status: 'failed' };
+      });
+    }
+
+    res.status(201).json({ ...result, verification });
+  } catch (e) { next(e); }
+});
+
+// Confirms the address and signs them in — a second trip through the login form
+// immediately after proving they own the email is friction for nothing.
+router.post('/verify-email', credentialLimiter, async (req, res, next) => {
+  try {
+    res.json(await auth.verifyEmail(req.body?.token));
+  } catch (e) { next(e); }
+});
+
+// "Didn't get the email?" Requires a valid token, so it can only ever resend to
+// the address on the caller's own account — otherwise it would be a way to have
+// this server mail an arbitrary stranger on demand.
+router.post('/resend-verification', credentialLimiter, authenticate, async (req, res, next) => {
+  try {
+    const { data: user, error } = await supabaseAdmin
+      .from('users')
+      .select('id, email, email_verified_at')
+      .eq('id', req.user.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    if (user.email_verified_at) {
+      return res.json({ already_verified: true, message: 'That address is already confirmed.' });
+    }
+
+    const verification = await sendVerificationEmail(user);
+    res.json({
+      message: `A new confirmation link is on its way to ${user.email}.`,
+      ...verification,
+    });
   } catch (e) { next(e); }
 });
 
@@ -140,7 +216,7 @@ router.get('/me', authenticate, async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('users')
-      .select('id, email, full_name, company_name, avatar_url, created_at, last_login_at')
+      .select('id, email, full_name, company_name, avatar_url, created_at, last_login_at, email_verified_at')
       .eq('id', req.user.id)
       .maybeSingle();
     if (error) throw error;
@@ -153,6 +229,10 @@ router.get('/me', authenticate, async (req, res, next) => {
       organization_id: req.user.team_id || req.user.id,
       is_team: Boolean(req.user.team_id),
       role: req.user.role || 'owner',
+      // /auth/me deliberately works for an UNVERIFIED user — it is the endpoint
+      // the app calls to discover that it should show the verify screen.
+      email_verified: Boolean(req.user.email_verified_at),
+      verification_required: env.auth.requireEmailVerification,
       // A password-less account signed up with Google and has nothing to
       // "change"; the Settings screen shows "Set a password" instead.
       has_password: Boolean((await auth.findUserByEmail(data.email))?.password_hash),
@@ -199,6 +279,21 @@ router.patch('/me', authenticate, async (req, res, next) => {
       .maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'User not found' });
+
+    // Changing a password ends every other session. Somebody who changes theirs
+    // because they think a device is compromised expects exactly that, and
+    // without it the old token keeps working for the rest of its 30 days.
+    //
+    // A fresh token is returned so the caller stays signed in — they are the
+    // one who asked for this. The browser swaps it in silently.
+    if (updates.password_hash) {
+      const version = await auth.bumpTokenVersion(req.user.id);
+      return res.json({
+        ...data,
+        token: auth.issueToken({ ...data, token_version: version ?? 0 }),
+        sessions_ended: true,
+      });
+    }
 
     res.json(data);
   } catch (e) { next(e); }

@@ -7,8 +7,8 @@ database that already has an identity schema — every CREATE is
 `IF NOT EXISTS` and every column add is `ADD COLUMN IF NOT EXISTS`, so
 existing tables are topped up rather than fought over.
 
-Run `001`, then `002`, then `003`. All three are idempotent; `npm run
-test:schema` applies them twice against a real Postgres to prove it.
+Run `001` through `005` in order. All five are idempotent; `npm run test:schema`
+applies them twice against a real Postgres to prove it.
 
 ## Identity tables
 
@@ -212,3 +212,116 @@ exposes a way to. Append-only is the point.
 than the installment because it describes the relationship, not a single
 missed date. The 07:00 sweep only ever raises it; the only thing that lowers
 it is money (`paymentEvents.maybeDeescalate`).
+
+## What `004` adds
+
+Three things review found that the schema has to carry, because the application
+cannot enforce them alone.
+
+### `users.token_version` — revoking a live session
+
+A JWT is valid until it expires, and ours last 30 days. A sales executive fired
+on Monday therefore keeps a working token until the end of the month: the buyer
+list, payment histories, allocation letters, from any machine. Changing their
+password does not help — tokens already issued keep working.
+
+`token_version` rides in the token as `tv` and is compared on every request.
+Bumping the column invalidates every token ever issued to that user at once. It
+is deliberately the cheap design: a denylist would need a store of live tokens
+and an eviction policy, a counter needs neither.
+
+Defaults to `0`, and a token minted before this migration carries no `tv` claim
+which `middleware/auth.js` reads as `0` — so applying `004` does not sign
+everybody out on deploy.
+
+### One allocation letter per reservation
+
+`uniq_re_allocation_letter_per_reservation`. Nothing stopped generating five,
+each with its own reference number, and in a dispute three documents that
+disagree are worse than none. Re-generating is still allowed and still
+desirable — it rewrites the same row and the same storage path. A second *row*
+is what is forbidden.
+
+Created inside an exception guard: a database that already holds duplicates
+would otherwise fail the migration and leave the other two sections unapplied.
+The notice names the query that finds them.
+
+### `re_payments.overpayment`
+
+A buyer sends ₦5m against a ₦500k installment. The payment is recorded —
+refusing it would leave money in the bank with nothing in the system to explain
+it — but the excess used to pass in silence, and an unexplained credit is one of
+the reliable triggers of a payment dispute here.
+
+The column is on the payment, not the schedule: it describes that one transfer,
+and the same installment can be overpaid more than once. It is a record, not an
+instruction — nothing moves a credit automatically, because which installment it
+belongs to is a conversation with the buyer.
+`idx_re_payments_overpaid` makes "show me every unallocated credit" one cheap
+query, which is the only way anybody actually runs it.
+
+
+## What `005` adds
+
+### `deleted_at` on every domain table
+
+Nothing in this product is hard-deleted. A delete stamps `deleted_at`, cascades
+to children, and leaves every row in place permanently — because a developer who
+removes a buyer who has paid ₦15m over eighteen months must not be one click away
+from losing that, and "we deleted it" is not an answer anyone wants to give a
+lawyer.
+
+The live filter is applied in `middleware/orgContext.js`, not per query. See
+CLAUDE.md for why, and for the one thing it does not cover (embedded resources).
+
+`re_audit_log` and `re_notifications` deliberately have **no** `deleted_at`. A
+nullable column there would imply the evidence can be withdrawn.
+
+### Every uniqueness lock, rebuilt
+
+This is the part to read before touching `005`. Each index from `001`/`003`/`004`
+was written before soft delete existed and would have counted a deleted row as
+live. Concretely, without the `deleted_at is null` predicate:
+
+* a soft-deleted reservation would block its unit **forever** — the unit could
+  never be sold to anyone again
+* a soft-deleted allocation letter would make a replacement impossible
+* a soft-deleted receipt would block re-issuing one
+* a soft-deleted promise would block logging the next one
+* a soft-deleted unit would reserve its own unit number permanently
+
+`re_commissions.payment_id` and `re_units(project_id, unit_number)` were table
+constraints rather than indexes, so both are converted to partial unique indexes
+to carry the predicate.
+
+`npm run test:schema` asserts both directions of the important one: double
+allocation is still refused, **and** a soft-deleted reservation releases the unit.
+
+### Email verification
+
+`email_verified_at`, `verify_token_hash`, `verify_token_expires_at`. Only the
+token's SHA-256 is stored, exactly as with password resets.
+
+Existing accounts are **backfilled as verified** — they registered before the
+requirement existed, and locking them out on deploy would be a self-inflicted
+outage. The backfill is idempotent, so re-running `005` tops up any account
+created in between.
+
+### Plan lifecycle
+
+`status` (`active` | `superseded`), `superseded_by`, `restructured_at`,
+`restructure_reason`, `original_total_amount`, `carried_amount_paid`.
+
+A restructure creates a new plan rather than editing the old one, because the old
+schedule is what the buyer's existing receipts refer to. The new plan's
+`total_amount` is the remaining **balance** — `installmentService` guarantees the
+schedule sums to the plan total to the kobo, and that invariant is worth more than
+keeping the contract value in one field. So:
+
+```
+original_total_amount = carried_amount_paid + total_amount
+```
+
+`uniq_re_active_plan_per_reservation` allows exactly one active plan per
+reservation. Two would mean two schedules and a dashboard counting the same debt
+twice.

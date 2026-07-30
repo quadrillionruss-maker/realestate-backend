@@ -7,6 +7,26 @@
   <meta name="description" content="Realtika — installment sales, allocations, collections and a daily AI brief for property developers.">
   <title>Realtika — Real Estate Intelligence</title>
 
+  <!-- Favicon as an inline SVG data URI: no extra file, no extra request, and
+       no 404 in the console. The gold lozenge is the same mark as the sidebar. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23090909'/%3E%3Cpath d='M16 7l7 9-7 9-7-9z' fill='%23c9a45c'/%3E%3C/svg%3E">
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23090909'/%3E%3Cpath d='M16 7l7 9-7 9-7-9z' fill='%23c9a45c'/%3E%3C/svg%3E">
+
+  <!-- This URL gets pasted into WhatsApp constantly. Without these it previews
+       as a blank card; with them every share is a small advertisement.
+       og:image must be an absolute URL on a public host — a data URI is not
+       fetched by WhatsApp or Twitter, so point this at a real file once you
+       have one. -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Realtika">
+  <meta property="og:title" content="Realtika — Real Estate Intelligence">
+  <meta property="og:description" content="Installment sales, allocations and collections for property developers — with a brief on your desk at 7am telling you who has fallen behind.">
+  <meta property="og:image" content="https://realestate-frontend-pi.vercel.app/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="theme-color" content="#090909">
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -39,18 +59,33 @@
         what is due this week, and what to say to whom.
       </p>
 
-      <div class="gate-proof">
-        <div><span>07:00</span><small>Daily brief</small></div>
-        <div><span>0</span><small>Double allocations</small></div>
-        <div><span>₦</span><small>To the kobo</small></div>
-      </div>
+      <!-- These are statements about how the product behaves, not counters.
+           The previous version showed "07:00 / 0 / ₦" as if they were live
+           metrics, which read as a claim nobody could interpret — a first-time
+           visitor cannot tell whether "0 double allocations" means "we have
+           never caused one" or "you currently have none". Each line now says
+           what it means. -->
+      <ul class="gate-points">
+        <li><b>A brief every morning at 7:00</b> — written overnight, waiting when you open the app</li>
+        <li><b>Double allocation is physically blocked</b> — the database refuses a second live reservation on a unit, whatever the app does</li>
+        <li><b>Schedules balance to the kobo</b> — installments always sum to the exact plan total</li>
+      </ul>
     </div>
 
-    <div class="faint" style="font-size:12px">Built for the Nigerian market. Paystack, bank transfer, cash.</div>
+    <div class="faint" style="font-size:12px">Paystack, bank transfer, cash and POS.</div>
   </section>
 
   <section class="gate-form-wrap">
     <div class="gate-card">
+
+      <!-- The brand, for mobile only. Under 900px the whole left panel is
+           hidden, which previously left a bare dark form with no indication of
+           what you were signing into. Shown here instead of unhiding the panel
+           because nobody scrolls past a product pitch to reach a password
+           field on a phone. -->
+      <div class="gate-card-brand"><i>◆</i> REALTIKA
+        <span>Sales operations for property developers</span>
+      </div>
 
       <div class="gate-tabs" role="tablist" id="gate-tabs">
         <button class="gate-tab" role="tab" id="tab-login" aria-selected="true" type="button">Sign in</button>
@@ -145,6 +180,25 @@
         </div>
       </form>
 
+      <!-- Confirm your email. Not a form the user fills in — the token comes
+           from the emailed link, so this is a status screen with a resend
+           button on it. -->
+      <form id="form-verify" novalidate hidden>
+        <h1 class="gate-title">Confirm your email</h1>
+        <p class="gate-sub" id="verify-sub">Checking your link…</p>
+
+        <p class="notice ok hidden" id="verify-ok"></p>
+        <p class="notice hidden" id="verify-error" role="alert"></p>
+
+        <button class="btn primary block lg mt-1 hidden" type="button" id="btn-resend-verify">
+          Send me a new link
+        </button>
+
+        <div class="gate-foot">
+          <button class="link-quiet" type="button" id="link-verify-signin">Back to sign in</button>
+        </div>
+      </form>
+
       <!-- Choose a new password (reached from the emailed link) -->
       <form id="form-reset" autocomplete="on" novalidate hidden>
         <h1 class="gate-title">Choose a new password</h1>
@@ -223,8 +277,12 @@
       <div class="search">
         <span class="ico">⌕</span>
         <input id="search-input" type="search" placeholder="Search buyers, units, projects…"
-               autocomplete="off" spellcheck="false" aria-label="Search">
-        <kbd>/</kbd>
+               autocomplete="off" spellcheck="false"
+               aria-label="Search buyers, units and projects. Press slash to focus.">
+        <!-- Decorative: the shortcut is announced in the input's own label
+             instead, so a screen reader hears it once rather than as a stray
+             character after the field. -->
+        <kbd aria-hidden="true">/</kbd>
         <div class="search-results hidden" id="search-results"></div>
       </div>
 

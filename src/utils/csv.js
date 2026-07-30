@@ -102,4 +102,35 @@ function parseDate(value) {
   return null;
 }
 
-module.exports = { parseCsv, parseCsvToObjects, parseAmount, parseDate, normalizeHeader };
+// ── Writing ────────────────────────────────────────────────────────────────
+// The other direction: a developer must be able to get their data OUT. Without
+// it their buyer list is locked inside somebody else's Supabase project, which
+// is a reason not to adopt the product in the first place.
+
+// Quote only when needed, and double any embedded quote — the same RFC 4180
+// rules the parser above reads.
+function quoteField(value) {
+  if (value == null) return '';
+  const s = String(value);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// `columns` is [[header, pick], …]. An array of pairs rather than an object so
+// column ORDER is explicit — a spreadsheet whose columns move between exports
+// breaks every formula somebody built on top of it.
+function toCsv(columns, rows) {
+  const header = columns.map(([label]) => quoteField(label)).join(',');
+  const body = (rows || []).map((row) =>
+    columns.map(([, pick]) => quoteField(typeof pick === 'function' ? pick(row) : row[pick])).join(',')
+  );
+
+  // A BOM, deliberately. Excel on Windows reads a UTF-8 CSV as the system
+  // codepage without one, which turns every ₦ into a mojibake pair — in a file
+  // whose entire purpose is Naira amounts. CRLF for the same reason.
+  return '﻿' + [header, ...body].join('\r\n') + '\r\n';
+}
+
+module.exports = {
+  parseCsv, parseCsvToObjects, parseAmount, parseDate, normalizeHeader,
+  toCsv, quoteField,
+};

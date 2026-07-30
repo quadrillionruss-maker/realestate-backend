@@ -76,10 +76,20 @@ router.post('/pay/:scheduleId', async (req, res, next) => {
       return res.status(400).json({ error: 'Paystack needs an email address for the receipt. Add one and try again.' });
     }
 
+    // Send them back to the portal, not to Paystack's default page. `?paid=1`
+    // is what tells the page to show "awaiting confirmation" instead of the
+    // same unpaid row the buyer just paid — which is how a buyer talks
+    // themselves into paying twice.
+    const env = require('../config/env');
+    const callbackUrl = env.appUrl
+      ? `${env.appUrl}/portal.html?paid=${encodeURIComponent(req.params.scheduleId)}`
+      : null;
+
     const result = await initInstallmentPayment(
       req.customer.organization_id,
       req.params.scheduleId,
-      email
+      email,
+      { callbackUrl }
     );
 
     auditSystem({

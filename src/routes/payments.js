@@ -142,6 +142,7 @@ router.post('/:scheduleId/record', async (req, res, next) => {
       paymentId: payment.id,
       source: 'manual',
       actor: req.user,
+      overpayment: payment.overpayment,
     });
 
     res.status(201).json({ ...payment, effects });

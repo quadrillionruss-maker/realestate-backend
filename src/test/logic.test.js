@@ -9,9 +9,13 @@
 
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'http://localhost:54321';
 process.env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'test-service-role-key';
+// authService and portalService sign tokens at call time, so a secret has to
+// exist. It never leaves this process.
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-thirty-two-characters-long';
 process.env.RE_DISABLE_CRON = 'true';
 
 const assert = require('assert');
+const jwt = require('jsonwebtoken');
 const { execFileSync } = require('child_process');
 const path = require('path');
 
@@ -19,12 +23,20 @@ const { buildSchedule, addMonthsUTC } = require('../services/installmentService'
 const { parseInstallmentReference, isRealEstateReference, buildReference } = require('../services/paystackService');
 const { buildAllocationLetterHtml, describePaymentPlan } = require('../services/documentService');
 const { buildFallbackBrief } = require('../services/aiBrief');
-const { lagosToday } = require('../services/overdueService');
+const {
+  lagosToday, isPastDue, overdueThroughDate, describeDue,
+} = require('../services/overdueService');
 const { buildReceiptHtml } = require('../services/receiptService');
 const { amountInWords } = require('../utils/amountInWords');
-const { parseCsvToObjects, parseAmount, parseDate } = require('../utils/csv');
+const { parseCsvToObjects, parseAmount, parseDate, toCsv } = require('../utils/csv');
 const { stageForOverdueCount, describeStage } = require('../services/escalationService');
 const { normalizeNigerianPhone } = require('../services/notificationService');
+const auth = require('../services/authService');
+const portal = require('../services/portalService');
+const env = require('../config/env');
+const {
+  preview: restructurePreview, contractValue,
+} = require('../services/restructureService');
 
 let passed = 0;
 const failures = [];
@@ -274,6 +286,63 @@ test('returns an ISO date string for Africa/Lagos', () => {
   assert.match(lagosToday(), /^\d{4}-\d{2}-\d{2}$/);
 });
 
+// ── The 6pm cutoff ───────────────────────────────────────────────────────
+// An installment is due by 18:00 Africa/Lagos on its due date. These fix the
+// boundary in place, because "when exactly is this late?" is the question a
+// buyer argues about.
+section('Due-date cutoff (18:00 Africa/Lagos)');
+
+// Lagos is UTC+1 year-round, so 17:00Z is 18:00 Lagos.
+const atLagos = (iso) => new Date(iso);
+
+test('an installment due today is NOT overdue during the working day', () => {
+  // 09:00 Lagos on the due date.
+  assert.strictEqual(isPastDue('2026-07-30', atLagos('2026-07-30T08:00:00Z')), false);
+});
+
+test('it is still not overdue one minute before the cutoff', () => {
+  // 17:59 Lagos.
+  assert.strictEqual(isPastDue('2026-07-30', atLagos('2026-07-30T16:59:00Z')), false);
+});
+
+test('it becomes overdue exactly at 18:00 Lagos', () => {
+  assert.strictEqual(isPastDue('2026-07-30', atLagos('2026-07-30T17:00:00Z')), true);
+});
+
+test('yesterday is overdue whatever time of day it is now', () => {
+  assert.strictEqual(isPastDue('2026-07-29', atLagos('2026-07-30T00:30:00Z')), true);
+  assert.strictEqual(isPastDue('2026-07-29', atLagos('2026-07-30T08:00:00Z')), true);
+});
+
+test('a future installment is never overdue', () => {
+  assert.strictEqual(isPastDue('2026-08-15', atLagos('2026-07-30T17:00:00Z')), false);
+});
+
+test('the sweep window moves from yesterday to today at the cutoff', () => {
+  // Before 18:00 the sweep must not touch today's rows.
+  assert.strictEqual(overdueThroughDate(atLagos('2026-07-30T16:00:00Z')), '2026-07-29');
+  // From 18:00 it includes them.
+  assert.strictEqual(overdueThroughDate(atLagos('2026-07-30T17:00:00Z')), '2026-07-30');
+});
+
+test('the cutoff is read in Lagos, not in the host timezone', () => {
+  // 23:30 UTC on the 29th is 00:30 Lagos on the 30th. A UTC-thinking server
+  // would still be on the 29th and would sweep a day late.
+  assert.strictEqual(overdueThroughDate(atLagos('2026-07-29T23:30:00Z')), '2026-07-29');
+  assert.strictEqual(lagosToday(atLagos('2026-07-29T23:30:00Z')), '2026-07-30');
+});
+
+test('month and year boundaries do not slip', () => {
+  assert.strictEqual(overdueThroughDate(atLagos('2026-08-01T10:00:00Z')), '2026-07-31');
+  assert.strictEqual(overdueThroughDate(atLagos('2027-01-01T10:00:00Z')), '2026-12-31');
+  // 1 March after a leap February.
+  assert.strictEqual(overdueThroughDate(atLagos('2028-03-01T10:00:00Z')), '2028-02-29');
+});
+
+test('states the deadline in words a buyer can be held to', () => {
+  assert.strictEqual(describeDue('2026-07-30'), '30 Jul 2026 by 6pm');
+});
+
 test('uses the Lagos day, not the host timezone day', () => {
   // 23:30 UTC is already tomorrow in Lagos (UTC+1). An installment due
   // "tomorrow" must not be marked overdue by a UTC-hosted cron.
@@ -340,6 +409,71 @@ test('a buyer at legal stage gets no drafted message at all', () => {
   const brief = buildFallbackBrief(legal);
   assert.strictEqual(brief.follow_ups.length, 0, 'nothing written to a buyer whose file is with a lawyer');
   assert.match(brief.recommendations[0].title, /Refer Mr Silent to legal review/);
+});
+
+// ── Plan restructuring ───────────────────────────────────────────────────
+// A renegotiated schedule must not lose or invent money. The invariant is:
+//     original_total_amount = carried_amount_paid + total_amount
+// and the new schedule sums to total_amount exactly.
+section('Plan restructuring');
+
+test('reads the contract value whether or not the plan was restructured', () => {
+  // A plan that has never been restructured has no original_total_amount.
+  assert.strictEqual(contractValue({ total_amount: 45_000_000 }), 45_000_000);
+  // One that has keeps the contract value there, while total_amount is the
+  // balance being rescheduled.
+  assert.strictEqual(
+    contractValue({ total_amount: 33_750_000, original_total_amount: 45_000_000 }),
+    45_000_000
+  );
+  assert.strictEqual(contractValue(null), 0);
+});
+
+test('the restructured schedule sums to exactly the remaining balance', () => {
+  // ₦45m contract, ₦11.25m paid, so ₦33.75m rescheduled over 18 months.
+  const rows = restructurePreview(33_750_000, {
+    numberOfInstallments: 18, frequency: 'monthly', startDate: '2026-09-01',
+  });
+  assert.strictEqual(rows.length, 18);
+  assert.strictEqual(sumOf(rows), 33_750_000, 'the kobo invariant survives a restructure');
+});
+
+test('a remainder that does not divide still balances to the kobo', () => {
+  const rows = restructurePreview(10_000_000, {
+    numberOfInstallments: 3, frequency: 'monthly', startDate: '2026-09-01',
+  });
+  assert.strictEqual(sumOf(rows), 10_000_000);
+  // The last installment carries the rounding, as everywhere else.
+  assert.ok(rows[2].amount_due > rows[0].amount_due);
+});
+
+test('carried + rescheduled reconstructs the contract exactly', () => {
+  const contract = 45_000_000;
+  const carried = 11_250_000;
+  const remaining = contract - carried;
+  const rows = restructurePreview(remaining, {
+    numberOfInstallments: 7, frequency: 'quarterly', startDate: '2026-10-01',
+  });
+  assert.strictEqual(carried + sumOf(rows), contract);
+});
+
+test('quarterly restructuring steps three months at a time', () => {
+  const rows = restructurePreview(3_000_000, {
+    numberOfInstallments: 3, frequency: 'quarterly', startDate: '2026-09-30',
+  });
+  assert.deepStrictEqual(
+    rows.map((r) => r.due_date),
+    ['2026-09-30', '2026-12-30', '2027-03-30']
+  );
+});
+
+test('refuses a restructure that would produce a nonsense schedule', () => {
+  assert.throws(() => restructurePreview(0, {
+    numberOfInstallments: 6, frequency: 'monthly', startDate: '2026-09-01',
+  }), /positive/i);
+  assert.throws(() => restructurePreview(1_000_000, {
+    numberOfInstallments: 0, frequency: 'monthly', startDate: '2026-09-01',
+  }), /whole number/i);
 });
 
 // ── Amounts in words ─────────────────────────────────────────────────────
@@ -452,6 +586,78 @@ test('reads dates day-first, which is the local convention', () => {
   assert.strictEqual(parseDate('2026-03-01'), '2026-03-01');
   assert.strictEqual(parseDate('01/03/2026'), '2026-03-01');
   assert.strictEqual(parseDate(''), null);
+});
+
+// ── CSV export ───────────────────────────────────────────────────────────
+section('CSV export');
+
+test('quotes only what needs quoting, and doubles embedded quotes', () => {
+  const csv = toCsv(
+    [['Name', 'name'], ['Note', 'note']],
+    [{ name: 'Okonkwo, Adeyemi', note: 'said "Friday"' }, { name: 'Bello', note: 'fine' }]
+  );
+  assert.ok(csv.includes('"Okonkwo, Adeyemi"'), 'a comma forces quotes');
+  assert.ok(csv.includes('"said ""Friday"""'), 'quotes are doubled');
+  assert.ok(csv.includes('Bello,fine'), 'plain values stay unquoted');
+});
+
+test('starts with a BOM so Excel does not mangle the Naira sign', () => {
+  const csv = toCsv([['Amount', 'amount']], [{ amount: '₦45,000,000' }]);
+  assert.strictEqual(csv.charCodeAt(0), 0xfeff);
+  assert.ok(csv.includes('₦45,000,000'));
+});
+
+test('round-trips through the parser', () => {
+  const rows = [{ full_name: 'Okonkwo, Adeyemi', phone: '08031234567' }];
+  const csv = toCsv([['Full name', 'full_name'], ['Phone', 'phone']], rows);
+  const { records } = parseCsvToObjects(csv);
+  assert.strictEqual(records[0].full_name, 'Okonkwo, Adeyemi');
+  assert.strictEqual(records[0].phone, '08031234567');
+});
+
+test('renders a missing value as empty rather than "null"', () => {
+  const csv = toCsv([['Email', 'email']], [{ email: null }, {}]);
+  assert.ok(!/null|undefined/.test(csv), csv);
+});
+
+// ── Session invalidation ─────────────────────────────────────────────────
+section('Session tokens');
+
+test('issues a token carrying the session generation', () => {
+  const token = auth.issueToken({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', email: 'a@b.c', token_version: 3 });
+  const claims = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+  assert.strictEqual(claims.tv, 3);
+  assert.strictEqual(claims.id, claims.sub, 'both claim names are set for compatibility');
+});
+
+test('a user with no token_version still gets a usable token', () => {
+  const token = auth.issueToken({ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', email: 'b@c.d' });
+  const claims = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+  assert.strictEqual(claims.tv, 0, 'defaults to generation 0, matching the column default');
+});
+
+test('a staff token carries no audience, so the portal cannot accept it', () => {
+  const token = auth.issueToken({ id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', email: 'c@d.e' });
+  const claims = jwt.decode(token);
+  assert.strictEqual(claims.aud, undefined);
+});
+
+test('a portal token carries aud:re-portal, so the staff API cannot accept it', () => {
+  const token = portal.issuePortalToken({
+    id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    organization_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    portal_token_version: 2,
+  });
+  const claims = jwt.decode(token);
+  assert.strictEqual(claims.aud, 're-portal');
+  assert.strictEqual(claims.v, 2);
+  assert.strictEqual(claims.id, undefined, 'no subject claim the staff middleware would read');
+});
+
+test('portal link lifetime is capped, however PORTAL_TOKEN_TTL_DAYS is set', () => {
+  // A link nobody remembers to revoke has to expire on its own eventually.
+  assert.ok(env.portal.tokenTtlDays <= 90, `got ${env.portal.tokenTtlDays}`);
+  assert.ok(env.portal.tokenTtlDays >= 1, `got ${env.portal.tokenTtlDays}`);
 });
 
 // ── Phone numbers ────────────────────────────────────────────────────────

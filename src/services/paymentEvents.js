@@ -37,13 +37,14 @@ const formatDate = (value) =>
 
 // `source` is 'paystack' | 'manual' | 'portal' — it decides how the audit
 // entry is attributed, which is the whole point of having one.
-async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = null }) {
+async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = null, overpayment = 0 }) {
   const outcome = {
     commission: 'skipped',
     receipt: 'skipped',
     buyer_email: 'skipped',
     buyer_sms: 'skipped',
     promise: 'none',
+    overpayment: Number(overpayment) || 0,
   };
 
   let receipt = null;
@@ -159,7 +160,10 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
     entityType: 're_payments',
     entityId: paymentId,
     summary: `${naira(payment.amount)} received from ${customer.full_name || 'buyer'} `
-      + `for installment ${schedule.installment_number} (${payment.method})`,
+      + `for installment ${schedule.installment_number} (${payment.method})`
+      // Named in the summary, not buried in metadata: an unexplained credit is
+      // exactly the fact somebody will come looking for in this log.
+      + (outcome.overpayment > 0 ? ` — ${naira(outcome.overpayment)} OVER the amount due` : ''),
     metadata: {
       source,
       amount: Number(payment.amount),
@@ -169,6 +173,7 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
       reservation_id: reservation.id,
       receipt: outcome.receipt,
       commission: outcome.commission,
+      overpayment: outcome.overpayment || undefined,
     },
   });
 

@@ -25,7 +25,14 @@
 
   // Remembers the project filter across screens, so choosing "Lekki Gardens"
   // on the dashboard does not reset when you go and look at the units.
+  //
+  // It is module-level, which means it outlives a sign-out unless something
+  // clears it — and an office machine shared between the MD and a collections
+  // officer would hand the second person a dashboard silently scoped to the
+  // first person's project. realestate.js calls the hook below from signOut().
   var projectFilter = null;
+
+  R.resetScreenState = function () { projectFilter = null; };
 
   function head(title, sub, actions) {
     return '<div class="page-head"><div>' +
@@ -51,6 +58,17 @@
         '<div class="spacer"></div>' + (o.actions || '') + '</div>' : '') +
       '<div class="card-body' + (o.flush ? ' flush' : '') + '">' + bodyHtml + '</div>' +
     '</div>';
+  }
+
+  // Supabase returns a nested one-to-many as an array, but a relationship it
+  // resolves as one-to-one comes back as a bare object — and which of the two
+  // you get depends on the foreign keys it can see, not on the query. Every
+  // place that iterates a nested relation goes through this, so a shape change
+  // degrades to "no rows" instead of "forEach is not a function" on a screen
+  // the developer is standing in front of.
+  function asArray(value) {
+    if (Array.isArray(value)) return value;
+    return value ? [value] : [];
   }
 
   function options(list, valueKey, labelKey, selected) {
@@ -114,11 +132,27 @@
         '<div class="brief">' +
           '<div class="brief-head">' +
             '<span class="eyebrow">Morning Brief</span>' +
-            '<span class="brief-meta">' + esc(brief ? [brief.brief_date, brief.generated_by === 'fallback' ? 'rule-based' : ''].filter(Boolean).join(' · ') : '') + '</span>' +
+            // "Today at 07:14" rather than a bare date. Checking the dashboard
+            // at 8pm, the only thing worth knowing about the brief is whether
+            // it is this morning's — and a date cannot answer that.
+            '<span class="brief-meta">' + esc(brief
+              ? [R.fmtRelative(brief.created_at) || brief.brief_date,
+                 brief.generated_by === 'fallback' ? 'rule-based' : ''].filter(Boolean).join(' · ')
+              : '') + '</span>' +
           '</div>' +
           '<p class="brief-body' + (brief ? '' : ' is-muted') + '" id="brief-summary">' +
             esc(brief ? brief.summary : 'No brief yet. The first one is written automatically at 7:00 AM Lagos time, or you can generate it now.') +
           '</p>' +
+
+          // A degraded morning is stated, not disguised. Without this a
+          // rule-based brief reads as the AI's work, and nobody knows to look
+          // at it more carefully or to try again.
+          (brief && brief.payload && brief.payload.model_error
+            ? '<div class="notice info mt-1" style="margin-bottom:0">' +
+                'The AI was unavailable this morning, so this brief was built from the rules. ' +
+                'The figures are correct; only the wording is plainer.' +
+              '</div>'
+            : '') +
           (risks.length
             ? '<div class="risk-row">' + risks.slice(0, 6).map(function (r) {
                 return '<div class="risk-chip ' + esc(r.severity) + '"><b>' + esc(r.customer_name) + '</b><span>' + esc(r.reason) + '</span></div>';
@@ -126,7 +160,10 @@
             : '') +
           '<div class="brief-actions">' +
             '<button class="btn brass" id="btn-brief">Regenerate brief</button>' +
-            '<span class="brief-meta" id="brief-status"></span>' +
+            // Every click is a paid model call. Saying so is cheaper than
+            // discovering someone clicked it forty times because the wording
+            // looked off.
+            '<span class="brief-meta" id="brief-status">Writes a new brief — one AI call</span>' +
           '</div>' +
         '</div>' +
 
@@ -170,15 +207,20 @@
         });
       });
 
+      // R.onClick disables the button for the duration, which is the debounce:
+      // a frustrated developer cannot queue twenty model calls by clicking
+      // twenty times.
       R.onClick(view, '#btn-brief', async function () {
         R.el('brief-status').textContent = 'reading payments, schedules and documents…';
         try {
-          await api.post('/brief/generate');
-          toast('Brief regenerated.', 'ok');
+          var fresh = await api.post('/brief/generate');
+          toast(fresh.generated_by === 'fallback'
+            ? 'Brief rebuilt from the rules — the AI was unavailable.'
+            : 'Brief regenerated.', 'ok');
           await R.reload();
         } finally {
           var status = R.el('brief-status');
-          if (status) status.textContent = '';
+          if (status) status.textContent = 'Writes a new brief — one AI call';
         }
       });
 
@@ -207,7 +249,10 @@
 
   function riskRow(c) {
     var phone = c.customer.phone ? String(c.customer.phone) : '';
-    var digits = phone.replace(/[^0-9]/g, '');
+    // R.waLink normalizes 0803… to 234803…. Stripping non-digits (what this
+    // used to do) produced wa.me/08031234567, which opens WhatsApp and then
+    // says the number is incorrect — on the screen reps use most.
+    var whatsapp = R.waLink(phone);
     var project = (c.unit && c.unit.re_projects && c.unit.re_projects.name) || '';
     var meta = [project, c.unit && c.unit.unit_number ? 'Unit ' + c.unit.unit_number : '',
       R.plural(c.overdue_count, 'missed payment')].filter(Boolean).map(esc).join(' · ');
@@ -230,7 +275,7 @@
       (flags ? '<div class="record-flags">' + flags + '</div>' : '') +
       '<div class="record-actions">' +
         (phone ? '<a class="action-link" href="tel:' + esc(phone) + '">Call</a>' : '') +
-        (digits ? '<a class="action-link" target="_blank" rel="noopener" href="https://wa.me/' + esc(digits) + '">WhatsApp</a>' : '') +
+        (whatsapp ? '<a class="action-link" target="_blank" rel="noopener" href="' + esc(whatsapp) + '">WhatsApp</a>' : '') +
         '<button class="action-link" data-promise="' + esc(c.oldest_schedule_id) + '" data-name="' + esc(c.customer.full_name) + '">Log a promise</button>' +
         '<button class="action-link" data-buyer="' + esc(c.customer.id) + '">Open</button>' +
       '</div>' +
@@ -546,7 +591,11 @@
                   (mediaCount(u) ? 'Media ' + mediaCount(u) : 'Media') +
                 '</button> ' +
                 (u.status === 'available'
-                  ? '<button class="btn-quiet" data-reserve="' + esc(u.id) + '">Reserve</button>'
+                  ? '<button class="btn-quiet" data-reserve="' + esc(u.id) + '">Reserve</button> '
+                  : '') +
+                (u.status === 'available'
+                  ? '<button class="btn-quiet" data-delete-unit="' + esc(u.id) +
+                    '" data-label="Unit ' + esc(u.unit_number) + '">Delete</button>'
                   : '') +
               '</td>' +
             '</tr>';
@@ -570,6 +619,10 @@
         button.addEventListener('click', function () { openReservationModal({ unitId: button.dataset.reserve }); });
       });
 
+      R.onClick(view, '[data-delete-unit]', async function (button) {
+        await deleteModal('units', button.dataset.deleteUnit, button.dataset.label);
+      });
+
       R.qsa('[data-media]', view).forEach(function (button) {
         button.addEventListener('click', function () {
           var unit = units.find(function (u) { return u.id === button.dataset.media; });
@@ -578,6 +631,39 @@
       });
     },
   };
+
+  /* ══ DELETE AND RESTORE ═════════════════════════════════════════════════
+     Nothing is really deleted. The confirmation says what goes with it and
+     says plainly that it can be brought back, because a warning that
+     overstates the danger gets clicked through as fast as one that
+     understates it. */
+  async function deleteModal(resource, id, label) {
+    var impact = await api('/recycle/' + resource + '/' + id + '/impact');
+
+    R.modal({
+      title: 'Delete ' + (label || 'this record') + '?',
+      body:
+        '<div class="notice mb-2">This also removes ' + esc(impact.takes_with_it) + '.</div>' +
+        '<p class="muted mb-2">Nothing is permanently erased — the records stay in the database and in the ' +
+        'activity log, and you can restore them from the bin in Settings.</p>' +
+        '<div class="field"><label for="del-reason">Reason (optional)</label>' +
+          '<input class="input" id="del-reason" name="reason" placeholder="Duplicate entry"></div>',
+      submitLabel: 'Delete',
+      onSubmit: async function (form, close) {
+        var result = await api('/recycle/' + resource + '/' + id, {
+          method: 'DELETE',
+          body: JSON.stringify({ reason: R.values(form).reason || null }),
+        });
+        close();
+        toast('Deleted ' + result.total + ' record(s). Restore from Settings → Bin.', 'ok');
+        R.refreshCounts();
+        R.reload();
+      },
+    });
+
+    var submit = R.qs('.modal-foot [type="submit"]');
+    if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
+  }
 
   function mediaCount(unit) {
     var media = unit.metadata && unit.metadata.media;
@@ -696,7 +782,9 @@
   // How inventory actually gets entered: one paste of forty units, not forty
   // form submissions.
   function bulkUnitModal(projects) {
-    R.modal({
+    // The handle is captured rather than looking the form up by id: modal form
+    // ids are now unique per instance, so #modal-form no longer exists.
+    var panel = R.modal({
       title: 'Add many units',
       wide: true,
       body:
@@ -743,7 +831,7 @@
 
     // Live preview: "A1 … A20 (20 units)". Cheap, and it stops the mistake
     // where somebody creates 1–2000 by leaving the default in.
-    var form = R.qs('#modal-form');
+    var form = panel.form;
     var update = function () {
       var v = R.values(form);
       var count = Number(v.to) - Number(v.from) + 1;
@@ -758,7 +846,7 @@
   }
 
   function importUnitsModal(projects) {
-    R.modal({
+    var panel = R.modal({
       title: 'Import units from CSV',
       wide: true,
       body:
@@ -809,7 +897,9 @@
       var reader = new FileReader();
       reader.onload = function () {
         R.el('i-csv').value = reader.result;
-        R.qs('#modal-form').dataset.previewed = 'false';
+        // A new file invalidates the previous preview, so the next submit
+        // previews again instead of importing something nobody has seen.
+        panel.form.dataset.previewed = 'false';
       };
       reader.readAsText(file);
     });
@@ -830,7 +920,8 @@
           '<button class="btn primary" id="btn-new-buyer">Add buyer</button>') +
 
         card(null, table(
-          [{ label: 'Name' }, { label: 'Phone' }, { label: 'Email' }, { label: 'Source' }, { label: 'Added' }],
+          [{ label: 'Name' }, { label: 'Phone' }, { label: 'Email' }, { label: 'Source' },
+            { label: 'Added' }, { label: '' }],
           customers,
           function (c) {
             return '<tr class="is-clickable" data-open="' + esc(c.id) + '">' +
@@ -839,6 +930,10 @@
               '<td class="muted">' + esc(c.email || '—') + '</td>' +
               '<td class="muted">' + esc(c.source || '—') + '</td>' +
               '<td class="muted">' + esc(fmtDate(c.created_at)) + '</td>' +
+              // data-stop keeps the row's own click handler from firing and
+              // opening the drawer behind the confirmation.
+              '<td class="right"><button class="btn-quiet" data-stop data-delete-customer="' + esc(c.id) +
+                '" data-label="' + esc(c.full_name) + '">Delete</button></td>' +
             '</tr>';
           },
           {
@@ -848,7 +943,14 @@
         ), { flush: true });
 
       R.qsa('[data-open]', view).forEach(function (row) {
-        row.addEventListener('click', function () { openCustomer(row.dataset.open); });
+        row.addEventListener('click', function (event) {
+          if (event.target.closest('[data-stop]')) return;
+          openCustomer(row.dataset.open);
+        });
+      });
+
+      R.onClick(view, '[data-delete-customer]', async function (button) {
+        await deleteModal('customers', button.dataset.deleteCustomer, button.dataset.label);
       });
 
       R.qs('#btn-new-buyer', view).addEventListener('click', customerModal);
@@ -889,7 +991,7 @@
   // The onboarding moment: 150 existing buyers, their units, their plans and
   // what they have already paid, in one paste.
   function importCustomersModal() {
-    R.modal({
+    var panel = R.modal({
       title: 'Import buyers from CSV',
       wide: true,
       body:
@@ -943,7 +1045,7 @@
       var reader = new FileReader();
       reader.onload = function () {
         R.el('ic-csv').value = reader.result;
-        R.qs('#modal-form').dataset.previewed = 'false';
+        panel.form.dataset.previewed = 'false';
       };
       reader.readAsText(file);
     });
@@ -964,9 +1066,9 @@
 
       var totalPlan = 0, totalPaid = 0, overdue = 0;
       reservations.forEach(function (r) {
-        (r.re_installment_plans || []).forEach(function (plan) {
+        asArray(r.re_installment_plans).forEach(function (plan) {
           totalPlan += Number(plan.total_amount || 0);
-          (plan.re_installment_schedule || []).forEach(function (s) {
+          asArray(plan.re_installment_schedule).forEach(function (s) {
             if (s.status === 'paid') totalPaid += Number(s.amount_due || 0);
             if (s.status === 'overdue') overdue += Number(s.amount_due || 0);
           });
@@ -986,16 +1088,17 @@
 
         '<div class="btn-row mt-2">' +
           (c.phone ? '<a class="btn-quiet" href="tel:' + esc(c.phone) + '">Call</a>' : '') +
-          (c.phone ? '<a class="btn-quiet" target="_blank" rel="noopener" href="https://wa.me/' + esc(String(c.phone).replace(/\D/g, '')) + '">WhatsApp</a>' : '') +
+          (R.waLink(c.phone) ? '<a class="btn-quiet" target="_blank" rel="noopener" href="' + esc(R.waLink(c.phone)) + '">WhatsApp</a>' : '') +
           '<button class="btn-quiet" id="d-portal">Buyer portal link</button>' +
         '</div>' +
 
         reservations.map(function (r) {
           var unit = r.re_units || {};
           var project = unit.re_projects || {};
-          var plan = (r.re_installment_plans || [])[0];
-          var schedule = (plan && plan.re_installment_schedule) || [];
-          schedule.sort(function (a, b) { return a.installment_number - b.installment_number; });
+          var plan = asArray(r.re_installment_plans)[0];
+          var schedule = asArray(plan && plan.re_installment_schedule)
+            .slice() // never sort the array the API handed us in place
+            .sort(function (a, b) { return a.installment_number - b.installment_number; });
 
           return '<div class="drawer-section">' +
             '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center">' +
@@ -1076,7 +1179,7 @@
           reservations,
           function (r) {
             var unit = r.re_units || {};
-            var plan = (r.re_installment_plans || [])[0];
+            var plan = asArray(r.re_installment_plans)[0];
             return '<tr>' +
               '<td class="cell-primary">' + esc((r.re_customers && r.re_customers.full_name) || '—') +
                 '<div class="cell-meta">' + esc((r.re_customers && r.re_customers.phone) || '') + '</div></td>' +
@@ -1086,7 +1189,14 @@
               '<td class="num">' + naira(plan ? plan.total_amount : unit.list_price) + '</td>' +
               '<td class="muted">' + esc(fmtDate(r.reserved_at)) + '</td>' +
               '<td>' + badge(r.status) + (r.escalation_stage && r.escalation_stage !== 'none' ? ' ' + badge(r.escalation_stage) : '') + '</td>' +
-              '<td class="right"><button class="btn-quiet" data-res-menu="' + esc(r.id) + '" data-status="' + esc(r.status) + '">Change</button></td>' +
+              '<td class="right nowrap">' +
+                (asArray(r.re_installment_plans).length
+                  ? '<button class="btn-quiet" data-restructure="' + esc(r.id) + '" data-buyer-name="' +
+                    esc((r.re_customers && r.re_customers.full_name) || '') + '">Restructure</button> '
+                  : '') +
+                '<button class="btn-quiet" data-res-menu="' + esc(r.id) + '" data-status="' + esc(r.status) +
+                  '" data-buyer-name="' + esc((r.re_customers && r.re_customers.full_name) || '') + '">Change</button>' +
+              '</td>' +
             '</tr>';
           },
           { emptyTitle: 'No reservations yet', emptyHint: 'A reservation ties a buyer to a unit and starts their payment schedule.' }
@@ -1096,11 +1206,122 @@
 
       R.qsa('[data-res-menu]', view).forEach(function (button) {
         button.addEventListener('click', function () {
-          reservationStatusModal(button.dataset.resMenu, button.dataset.status);
+          reservationStatusModal(button.dataset.resMenu, button.dataset.status, button.dataset.buyerName);
         });
+      });
+
+      R.onClick(view, '[data-restructure]', async function (button) {
+        await restructureModal(button.dataset.restructure, button.dataset.buyerName);
       });
     },
   };
+
+  /* ══ RESTRUCTURE A PAYMENT PLAN ═════════════════════════════════════════
+     The alternative to cancelling. A buyer three installments down agrees new
+     terms; the money they have already paid carries forward and their receipts
+     still refer to the schedule they were issued against.
+
+     The preview is fetched from the server, using the same function that will
+     build the real schedule — so what the rep reads to the buyer on the phone
+     is exactly what gets written. */
+  async function restructureModal(reservationId, buyerName) {
+    var state = await api('/reservations/' + reservationId + '/restructure');
+
+    var panel = R.modal({
+      title: 'Restructure ' + (buyerName ? buyerName + '’s' : 'this') + ' payment plan',
+      wide: true,
+      body:
+        '<div class="grid cols-3 mb-2">' +
+          stat('Contract value', naira(state.contract_value)) +
+          stat('Already paid', naira(state.total_paid), { tone: 'moss' }) +
+          stat('To reschedule', naira(state.remaining), { tone: 'gold', accent: 'gold' }) +
+        '</div>' +
+
+        '<p class="field-hint mb-2">' +
+          'Current terms: ' + state.current.number_of_installments + ' ' + esc(state.current.frequency) +
+          ' installments from ' + esc(fmtDate(state.current.start_date)) + '. ' +
+          state.paid_rows + ' paid, ' + state.unpaid_rows + ' unpaid.' +
+        '</p>' +
+
+        '<div class="notice info" style="font-size:12px">' +
+          'The old plan is kept and marked superseded. Paid installments and their receipts are untouched; ' +
+          'the ' + state.unpaid_rows + ' unpaid one(s) are waived and replaced by the schedule below.' +
+        '</div>' +
+
+        '<div class="field-row three">' +
+          '<div class="field"><label for="rs-count">New installments</label>' +
+            '<input class="input" id="rs-count" name="number_of_installments" type="number" min="1" max="120" value="12"></div>' +
+          '<div class="field"><label for="rs-freq">Frequency</label>' +
+            '<select class="select" id="rs-freq" name="frequency">' +
+              '<option value="monthly">Monthly</option><option value="quarterly">Quarterly</option>' +
+            '</select></div>' +
+          '<div class="field"><label for="rs-start">First payment due</label>' +
+            '<input class="input" id="rs-start" name="start_date" type="date" value="' + R.todayISO() + '"></div>' +
+        '</div>' +
+
+        '<div class="field"><label for="rs-reason">Why?</label>' +
+          '<input class="input" id="rs-reason" name="reason" placeholder="Buyer requested a 3-month moratorium">' +
+          '<p class="field-hint">Recorded in the activity log. A renegotiated schedule is a change to the terms of a sale, and this is the note that explains it later.</p></div>' +
+
+        '<div id="rs-preview"></div>',
+      submitLabel: 'Restructure the plan',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        if (!v.number_of_installments || !v.start_date) {
+          throw new Error('Set the number of installments and the first due date.');
+        }
+        var result = await api.post('/reservations/' + reservationId + '/restructure', {
+          number_of_installments: v.number_of_installments,
+          frequency: v.frequency,
+          start_date: v.start_date,
+          reason: v.reason || null,
+        });
+        close();
+        toast('Plan restructured — ' + naira(result.carried_amount_paid) + ' carried forward, '
+          + result.schedule.length + ' new installments.', 'ok');
+        R.reload();
+      },
+    });
+
+    // Live preview of the actual dates and amounts, debounced so typing "18"
+    // is one request rather than two.
+    var timer = null;
+    var refresh = function () {
+      clearTimeout(timer);
+      timer = setTimeout(async function () {
+        var v = R.values(panel.form);
+        if (!v.number_of_installments || !v.start_date) return;
+        try {
+          var proposed = await api('/reservations/' + reservationId + '/restructure'
+            + '?number_of_installments=' + encodeURIComponent(v.number_of_installments)
+            + '&frequency=' + encodeURIComponent(v.frequency)
+            + '&start_date=' + encodeURIComponent(v.start_date));
+
+          var target = R.el('rs-preview');
+          if (proposed.proposed_error) {
+            target.innerHTML = '<div class="notice mt-1">' + esc(proposed.proposed_error) + '</div>';
+            return;
+          }
+          var rows = proposed.proposed || [];
+          target.innerHTML = rows.length
+            ? '<div class="label mt-2">New schedule</div><div>' + rows.map(function (row) {
+                return '<div class="sched"><span class="sched-n">' + row.installment_number + '</span>' +
+                  '<span class="sched-main"><span class="mono">' + naira(row.amount_due) + '</span>' +
+                  '<span class="page-sub">due ' + esc(fmtDate(row.due_date)) + '</span></span></div>';
+              }).join('') + '</div>'
+            : '';
+        } catch (err) {
+          R.el('rs-preview').innerHTML = '<div class="notice mt-1">' + esc(err.message) + '</div>';
+        }
+      }, 280);
+    };
+
+    ['rs-count', 'rs-freq', 'rs-start'].forEach(function (id) {
+      R.el(id).addEventListener('input', refresh);
+      R.el(id).addEventListener('change', refresh);
+    });
+    refresh();
+  }
 
   // The modal has to load units, buyers and reps before it can draw itself, so
   // it is async — and an async function handed straight to addEventListener
@@ -1132,7 +1353,7 @@
       };
     });
 
-    R.modal({
+    var panel = R.modal({
       title: 'New reservation',
       wide: true,
       body:
@@ -1204,7 +1425,7 @@
     // Default the plan total to the unit's list price, and show what each
     // installment works out at. The last one carries the rounding remainder,
     // which is why the preview says "approximately".
-    var form = R.qs('#modal-form');
+    var form = panel.form;
     var unitSelect = R.el('r-unit');
     var total = R.el('r-total');
 
@@ -1236,8 +1457,8 @@
     setPrice();
   }
 
-  function reservationStatusModal(id, current) {
-    R.modal({
+  function reservationStatusModal(id, current, buyerName) {
+    var panel = R.modal({
       title: 'Change reservation status',
       body:
         '<p class="muted mb-2">Currently <b>' + esc(current) + '</b>. The unit follows: cancelling puts it back on the market, completing takes it off for good.</p>' +
@@ -1247,15 +1468,74 @@
               return '<option value="' + s + '"' + (s === current ? ' selected' : '') + '>' +
                 s.charAt(0).toUpperCase() + s.slice(1) + '</option>';
             }).join('') +
-          '</select></div>',
+          '</select></div>' +
+        '<div id="rs-warn"></div>',
       submitLabel: 'Update',
       onSubmit: async function (form, close) {
-        await api.patch('/reservations/' + id + '/status', { status: R.values(form).status });
+        var next = R.values(form).status;
+
+        // Cancelling is the one transition that cannot be undone by picking a
+        // different option afterwards: it frees the unit, so somebody else can
+        // reserve it in the meantime and the original buyer's allocation is
+        // gone. A misclick by a collections officer would be a self-inflicted
+        // double allocation, so it gets a typed confirmation rather than an
+        // "are you sure" nobody reads.
+        if (next === 'cancelled' && current !== 'cancelled') {
+          close();
+          return confirmCancellation(id, buyerName);
+        }
+
+        await api.patch('/reservations/' + id + '/status', { status: next });
         close();
         toast('Reservation updated.', 'ok');
         R.reload();
       },
     });
+
+    // The consequence appears as soon as the option is chosen, before the
+    // button is pressed.
+    var select = R.qs('#rs-status', panel.form);
+    var warn = R.qs('#rs-warn', panel.form);
+    var describe = function () {
+      var next = select.value;
+      warn.innerHTML =
+        next === 'cancelled' && current !== 'cancelled'
+          ? '<div class="notice mt-1">The unit returns to <b>available</b> and can be reserved by someone else. ' +
+            'The payment history stays, but the allocation does not.</div>'
+          : next === 'completed'
+            ? '<div class="notice info mt-1">The unit is marked <b>sold</b> and taken off the market permanently.</div>'
+            : '';
+    };
+    select.addEventListener('change', describe);
+    describe();
+  }
+
+  // Typing the word is the point. A confirm dialog with a button is dismissed
+  // reflexively; a word has to be read first.
+  function confirmCancellation(id, buyerName) {
+    R.modal({
+      title: 'Cancel this reservation?',
+      body:
+        '<div class="notice mb-2">This frees the unit for anyone else to reserve. ' +
+        (buyerName ? esc(buyerName) + ' loses their allocation.' : 'The buyer loses their allocation.') +
+        '</div>' +
+        '<p class="muted mb-2">Their payments and receipts are kept, and the change is recorded in the activity log against your name.</p>' +
+        '<div class="field"><label for="cx-word">Type <b>CANCEL</b> to confirm</label>' +
+          '<input class="input" id="cx-word" name="word" autocomplete="off" spellcheck="false" placeholder="CANCEL"></div>',
+      submitLabel: 'Cancel the reservation',
+      onSubmit: async function (form, close) {
+        if (R.values(form).word.toUpperCase() !== 'CANCEL') {
+          throw new Error('Type CANCEL exactly to confirm, or close this box to leave it alone.');
+        }
+        await api.patch('/reservations/' + id + '/status', { status: 'cancelled' });
+        close();
+        toast('Reservation cancelled. The unit is available again.', 'ok');
+        R.reload();
+      },
+    });
+
+    var submit = R.qs('.modal-foot [type="submit"]');
+    if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
   }
 
   /* ══ PAYMENTS ═══════════════════════════════════════════════════════════ */
@@ -1289,7 +1569,7 @@
 
         R.onClick(view, '[data-receipt]', async function (button) {
           var result = await api.post('/payments/' + button.dataset.receipt + '/receipt');
-          window.open(result.download_url, '_blank', 'noopener');
+          R.openFile(result.download_url);
           toast('Receipt ' + result.receipt_number + ' ready.', 'ok');
         });
         return;
@@ -1363,13 +1643,16 @@
   }
 
   function recordPaymentModal(scheduleId, outstanding, customerName) {
-    R.modal({
+    var due = Number(outstanding || 0);
+
+    var panel = R.modal({
       title: 'Record a payment',
       body:
         (customerName ? '<p class="muted mb-2">From <b>' + esc(customerName) + '</b>.</p>' : '') +
         '<div class="field"><label for="pay-amount">Amount received</label>' +
           '<div class="input-money"><input class="input" id="pay-amount" name="amount" type="number" min="1" step="1000" required value="' + esc(outstanding || '') + '"></div>' +
-          '<p class="field-hint">Part payments are fine. The installment settles once it is fully covered.</p></div>' +
+          '<p class="field-hint">Part payments are fine. The installment settles once it is fully covered.</p>' +
+          '<div id="pay-warn"></div></div>' +
         '<div class="field"><label for="pay-method">Method</label>' +
           '<select class="select" id="pay-method" name="method">' +
             '<option value="bank_transfer">Bank transfer</option>' +
@@ -1400,9 +1683,37 @@
         if (String(effects.commission).indexOf('accrued') === 0) notes.push(effects.commission);
 
         toast('Payment recorded' + (notes.length ? ' — ' + notes.join(', ') : '') + '.', 'ok');
+
+        // An overpayment gets its own message, not a clause in a list. It is
+        // the thing the buyer will phone about.
+        if (result.overpayment > 0) {
+          toast(naira(result.overpayment) + ' more than this installment required. '
+            + 'Agree with the buyer which installment it goes against, then record it there.', 'err');
+        }
+
         R.refreshCounts();
         R.reload();
       },
+    });
+
+    // Warn while they type, not after they submit. Recording ₦5,000,000 against
+    // a ₦500,000 installment is usually a missed decimal point, and the moment
+    // to catch it is before the row exists.
+    var amount = R.qs('#pay-amount', panel.form);
+    var warn = R.qs('#pay-warn', panel.form);
+
+    amount.addEventListener('input', function () {
+      var value = Number(amount.value || 0);
+      if (due > 0 && value > due) {
+        warn.innerHTML = '<div class="notice mt-1">' +
+          esc(naira(value - due)) + ' more than the ' + esc(naira(due)) + ' outstanding on this installment. ' +
+          'It will be recorded, and flagged as a credit for you to allocate.</div>';
+      } else if (due > 0 && value > 0 && value < due) {
+        warn.innerHTML = '<div class="notice info mt-1">Part payment — ' +
+          esc(naira(due - value)) + ' will remain outstanding.</div>';
+      } else {
+        warn.innerHTML = '';
+      }
     });
   }
 
@@ -1438,14 +1749,14 @@
 
       R.onClick(view, '[data-generate]', async function (button) {
         var result = await api.post('/documents/' + button.dataset.generate + '/generate');
-        window.open(result.download_url, '_blank', 'noopener');
+        R.openFile(result.download_url);
         toast('Document generated.', 'ok');
         R.reload();
       });
 
       R.onClick(view, '[data-download]', async function (button) {
         var result = await api('/documents/' + button.dataset.download + '/download');
-        window.open(result.download_url, '_blank', 'noopener');
+        R.openFile(result.download_url);
       });
 
       R.qs('#btn-new-doc', view).addEventListener('click', function () {
@@ -1476,7 +1787,7 @@
             toast('Generating the letter…');
             try {
               var result = await api.post('/documents/' + created.id + '/generate');
-              window.open(result.download_url, '_blank', 'noopener');
+              R.openFile(result.download_url);
               toast('Allocation letter ready.', 'ok');
             } catch (err) {
               // Puppeteer is absent on some runtimes. The document row still
@@ -1620,7 +1931,10 @@
 
       view.innerHTML =
         head('Reports', 'The summary you send to investors, without rebuilding it in PowerPoint.',
-          '<button class="btn" id="btn-print">Print / PDF</button>') +
+          '<button class="btn" data-export="customers">Export buyers</button>' +
+          '<button class="btn" data-export="schedule">Export schedule</button>' +
+          '<button class="btn" data-export="payments">Export payments</button>' +
+          '<button class="btn primary" id="btn-print">Print / PDF</button>') +
 
         '<div class="grid cols-4 mb-2">' +
           stat('Gross development value', nairaShort(t.gross_development_value)) +
@@ -1662,6 +1976,14 @@
         ), { flush: true });
 
       R.qs('#btn-print', view).addEventListener('click', function () { window.print(); });
+
+      // Your data, in a file you keep. Also the only backup a developer
+      // controls without a Supabase login.
+      R.onClick(view, '[data-export]', async function (button) {
+        var kind = button.dataset.export;
+        await R.downloadCsv('/reports/export/' + kind, 'realtika-' + kind + '.csv');
+        toast('Exported. Check your downloads.', 'ok');
+      });
     },
   };
 
@@ -1671,12 +1993,14 @@
       var tab = query.tab || 'workspace';
 
       var tabs = '<div class="filter-row">' +
-        [['workspace', 'Workspace'], ['team', 'Team & reps'], ['activity', 'Activity log']].map(function (t) {
+        [['workspace', 'Workspace'], ['team', 'Team & reps'],
+          ['activity', 'Activity log'], ['bin', 'Bin']].map(function (t) {
           return '<a class="pill' + (tab === t[0] ? ' is-on' : '') + '" href="#/settings?tab=' + t[0] + '">' + t[1] + '</a>';
         }).join('') + '</div>';
 
       if (tab === 'activity') return activityTab(view, tabs);
       if (tab === 'team') return teamTab(view, tabs);
+      if (tab === 'bin') return binTab(view, tabs, query.of || 'customers');
       return workspaceTab(view, tabs);
     },
   };
@@ -1765,9 +2089,18 @@
       var payload = { full_name: v.full_name };
       if (v.password) { payload.password = v.password; payload.current_password = v.current_password; }
       try {
-        await R.request('/auth/me', { method: 'PATCH', body: JSON.stringify(payload) });
-        toast('Account updated.', 'ok');
-        if (v.password) R.reload();
+        var result = await R.request('/auth/me', { method: 'PATCH', body: JSON.stringify(payload) });
+
+        // Changing the password invalidates every token, including the one this
+        // tab is holding. The server returns a replacement so the person who
+        // made the change is not signed out by making it.
+        if (result && result.token) {
+          R.adoptToken(result.token);
+          toast('Password changed. Every other signed-in device has been signed out.', 'ok');
+        } else {
+          toast('Account updated.', 'ok');
+        }
+        R.reload();
       } catch (err) { toast(err.message, 'err'); }
     });
   }
@@ -1779,14 +2112,22 @@
     view.innerHTML = head('Team & sales reps', team.is_team ? 'A shared workspace.' : 'A solo workspace.') + tabs +
 
       card('People', table(
-        [{ label: 'Name' }, { label: 'Email' }, { label: 'Role' }, { label: 'Status' }],
+        [{ label: 'Name' }, { label: 'Email' }, { label: 'Role' }, { label: 'Last active' },
+          { label: 'Status' }, { label: '' }],
         team.members,
         function (m) {
           return '<tr>' +
             '<td class="cell-primary">' + esc(m.full_name || '—') + '</td>' +
             '<td class="muted">' + esc(m.email || '') + '</td>' +
             '<td class="muted">' + esc(m.role) + '</td>' +
+            '<td class="muted">' + esc(m.last_login_at ? R.fmtRelative(m.last_login_at) : 'never signed in') + '</td>' +
             '<td>' + badge(m.status) + '</td>' +
+            // The owner cannot be removed — the API refuses it, and offering the
+            // button anyway is just a dead end with a confirmation on it.
+            '<td class="right">' + (m.role !== 'owner' && m.status !== 'removed' && m.id
+              ? '<button class="btn-quiet" data-remove="' + esc(m.id) + '" data-name="' +
+                esc(m.full_name || m.email || 'this person') + '">Remove</button>'
+              : '') + '</td>' +
           '</tr>';
         },
         { emptyTitle: 'Just you so far' }
@@ -1860,6 +2201,10 @@
       });
     }
 
+    R.onClick(view, '[data-remove]', async function (button) {
+      await removeMemberModal(button.dataset.remove, button.dataset.name);
+    });
+
     R.qsa('[data-rate]', view).forEach(function (button) {
       button.addEventListener('click', function () {
         R.modal({
@@ -1907,6 +2252,126 @@
         },
       });
     });
+  }
+
+  // The bin. Soft delete is only a real safety net if the person who deleted
+  // something by mistake can find it and put it back without asking anyone.
+  async function binTab(view, tabs, of) {
+    var kinds = [['customers', 'Buyers'], ['reservations', 'Reservations'], ['units', 'Units'],
+      ['projects', 'Projects'], ['documents', 'Documents'], ['tasks', 'Tasks']];
+
+    var rows = await api('/recycle/' + of + '?limit=200');
+
+    // Each table has a different "what is this row" field, so the label is
+    // picked per kind rather than guessed at generically.
+    var labelOf = function (row) {
+      return row.full_name || row.name || (row.unit_number ? 'Unit ' + row.unit_number : null)
+        || row.title || (row.doc_type ? String(row.doc_type).replace(/_/g, ' ') : null)
+        || String(row.id).slice(0, 8);
+    };
+
+    view.innerHTML = head('Bin', 'Deleted records are kept permanently. Restoring one brings back everything that went with it.') +
+      tabs +
+      '<div class="filter-row">' +
+        kinds.map(function (k) {
+          return '<a class="pill' + (of === k[0] ? ' is-on' : '') + '" href="#/settings?tab=bin&of=' + k[0] + '">' + k[1] + '</a>';
+        }).join('') +
+      '</div>' +
+
+      card(null, table(
+        [{ label: 'Record' }, { label: 'Deleted' }, { label: '' }],
+        rows,
+        function (row) {
+          return '<tr>' +
+            '<td class="cell-primary">' + esc(labelOf(row)) + '</td>' +
+            '<td class="muted">' + esc(R.fmtRelative(row.deleted_at) || fmtDate(row.deleted_at)) + '</td>' +
+            '<td class="right"><button class="btn-quiet" data-restore="' + esc(row.id) + '">Restore</button></td>' +
+          '</tr>';
+        },
+        {
+          emptyTitle: 'Nothing deleted',
+          emptyHint: 'Deleted records appear here and can be restored at any time.',
+        }
+      ), { flush: true });
+
+    R.onClick(view, '[data-restore]', async function (button) {
+      var result = await api.post('/recycle/' + of + '/' + button.dataset.restore + '/restore');
+      var total = Object.values(result.restored || {}).reduce(function (s, n) { return s + n; }, 0);
+      toast('Restored ' + total + ' record(s).', 'ok');
+      R.refreshCounts();
+      R.reload();
+    });
+  }
+
+  /* ══ REMOVING SOMEONE FROM THE TEAM ═════════════════════════════════════
+     A departing rep's open reservations have to go somewhere. Without this
+     step they keep pointing at a rep who is gone: nobody is responsible,
+     nobody is chasing, no commission accrues, and the morning brief names
+     someone who no longer has an account.
+
+     The workload is fetched FIRST so the question is concrete — "Emeka has 40
+     open reservations worth ₦1.8bn. Reassign them to:" — rather than a generic
+     warning that gets clicked through. */
+  async function removeMemberModal(memberId, name) {
+    var work = await api('/settings/team/' + memberId + '/workload');
+
+    var hasReps = work.reps && work.reps.length;
+
+    R.modal({
+      title: 'Remove ' + name + '?',
+      body:
+        (work.has_workload
+          ? '<div class="notice mb-2">' +
+              '<b>' + name + ' holds ' + work.open_reservations + ' open reservation' +
+              (work.open_reservations === 1 ? '' : 's') + '</b>' +
+              (work.open_value ? ' worth ' + esc(nairaShort(work.open_value)) : '') + '. ' +
+              'Choose who takes them over.' +
+            '</div>'
+          : '<div class="notice info mb-2">' + esc(name) + ' has no open reservations to hand over.</div>') +
+
+        (work.has_workload
+          ? '<div class="field"><label for="rm-target">Reassign open reservations to</label>' +
+              '<select class="select" id="rm-target" name="reassign_to">' +
+                (hasReps
+                  ? options(work.reps, 'id', 'name') + '<option value="">Leave unassigned for now</option>'
+                  : '<option value="">Leave unassigned — no other active rep</option>') +
+              '</select>' +
+              '<p class="field-hint">' +
+                'Only open reservations move. Completed and cancelled ones keep ' + esc(name) +
+                '’s name, and commission they have already earned stays theirs — it was earned on money that ' +
+                'had already arrived.' +
+              '</p></div>'
+          : '') +
+
+        '<p class="muted" style="font-size:13px">' +
+          'Their sign-in stops working immediately, every session they have open ends, and their sales-rep ' +
+          'record is deactivated rather than deleted so past sales still show who made them.' +
+        '</p>',
+      submitLabel: 'Remove ' + name,
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        var result = await api.patch('/settings/team/' + memberId, {
+          status: 'removed',
+          reassign_to: v.reassign_to || null,
+        });
+        close();
+
+        var parts = ['Removed ' + name];
+        if (result.reassigned && result.reassigned.moved) {
+          parts.push(result.reassigned.moved + ' reservation(s) reassigned');
+        }
+        if (result.reassigned && result.reassigned.orphaned) {
+          parts.push(result.reassigned.orphaned + ' left unassigned');
+        }
+        if (result.sessions_ended) parts.push('sessions ended');
+
+        toast(parts.join(' — ') + '.', 'ok');
+        R.reload();
+      },
+    });
+
+    var submit = R.qs('.modal-foot [type="submit"]');
+    if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
   }
 
   async function activityTab(view, tabs) {

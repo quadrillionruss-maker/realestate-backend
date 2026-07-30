@@ -19,13 +19,54 @@
 (function () {
   'use strict';
 
-  var API_BASE = window.__API_BASE__ || 'http://localhost:4000/api';
+  // No localhost fallback here, unlike the operator app. If config.js failed to
+  // load — a CSP block, a bad path, a CDN timeout — a buyer would get a page
+  // that silently tried to reach their own machine and then said "something
+  // went wrong". Better to say what is actually broken.
+  var API_BASE = window.__API_BASE__ || null;
 
-  var token = (/[#&]token=([^&]+)/.exec(window.location.hash) || [])[1] || '';
-  if (token) {
+  // ── The token, and surviving a trip to Paystack ──────────────────────────
+  // Read from the fragment on first arrival, then kept in sessionStorage.
+  //
+  // sessionStorage, not localStorage, and the distinction is the whole point:
+  // it is scoped to this one tab and destroyed when the tab closes, so a family
+  // phone does not retain a credential. What it buys is the round trip — the
+  // buyer leaves for Paystack and comes back to portal.html with no fragment,
+  // and without this they would land on "this link is incomplete" immediately
+  // after paying, which is the worst possible moment for it.
+  var STORE_KEY = 'realtika.portal.token';
+  var PAID_KEY = 'realtika.portal.paid';
+
+  var fragmentToken = (/[#&]token=([^&]+)/.exec(window.location.hash) || [])[1] || '';
+  var token = fragmentToken || session(STORE_KEY) || '';
+
+  if (fragmentToken) {
+    session(STORE_KEY, fragmentToken);
     try {
+      // Strip the credential out of the address bar so it is not sitting there
+      // when the buyer hands the phone to someone.
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
     } catch (e) { /* file:// has no history API; harmless */ }
+  }
+
+  // ?paid=<schedule-id> comes back from Paystack's callback_url. The webhook is
+  // usually a second or two behind the redirect, so the row is still 'pending'
+  // when the buyer looks at it.
+  var justPaidSchedule = (/[?&]paid=([^&]+)/.exec(window.location.search) || [])[1] || session(PAID_KEY) || '';
+  if (justPaidSchedule) {
+    session(PAID_KEY, justPaidSchedule);
+    try {
+      window.history.replaceState(null, '', window.location.pathname);
+    } catch (e) { /* ignore */ }
+  }
+
+  function session(key, value) {
+    try {
+      if (value === undefined) return window.sessionStorage.getItem(key);
+      if (value === null) window.sessionStorage.removeItem(key);
+      else window.sessionStorage.setItem(key, value);
+    } catch (e) { /* private mode: the round trip degrades, nothing breaks */ }
+    return value;
   }
 
   function esc(value) {
@@ -78,18 +119,21 @@
 
   // A buyer is not a developer. "Invalid token" means nothing to them; "ask
   // for a new link" is an instruction they can act on.
-  function fail(message) {
+  function fail(message, detail) {
     el('portal-view').innerHTML =
       '<div class="card"><div class="card-body" style="text-align:center;padding:44px 22px">' +
         '<div style="font-size:26px;opacity:.3;margin-bottom:12px">◇</div>' +
         '<div class="serif" style="font-size:20px;margin-bottom:8px">' + esc(message) + '</div>' +
         '<p class="muted" style="font-size:13.5px;line-height:1.6">' +
-          'Please contact your developer\'s sales office and ask them to send you a fresh link.' +
+          esc(detail || 'Please contact your developer\'s sales office and ask them to send you a fresh link.') +
         '</p>' +
       '</div></div>';
   }
 
   async function load() {
+    if (!API_BASE) {
+      return fail('This page could not start up', 'A configuration file did not load. Please refresh, or ask your developer to send the link again.');
+    }
     if (!token) return fail('This link is incomplete');
 
     var account;
@@ -104,12 +148,17 @@
 
     if (developer.company_name) el('developer-name').textContent = developer.company_name;
 
+    // With no phone and no email configured this used to render "Questions
+    // about your account? Contact Realtika." — an instruction with nothing to
+    // act on, naming the wrong company. If there is no way to make contact,
+    // the offer is not made.
+    var reach = [developer.phone, developer.email].filter(Boolean);
     el('portal-foot').innerHTML =
-      'Questions about your account? Contact ' +
-      esc(developer.company_name || 'your developer') +
-      (developer.phone ? ' on ' + esc(developer.phone) : '') +
-      (developer.email ? ' or ' + esc(developer.email) : '') +
-      '.<br>This page is personal to you — please do not forward the link.';
+      (reach.length
+        ? 'Questions about your account? Contact ' + esc(developer.company_name || 'your developer') +
+          ' on ' + reach.map(esc).join(' or ') + '.<br>'
+        : '') +
+      'This page is personal to you — please do not forward the link.';
 
     var nextDue = s.next_due;
 
@@ -130,6 +179,16 @@
         '<div class="meter mt-2"><i style="width:' + s.progress_percent + '%"></i></div>' +
         '<div class="page-sub mt-1">' + s.progress_percent + '% of ' + esc(naira(s.total_contracted)) + ' settled</div>' +
       '</div></div>' +
+
+      // Shown at the top, before anything else, because a buyer returning from
+      // Paystack is looking for exactly one thing.
+      (justPaidSchedule
+        ? '<div class="notice info mt-2" id="paid-banner">' +
+            '<b>Thank you — we are confirming your payment.</b><br>' +
+            'This usually takes a few seconds. Your receipt will be emailed once it clears. ' +
+            'You do not need to pay again.' +
+          '</div>'
+        : '') +
 
       (s.overdue_count
         ? '<div class="notice mt-2">' +
@@ -170,6 +229,55 @@
         : '');
 
     wire();
+    if (justPaidSchedule) watchForConfirmation(account);
+  }
+
+  // Polls until the webhook lands, then re-renders so the buyer sees "paid"
+  // without touching anything.
+  //
+  // Bounded on purpose: eight tries at four seconds is about half a minute,
+  // which covers a normal webhook. Past that the honest thing is to stop and
+  // tell them it is recorded and being processed, rather than spin forever on
+  // someone's mobile data.
+  var confirmTries = 0;
+
+  function watchForConfirmation(previous) {
+    var settled = isSettled(previous, justPaidSchedule);
+    if (settled) {
+      session(PAID_KEY, null);
+      justPaidSchedule = '';
+      toast('Payment confirmed. Your receipt is on its way.', 'ok');
+      return;
+    }
+
+    if (confirmTries >= 8) {
+      var banner = el('paid-banner');
+      if (banner) {
+        banner.innerHTML = '<b>Your payment is recorded and still being confirmed.</b><br>' +
+          'Refresh this page in a few minutes. If it has not cleared by then, contact the sales office — ' +
+          'and please do not pay again in the meantime.';
+      }
+      return;
+    }
+
+    confirmTries += 1;
+    setTimeout(function () { load(); }, 4000);
+  }
+
+  function isSettled(account, scheduleId) {
+    if (!scheduleId) return false;
+    var found = false;
+    (account.reservations || []).forEach(function (r) {
+      var plans = Array.isArray(r.re_installment_plans)
+        ? r.re_installment_plans
+        : (r.re_installment_plans ? [r.re_installment_plans] : []);
+      plans.forEach(function (plan) {
+        (plan.re_installment_schedule || []).forEach(function (row) {
+          if (row.id === scheduleId && row.status === 'paid') found = true;
+        });
+      });
+    });
+    return found;
   }
 
   function reservationBlock(r) {
@@ -204,8 +312,14 @@
                       ? 'paid ' + esc(fmtDate(row.paid_at || row.due_date))
                       : 'due ' + esc(fmtDate(row.due_date))) +
                   '</span></span>' +
-                '<span class="badge ' + esc(row.status) + '">' + esc(row.status) + '</span>' +
-                (row.status !== 'paid'
+                // A row the buyer has just paid shows "confirming", not
+                // "pending" with a live Pay button beside it. That combination
+                // is what talks somebody into paying the same installment
+                // twice while the webhook is still in flight.
+                (row.id === justPaidSchedule && row.status !== 'paid'
+                  ? '<span class="badge pending">confirming…</span>'
+                  : '<span class="badge ' + esc(row.status) + '">' + esc(row.status) + '</span>') +
+                (row.status !== 'paid' && row.id !== justPaidSchedule
                   ? '<button class="btn-quiet" data-schedule="' + esc(row.id) + '">Pay</button>'
                   : '') +
               '</div>';
@@ -221,9 +335,16 @@
         button.disabled = true;
         button.classList.add('is-working');
         try {
-          var result = await api('/pay/' + button.dataset.schedule, { method: 'POST', body: '{}' });
-          // Same tab: a popup blocker eating the payment window is the single
-          // most common way an online payment quietly fails to happen.
+          var scheduleId = button.dataset.schedule;
+          var result = await api('/pay/' + scheduleId, { method: 'POST', body: '{}' });
+
+          // Remembered before leaving, so the "confirming" state survives even
+          // if Paystack drops the ?paid= parameter on the way back.
+          session(PAID_KEY, scheduleId);
+
+          // Same tab, not a popup: a blocker eating the payment window is the
+          // most common way an online payment quietly fails to happen. The
+          // return trip is handled by the token in sessionStorage.
           window.location.href = result.authorization_url;
         } catch (err) {
           toast(err.message, 'err');
@@ -239,7 +360,17 @@
         button.classList.add('is-working');
         try {
           var result = await api('/documents/' + button.dataset.doc + '/download');
-          window.open(result.download_url, '_blank', 'noopener');
+          // An anchor click, not window.open. Mobile popup blockers are on by
+          // default and drop window.open when the call is an await away from
+          // the tap — which this one is, because the signed URL has to be
+          // fetched first. The buyer would tap Download and see nothing.
+          var a = document.createElement('a');
+          a.href = result.download_url;
+          a.target = '_blank';
+          a.rel = 'noopener';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
         } catch (err) {
           toast(err.message, 'err');
         } finally {

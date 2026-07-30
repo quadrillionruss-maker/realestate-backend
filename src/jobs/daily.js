@@ -54,14 +54,25 @@ async function runDailyJob() {
     console.log(`[re-daily] raised escalation on ${escalations.raised} reservation(s)`);
   }
 
-  // Brief every org that has at least one project — an account that signed up
-  // but never entered inventory gets no brief and costs no tokens.
-  const { data: projects, error } = await supabaseAdmin
-    .from('re_projects')
-    .select('organization_id');
+  // Brief every org that has at least one RESERVATION.
+  //
+  // "Has a project" was the old bar and it was too low: an account that created
+  // a project, entered no units and reserved nothing has nothing to report, and
+  // briefing it produces "All clear today" every morning forever. The brief
+  // already short-circuits an empty state without calling the model, so this was
+  // never burning tokens — but it was writing a daily row of noise into
+  // re_ai_briefs for every abandoned trial signup, which is the thing that
+  // actually costs something at a thousand accounts.
+  //
+  // A reservation is the first point at which there is money to track, which is
+  // the first point at which a brief says anything.
+  const { data: reservations, error } = await supabaseAdmin
+    .from('re_reservations')
+    .select('organization_id')
+    .neq('status', 'cancelled');
   if (error) throw error;
 
-  const orgIds = [...new Set((projects || []).map((p) => p.organization_id))];
+  const orgIds = [...new Set((reservations || []).map((r) => r.organization_id))];
   let succeeded = 0;
   let alerted = 0;
   let reminded = 0;
@@ -98,7 +109,34 @@ async function runDailyJob() {
   return { flipped, promises, escalations, orgs: orgIds.length, succeeded, alerted, reminded };
 }
 
+// The evening sweep. Installments are due by 18:00 Africa/Lagos
+// (overdueService), so without a run just after that an installment which
+// missed its deadline reads as "pending" for another thirteen hours — and a rep
+// looking at the screen at 7pm is told the money is still coming.
+//
+// Marking overdue ONLY. No brief, no alerts, no SMS: a text message five
+// minutes after a deadline is aggressive, and the morning job is where anybody
+// is told anything.
+const EVENING_SCHEDULE = process.env.RE_EVENING_SWEEP_CRON || '5 18 * * *';
+
+async function runEveningSweep() {
+  const flipped = await markOverdue();
+  const promises = await sweepBrokenPromises().catch((err) => {
+    console.error('[re-evening] promise sweep failed:', err.message);
+    return { broken: 0, kept: 0 };
+  });
+  const escalations = await sweepEscalations().catch((err) => {
+    console.error('[re-evening] escalation sweep failed:', err.message);
+    return { evaluated: 0, raised: 0 };
+  });
+
+  console.log(`[re-evening] ${flipped} installment(s) past the 18:00 cutoff, `
+    + `${promises.broken} promise(s) broken, ${escalations.raised} escalation(s) raised`);
+  return { flipped, promises, escalations };
+}
+
 let task = null;
+let eveningTask = null;
 
 function start() {
   if (process.env.RE_DISABLE_CRON === 'true') {
@@ -111,7 +149,12 @@ function start() {
     runDailyJob().catch((err) => console.error('[re-daily] job failed:', err.message));
   }, { timezone: 'Africa/Lagos' });
 
-  console.log(`[re-daily] scheduled "${SCHEDULE}" Africa/Lagos`);
+  eveningTask = cron.schedule(EVENING_SCHEDULE, () => {
+    runEveningSweep().catch((err) => console.error('[re-evening] sweep failed:', err.message));
+  }, { timezone: 'Africa/Lagos' });
+
+  console.log(`[re-daily] scheduled "${SCHEDULE}" Africa/Lagos (brief)`);
+  console.log(`[re-daily] scheduled "${EVENING_SCHEDULE}" Africa/Lagos (post-cutoff sweep)`);
   return task;
 }
 

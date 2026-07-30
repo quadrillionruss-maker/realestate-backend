@@ -118,15 +118,63 @@ function assertValidCredentials(email, password) {
 // value so a token from here also satisfies anything expecting the standard
 // claim. `email` is carried for display only — the middleware never trusts it
 // for authorization.
+// `tv` is the session generation. middleware/auth.js compares it to
+// users.token_version and rejects a mismatch, which is how a password change or
+// a removal from a team kills tokens that have not expired yet. Defaults to 0
+// so a caller that did not select the column still produces a usable token.
 function issueToken(user) {
   return jwt.sign(
-    { id: user.id, sub: user.id, email: user.email },
+    { id: user.id, sub: user.id, email: user.email, tv: Number(user.token_version || 0) },
     env.jwt.secret,
     { algorithm: 'HS256', expiresIn: env.jwt.expiresIn }
   );
 }
 
-const PUBLIC_USER_COLUMNS = 'id, email, full_name, company_name, avatar_url, created_at';
+// Ends every existing session for one user, then hands back the new generation
+// so the caller can mint a replacement token for whoever is still legitimately
+// signed in — the person changing their own password should not be logged out
+// by doing so.
+//
+// Never throws: a database without migration 004 has no such column, and a
+// password change failing outright would be worse than one that does not revoke
+// old sessions. The warning says which happened.
+async function bumpTokenVersion(userId) {
+  try {
+    // Supabase's REST client has no atomic increment, so this is read-then-
+    // write. A lost update between two concurrent callers is harmless here:
+    // both of them are invalidating, and either result invalidates every token
+    // issued before now.
+    const { data: current, error: readError } = await supabaseAdmin
+      .from('users')
+      .select('token_version')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (readError) {
+      console.warn('[auth] could not read token_version:', readError.message);
+      return null;
+    }
+    if (!current) return null;
+
+    const next = Number(current.token_version || 0) + 1;
+
+    const { error: writeError } = await supabaseAdmin
+      .from('users')
+      .update({ token_version: next })
+      .eq('id', userId);
+
+    if (writeError) {
+      console.warn('[auth] could not invalidate existing sessions:', writeError.message);
+      return null;
+    }
+    return next;
+  } catch (err) {
+    console.warn('[auth] session invalidation threw:', err.message);
+    return null;
+  }
+}
+
+const PUBLIC_USER_COLUMNS = 'id, email, full_name, company_name, avatar_url, created_at, token_version';
 
 const publicUser = (user) => ({
   id: user.id,
@@ -139,7 +187,7 @@ const publicUser = (user) => ({
 async function findUserByEmail(email) {
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select(`${PUBLIC_USER_COLUMNS}, password_hash, google_sub`)
+    .select(`${PUBLIC_USER_COLUMNS}, password_hash, google_sub, email_verified_at`)
     .ilike('email', normalizeEmail(email))
     .maybeSingle();
   if (error) throw error;
@@ -160,6 +208,11 @@ async function register({ email, password, full_name, company_name }) {
     throw Object.assign(new Error('An account with that email already exists. Sign in instead.'), { statusCode: 409 });
   }
 
+  // Verified immediately when verification is switched off (no Resend key, or
+  // explicitly disabled) — otherwise the account could never be used, because
+  // the link that unlocks it would never arrive.
+  const verifiedNow = env.auth.requireEmailVerification ? null : new Date().toISOString();
+
   const { data, error } = await supabaseAdmin
     .from('users')
     .insert({
@@ -168,6 +221,7 @@ async function register({ email, password, full_name, company_name }) {
       full_name: (full_name || '').trim() || null,
       company_name: (company_name || '').trim() || null,
       last_login_at: new Date().toISOString(),
+      email_verified_at: verifiedNow,
     })
     .select(PUBLIC_USER_COLUMNS)
     .single();
@@ -178,7 +232,12 @@ async function register({ email, password, full_name, company_name }) {
   }
   if (error) throw error;
 
-  return { token: issueToken(data), user: publicUser(data) };
+  return {
+    token: issueToken(data),
+    user: publicUser(data),
+    email_verified: Boolean(verifiedNow),
+    verification_required: env.auth.requireEmailVerification,
+  };
 }
 
 // ── Login ──────────────────────────────────────────────────────────────────
@@ -199,6 +258,61 @@ async function login({ email, password }) {
     .update({ last_login_at: new Date().toISOString() })
     .eq('id', user.id);
 
+  // Login SUCCEEDS for an unverified address, and the API is what refuses them
+  // (orgContext). Blocking here instead would leave the browser with no token
+  // and therefore no way to call the resend endpoint — the person would be
+  // stuck at a form that tells them to check an email they never received.
+  return {
+    token: issueToken(user),
+    user: publicUser(user),
+    email_verified: Boolean(user.email_verified_at),
+  };
+}
+
+// ── Email verification ─────────────────────────────────────────────────────
+// Same construction as the reset token: random, single-use, time-boxed, and
+// only its SHA-256 is stored, so a leaked row cannot be replayed as a
+// verification link.
+async function issueVerificationToken(userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + env.auth.verifyTokenTtlHours * 3_600_000).toISOString();
+
+  const { error } = await supabaseAdmin
+    .from('users')
+    .update({ verify_token_hash: hashResetToken(token), verify_token_expires_at: expiresAt })
+    .eq('id', userId);
+  if (error) throw error;
+
+  return { token, expiresAt, url: `${env.appUrl || ''}/index.html#/verify?token=${token}` };
+}
+
+async function verifyEmail(token) {
+  if (!token) throw badRequest('Verification token is required.');
+
+  const { data: user, error } = await supabaseAdmin
+    .from('users')
+    .select('id, email, full_name, company_name, avatar_url, token_version, verify_token_expires_at, email_verified_at')
+    .eq('verify_token_hash', hashResetToken(token))
+    .maybeSingle();
+  if (error) throw error;
+
+  if (!user || !user.verify_token_expires_at || new Date(user.verify_token_expires_at) < new Date()) {
+    throw badRequest('That verification link has expired or already been used. Ask for a new one.');
+  }
+
+  const { error: updateError } = await supabaseAdmin
+    .from('users')
+    .update({
+      email_verified_at: user.email_verified_at || new Date().toISOString(),
+      verify_token_hash: null,        // single use
+      verify_token_expires_at: null,
+    })
+    .eq('id', user.id);
+  if (updateError) throw updateError;
+
+  // A fresh token so verifying signs them straight in — a second trip through
+  // the login form right after proving they own the address is friction for
+  // nothing.
   return { token: issueToken(user), user: publicUser(user) };
 }
 
@@ -239,7 +353,7 @@ async function resetPassword({ token, password }) {
 
   const { data: user, error } = await supabaseAdmin
     .from('users')
-    .select('id, email, full_name, company_name, avatar_url, reset_token_expires_at')
+    .select('id, email, full_name, company_name, avatar_url, reset_token_expires_at, token_version')
     .eq('reset_token_hash', hashResetToken(token))
     .maybeSingle();
   if (error) throw error;
@@ -258,7 +372,16 @@ async function resetPassword({ token, password }) {
     .eq('id', user.id);
   if (updateError) throw updateError;
 
-  return { token: issueToken(user), user: publicUser(user) };
+  // A reset is the flow somebody uses when they think their account is
+  // compromised, so every session opened with the old password ends here. The
+  // token returned below carries the new generation, so the person who just
+  // reset it stays signed in and nobody else does.
+  const version = await bumpTokenVersion(user.id);
+
+  return {
+    token: issueToken({ ...user, token_version: version ?? user.token_version }),
+    user: publicUser(user),
+  };
 }
 
 // ── Google sign-in ─────────────────────────────────────────────────────────
@@ -347,6 +470,10 @@ async function loginWithGoogle(idToken) {
         avatar_url: existing.avatar_url || claims.picture || null,
         full_name: existing.full_name || claims.name || null,
         last_login_at: now,
+        // Google has just proved they control this address, which is exactly
+        // what our own verification email asks them to do. Linking therefore
+        // verifies a password account that had been sitting unverified.
+        email_verified_at: existing.email_verified_at || now,
       })
       .eq('id', existing.id)
       .select(PUBLIC_USER_COLUMNS)
@@ -368,6 +495,10 @@ async function loginWithGoogle(idToken) {
       full_name: claims.name || null,
       avatar_url: claims.picture || null,
       last_login_at: now,
+      // Verified by definition: verifyGoogleIdToken already refused an
+      // unverified Google address, so asking them to confirm it again by email
+      // would be theatre.
+      email_verified_at: now,
       // No password_hash: this account signs in with Google until someone
       // sets one through the reset flow.
     })
@@ -387,6 +518,7 @@ module.exports = {
   hashPassword,
   verifyPassword,
   issueToken,
+  bumpTokenVersion,
   publicUser,
   findUserByEmail,
   normalizeEmail,

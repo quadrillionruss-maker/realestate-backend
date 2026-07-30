@@ -30,7 +30,7 @@ function check(name, cond, detail) {
 
   // ── Apply migrations, twice, to prove idempotency ───────────────────────
   for (const pass of ['first', 'second']) {
-    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql']) {
+    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -61,7 +61,7 @@ function check(name, cond, detail) {
     end $$;
   `);
 
-  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql']) {
+  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -145,7 +145,7 @@ function check(name, cond, detail) {
   // src/services/authService.js — this service now issues tokens as well as
   // verifying them, which means it stores a password verifier.
   const authCols = ['password_hash', 'google_sub', 'reset_token_hash', 'reset_token_expires_at',
-    'last_login_at', 'avatar_url'];
+    'last_login_at', 'avatar_url', 'token_version'];
   check('users has every credential column authService reads',
     authCols.every((c) => userCols.includes(c)),
     `missing: ${authCols.filter((c) => !userCols.includes(c)).join(', ')}`);
@@ -170,6 +170,8 @@ function check(name, cond, detail) {
   check('paystack reference index exists', indexes.includes('uniq_re_payments_paystack_reference'));
   check('one open promise per installment', indexes.includes('uniq_re_open_promise_per_schedule'));
   check('one receipt per payment', indexes.includes('uniq_re_documents_receipt_per_payment'));
+  check('one allocation letter per reservation',
+    indexes.includes('uniq_re_allocation_letter_per_reservation'));
 
   // ── RLS enabled everywhere, with no policies ────────────────────────────
   const rlsOff = (await q(
@@ -383,6 +385,172 @@ function check(name, cond, detail) {
              values ($1,$2,'allocation_letter')`, [userId, liveReservation]);
   } catch (err) { otherDocOk = false; console.log(`       ${err.message}`); }
   check('the receipt lock does not block other document types', otherDocOk);
+
+  // ── 004: hardening ──────────────────────────────────────────────────────
+
+  // The insert above put ONE allocation letter on this reservation. A second is
+  // three letters in circulation for one unit, which in a dispute is worse than
+  // none — so the database refuses it.
+  let secondLetterBlocked = false;
+  try {
+    await q(`insert into re_documents (organization_id, reservation_id, doc_type)
+             values ($1,$2,'allocation_letter')`, [userId, liveReservation]);
+  } catch (err) { secondLetterBlocked = /unique|duplicate/i.test(err.message); }
+  check('database refuses a second allocation letter for one reservation', secondLetterBlocked);
+
+  // token_version is what makes a fired employee's unexpired token stop
+  // working. It must default to 0, so deploying 004 does not sign everyone out.
+  const [{ tv }] = await q(`select token_version as tv from users where id=$1`, [userId]);
+  check('users.token_version defaults to 0 (existing sessions survive the migration)',
+    Number(tv) === 0, `got ${tv}`);
+
+  await q(`update users set token_version = token_version + 1 where id=$1`, [userId]);
+  const [{ tv2 }] = await q(`select token_version as tv2 from users where id=$1`, [userId]);
+  check('token_version increments', Number(tv2) === 1, `got ${tv2}`);
+
+  // Overpayment is recorded, never negative.
+  let negativeOverpaymentBlocked = false;
+  try {
+    await q(`update re_payments set overpayment = -1 where schedule_id=$1`, [schedId]);
+  } catch (err) { negativeOverpaymentBlocked = /check/i.test(err.message); }
+  check('overpayment cannot be negative', negativeOverpaymentBlocked);
+
+  // ── 005: soft delete, and the locks rebuilt around it ───────────────────
+
+  for (const t of ['re_projects', 're_units', 're_customers', 're_reservations',
+    're_installment_plans', 're_installment_schedule', 're_payments', 're_documents',
+    're_tasks', 're_commissions', 're_payment_promises']) {
+    const cols = await colsOf(t);
+    check(`${t} has deleted_at + deleted_by`,
+      cols.includes('deleted_at') && cols.includes('deleted_by'), cols.join(', '));
+  }
+
+  // The two log tables deliberately have NO deleted_at: a nullable one would
+  // imply the evidence can be withdrawn.
+  for (const t of ['re_audit_log', 're_notifications']) {
+    const cols = await colsOf(t);
+    check(`${t} has NO deleted_at (evidence cannot be withdrawn)`,
+      !cols.includes('deleted_at'), cols.join(', '));
+  }
+
+  const verifyCols = ['email_verified_at', 'verify_token_hash', 'verify_token_expires_at'];
+  check('users has the email-verification columns',
+    verifyCols.every((c) => userCols.includes(c)),
+    `missing: ${verifyCols.filter((c) => !userCols.includes(c)).join(', ')}`);
+
+  // Existing accounts are backfilled as verified — deploying the requirement
+  // must not lock out everybody who signed up before it existed.
+  //
+  // The users created further up in this file were inserted AFTER 005 first
+  // ran, so they are legitimately unverified. Re-applying the migration is what
+  // exercises the backfill, and it also proves that step is idempotent rather
+  // than only safe the first time.
+  const [{ unverifiedBefore }] = await q(
+    `select count(*)::int as "unverifiedBefore" from users where email_verified_at is null`);
+  check('a user created after the migration starts out unverified',
+    unverifiedBefore > 0, `${unverifiedBefore}`);
+
+  await db.exec(fs.readFileSync(`${M}/005_soft_delete_and_lifecycle.sql`, 'utf8'));
+
+  const [{ unverifiedAfter }] = await q(
+    `select count(*)::int as "unverifiedAfter" from users where email_verified_at is null`);
+  check('re-running 005 backfills every unverified account',
+    unverifiedAfter === 0, `${unverifiedAfter} still null`);
+
+  const planCols = await colsOf('re_installment_plans');
+  const lifecycleCols = ['status', 'superseded_by', 'restructured_at',
+    'original_total_amount', 'carried_amount_paid'];
+  check('re_installment_plans has the restructuring columns',
+    lifecycleCols.every((c) => planCols.includes(c)),
+    `missing: ${lifecycleCols.filter((c) => !planCols.includes(c)).join(', ')}`);
+
+  // ── THE MOST IMPORTANT CHECK IN THIS FILE ────────────────────────────────
+  // 005 dropped and recreated the double-allocation index to add
+  // "deleted_at is null". Get that predicate wrong and one unit can be sold to
+  // two buyers — the failure this whole product exists to prevent.
+  const [{ id: lockProject }] = await q(
+    `insert into re_projects (organization_id, name) values ($1,'Lock Test') returning id`, [userId]);
+  const [{ id: lockUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price)
+     values ($1,$2,'LOCK-1',1000000) returning id`, [userId, lockProject]);
+  const [{ id: lockBuyerA }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Lock Buyer A') returning id`, [userId]);
+  const [{ id: lockBuyerB }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Lock Buyer B') returning id`, [userId]);
+
+  const [{ id: lockRes }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id)
+     values ($1,$2,$3) returning id`, [userId, lockUnit, lockBuyerA]);
+
+  let stillBlocked = false;
+  try {
+    await q(`insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3)`,
+      [userId, lockUnit, lockBuyerB]);
+  } catch (err) { stillBlocked = /unique|duplicate/i.test(err.message); }
+  check('double allocation is STILL blocked after the index was rebuilt', stillBlocked);
+
+  // A soft-deleted reservation must release the unit. Otherwise deleting one by
+  // mistake would make that unit permanently unsellable to anybody.
+  await q(`update re_reservations set deleted_at = now() where id=$1`, [lockRes]);
+  let freedAfterDelete = true;
+  try {
+    await q(`insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3)`,
+      [userId, lockUnit, lockBuyerB]);
+  } catch (err) { freedAfterDelete = false; console.log(`       ${err.message}`); }
+  check('a soft-deleted reservation frees the unit again', freedAfterDelete);
+
+  // Same question for unit numbers: a deleted unit must not reserve its own
+  // number forever.
+  const [{ id: delUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price)
+     values ($1,$2,'REUSE-1',1) returning id`, [userId, lockProject]);
+  let numberTaken = false;
+  try {
+    await q(`insert into re_units (organization_id, project_id, unit_number, list_price)
+             values ($1,$2,'REUSE-1',1)`, [userId, lockProject]);
+  } catch (err) { numberTaken = /unique|duplicate/i.test(err.message); }
+  check('a live unit number cannot be duplicated', numberTaken);
+
+  await q(`update re_units set deleted_at = now() where id=$1`, [delUnit]);
+  let numberReusable = true;
+  try {
+    await q(`insert into re_units (organization_id, project_id, unit_number, list_price)
+             values ($1,$2,'REUSE-1',1)`, [userId, lockProject]);
+  } catch (err) { numberReusable = false; console.log(`       ${err.message}`); }
+  check('a deleted unit releases its unit number', numberReusable);
+
+  // Exactly one ACTIVE plan per reservation. Two means two schedules, two sets
+  // of due dates, and a dashboard that counts the same debt twice.
+  const [{ id: planRes }] = await q(
+    `select id from re_reservations where unit_id=$1 and status='reserved' limit 1`, [lockUnit]);
+  await q(`insert into re_installment_plans
+             (organization_id, reservation_id, total_amount, number_of_installments, start_date)
+           values ($1,$2,1000000,10,'2026-01-01')`, [userId, planRes]);
+
+  let secondActivePlanBlocked = false;
+  try {
+    await q(`insert into re_installment_plans
+               (organization_id, reservation_id, total_amount, number_of_installments, start_date)
+             values ($1,$2,500000,5,'2026-01-01')`, [userId, planRes]);
+  } catch (err) { secondActivePlanBlocked = /unique|duplicate/i.test(err.message); }
+  check('a reservation cannot have two active plans', secondActivePlanBlocked);
+
+  // …but superseding the first must let the replacement in, or restructuring
+  // would be impossible.
+  await q(`update re_installment_plans set status='superseded' where reservation_id=$1`, [planRes]);
+  let restructureAllowed = true;
+  try {
+    await q(`insert into re_installment_plans
+               (organization_id, reservation_id, total_amount, number_of_installments, start_date)
+             values ($1,$2,500000,5,'2026-06-01')`, [userId, planRes]);
+  } catch (err) { restructureAllowed = false; console.log(`       ${err.message}`); }
+  check('superseding a plan makes room for the restructured one', restructureAllowed);
+
+  let badPlanStatus = false;
+  try {
+    await q(`update re_installment_plans set status='whatever' where reservation_id=$1`, [planRes]);
+  } catch (err) { badPlanStatus = /check/i.test(err.message); }
+  check('plan status is constrained to active|superseded', badPlanStatus);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

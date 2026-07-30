@@ -336,6 +336,18 @@ function emailFor(c) {
 }
 
 // ── Model call ─────────────────────────────────────────────────────────────
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Worth trying again: a timeout, a dropped connection, a rate limit, or any 5xx.
+// Not worth trying again: a malformed request or a rejected key.
+function isRetryable(err) {
+  if (err.name === 'AbortError' || err.name === 'TimeoutError') return true;
+  const status = Number((/OpenAI (\d{3})/.exec(err.message) || [])[1] || 0);
+  if (!status) return true;          // network-level failure, no status to read
+  if (status === 429) return true;   // rate limited
+  return status >= 500;
+}
+
 async function requestBriefFromModel(state) {
   const response = await fetch(OPENAI_URL, {
     method: 'POST',
@@ -414,13 +426,42 @@ async function generateDailyBrief(orgId) {
     brief = buildFallbackBrief(state);
     generatedBy = 'fallback';
   } else {
-    try {
-      brief = await requestBriefFromModel(state);
-    } catch (err) {
+    // Three attempts with backoff before giving up on the model.
+    //
+    // A single timeout at 07:00 used to cost the whole morning's wording, and
+    // the common failures here are the transient ones — a rate limit, a cold
+    // connection, a 503 — which a second attempt four seconds later usually
+    // clears. Retrying is much cheaper than a CEO reading a rule-based brief.
+    //
+    // A 4xx that is not 429 is not retried: a bad request or a rejected key
+    // will fail identically three times and only delay the fallback.
+    const delays = [0, 4_000, 12_000];
+    let lastError = null;
+
+    for (let attempt = 0; attempt < delays.length; attempt += 1) {
+      if (delays[attempt]) await sleep(delays[attempt]);
+      try {
+        brief = await requestBriefFromModel(state);
+        lastError = null;
+        break;
+      } catch (err) {
+        lastError = err;
+        if (!isRetryable(err)) {
+          console.error('[re-brief] model call failed permanently:', err.message);
+          break;
+        }
+        console.warn(`[re-brief] model attempt ${attempt + 1}/${delays.length} failed:`, err.message);
+      }
+    }
+
+    if (lastError || !brief) {
       // The brief is the product's daily heartbeat — a model outage degrades
-      // the wording, it does not skip the morning.
-      console.error('[re-brief] model call failed, using rule-based brief:', err.message);
+      // the wording, it does not skip the morning. `generated_by: 'fallback'`
+      // is what makes the degradation visible on the dashboard rather than
+      // silent, and `model_error` records why for the activity log.
+      console.error('[re-brief] falling back to the rule-based brief');
       brief = buildFallbackBrief(state);
+      brief.model_error = lastError ? String(lastError.message).slice(0, 300) : 'unknown';
       generatedBy = 'fallback';
     }
   }

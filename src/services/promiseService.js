@@ -18,7 +18,7 @@
 // count of superseded promises is the number worth looking at.
 
 const { supabaseAdmin } = require('../middleware/orgContext');
-const { lagosToday } = require('./overdueService');
+const { overdueThroughDate } = require('./overdueService');
 const { auditSystem } = require('./auditService');
 
 const SELECT = `
@@ -116,13 +116,18 @@ async function resolvePromise(orgId, promiseId, status) {
 // installment still unpaid is broken — and a broken promise is a stronger
 // signal than an overdue date, because the buyer chose the date themselves.
 async function sweepBrokenPromises(orgId = null) {
-  const today = lagosToday();
+  // The same 18:00 Lagos cutoff the installments use. A buyer who said "I'll
+  // pay Friday" has until close of business Friday, not until Friday began —
+  // and a promise judged on a different clock from the installment it covers
+  // would produce "promise broken" beside "payment not yet due".
+  const cutoff = overdueThroughDate();
 
   let query = supabaseAdmin
     .from('re_payment_promises')
     .select('id, organization_id, schedule_id, promised_date, customer_id, re_installment_schedule(status)')
     .eq('status', 'open')
-    .lt('promised_date', today);
+    .is('deleted_at', null)
+    .lte('promised_date', cutoff);
   if (orgId) query = query.eq('organization_id', orgId);
 
   const { data, error } = await query;

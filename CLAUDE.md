@@ -37,12 +37,13 @@ src/
     auth.js                register / login / google / reset — NOT authenticated
     webhooks.js            Paystack, verified by HMAC — NOT authenticated
     portal.js              the buyer's own view — portal token, not staff token
+    recycle.js             delete / restore / bin — the only delete path there is
   services/                all business logic and provider adapters
-  jobs/daily.js            07:00 Africa/Lagos cron
+  jobs/daily.js            07:00 brief + 18:05 post-cutoff sweep (Africa/Lagos)
   templates/               allocation letter, receipt
   utils/                   escapeHtml, csv, amountInWords
   test/                    syntax + logic + schema (offline), smoke.js (live)
-migrations/                three idempotent SQL files
+migrations/                five idempotent SQL files, applied in order
 frontend/
   config.js                sets window.__API_BASE__  ← the one file with a host in it
   index.html               shell: sign-in gate + app
@@ -62,6 +63,7 @@ helmet → cors → rate limit
       → /api/auth       (no auth — these are the endpoints you call to get a token)
       → /api/portal     (portal token, aud:'re-portal')
       → /api/re         authenticate → orgContext → routes
+                          (orgContext also gates on a confirmed email address)
       → frontend/       static
       → 404 → errorHandler
 ```
@@ -82,9 +84,22 @@ native dependency) — see `src/services/authService.js` for why not bcrypt.
 
 Two token audiences exist and they are **not interchangeable in either
 direction**: a staff token has no `aud`, a buyer-portal token carries
-`aud: 're-portal'`. `middleware/auth.js` never accepts the second;
-`portalService.verifyPortalToken` pins the first out. That is the whole
-boundary between "an operator" and "somebody holding a link".
+`aud: 're-portal'`. `middleware/auth.js` rejects any token with an `aud`;
+`portalService.verifyPortalToken` pins the audience the other way. That is the
+whole boundary between "an operator" and "somebody holding a link".
+
+**A valid signature is not a live session.** Every staff token carries `tv`,
+compared on each request against `users.token_version` (migrations/004).
+Bumping that column invalidates every token ever issued to that user at once —
+which is what happens on a password change, a password reset, and removal from
+a team. Without it, an employee fired on Monday keeps full API access for the
+remaining 30 days of their token, and changing their password would not revoke
+it either. A token minted before 004 has no `tv` claim and is read as 0, so
+deploying the migration does not sign the company out.
+
+The check costs one primary-key read per request. If that ever matters, cache
+it — do not remove it. On a database that has not run 004 it fails **open**
+with a warning, because a deploy that locks out every user is worse.
 
 ## Org scoping
 
@@ -141,18 +156,23 @@ a host.
 
 ## Before first use
 
-1. Run `migrations/001_phase1_schema.sql`, then `002_ai_briefs.sql`, then
-   `003_operations.sql` in the Supabase SQL editor. `001` is self-contained —
-   it creates the identity tables (`users`, `teams`, `team_members`) as well as
-   the domain ones, so an empty project is all it needs. All three are
-   idempotent, so re-running them after a change is safe and is how you pick up
-   the Grants block.
+1. Run the migrations in order in the Supabase SQL editor: `001_phase1_schema.sql`,
+   `002_ai_briefs.sql`, `003_operations.sql`, `004_hardening.sql`,
+   `005_soft_delete_and_lifecycle.sql`.
+   `001` is self-contained — it creates the identity tables (`users`, `teams`,
+   `team_members`) as well as the domain ones, so an empty project is all it
+   needs. All five are idempotent, so re-running them after a change is safe and
+   is how you pick up the Grants block.
 
    If the API returns `42501: permission denied for table re_projects`, the
    tables exist but `service_role` holds no privileges on them — re-run all
-   three. See the Grants section in `docs/DATABASE.md`.
+   five. See the Grants section in `docs/DATABASE.md`.
 
-2. Open the app and **create an account**. That is the whole setup.
+2. Open the app and **create an account**, then click the link in the
+   confirmation email. Verification is required only when email is actually
+   configured (`RESEND_API_KEY` + `RESEND_FROM`) — otherwise nobody could ever
+   receive the link, so new accounts are marked verified on creation.
+   `REQUIRE_EMAIL_VERIFICATION` overrides either way.
 
 `npm run token -- <uuid> <email>` still exists. It is a debugging tool now
 rather than the way in — useful for the smoke test, or for signing in as a
@@ -161,10 +181,17 @@ user created directly in SQL.
 ## Testing
 
 ```bash
-npm test                # syntax (53) + logic (43) + schema (79); no network, no database
+npm test                # syntax (60) + logic (67) + schema (114); no network, no database
 npm run test:schema     # migrations against a real in-process Postgres
-RE_SMOKE_TOKEN=<jwt> RE_SMOKE_URL=<url> npm run smoke   # URL defaults to localhost:4000/api
+RE_SMOKE_TOKEN=<jwt> npm run smoke                      # defaults to localhost:4000/api
 ```
+
+`npm run smoke` **refuses to run against a non-localhost URL** unless you name
+the host in `RE_SMOKE_CONFIRM`. It writes real rows — a project, five units, two
+buyers, a reservation and a ₦3.75m payment — and pointed at production those
+land in a developer's actual inventory and their actual collected-this-month
+figure. Naming the host means the confirmation cannot be left exported in a
+shell and forgotten.
 
 `test:schema` runs the migrations against PGlite — Postgres compiled to WASM,
 so constraints, triggers and RLS are real — applies them twice to prove
@@ -186,16 +213,86 @@ reservation on the same unit rejected with 409** → payment settles installment
 1 → brief generates → dashboard reflects it. It writes real rows named
 `Test Estate <timestamp>` — point it at staging.
 
-## Five rules the database enforces, not the code
+## Nothing is ever deleted
 
-Unique partial indexes in `migrations/001` and `003`, because the application
-must not be the only thing standing between a developer and these:
+There is no hard delete anywhere in this API. A delete stamps `deleted_at`,
+cascades to children through the explicit map in
+`src/services/softDelete.js`, and the rows stay in the database and the audit
+log permanently. `POST /api/re/recycle/:resource/:id/restore` brings them back.
+
+**The live filter is applied in `middleware/orgContext.js`, not per query.**
+`supabaseAdmin.from(t).select(...)` on any soft-deletable table comes back
+already scoped to `deleted_at is null`. There are ~150 query sites and the
+hundred-and-fiftieth is the one somebody forgets, so forgetting is not
+possible. It touches reads only — writes address rows by id, and the restore
+path has to be able to write to a deleted row.
+
+`supabaseRaw` is the unfiltered client. `softDelete.js` is its only legitimate
+caller.
+
+Two tables have no `deleted_at` at all: `re_audit_log` and `re_notifications`.
+A nullable column there would imply the evidence can be withdrawn.
+
+**Embedded resources are not filtered** — `re_reservations(re_customers(...))`
+scopes the reservations, not the nested customers. The cascade is what covers
+that: deleting a buyer deletes their reservations, so a live parent with a
+deleted child is not a reachable state. A future table that breaks that
+assumption needs an explicit filter.
+
+## Due dates are 18:00 Africa/Lagos
+
+An installment due on a date is due by **6pm on that date**, close of business.
+`src/services/overdueService.js` is the only place that decides it —
+`overdueThroughDate()`, `isPastDue()` and `describeDue()` — and the sweep, the
+brief, the alerts, the reminders and the promise tracker all read it from there.
+`RE_DUE_CUTOFF_HOUR` moves it; there is one value for the whole workspace,
+because two cutoffs is the same as none.
+
+`jobs/daily.js` therefore runs **twice**: 07:00 for the brief and the alerts,
+and 18:05 for a marking-only sweep. Without the evening run an installment that
+missed its deadline reads as "pending" for another thirteen hours, and a rep
+looking at the screen at 7pm is told the money is still coming.
+
+Buyer-facing wording comes from `describeDue()` ("30 Jul 2026 by 6pm"), so
+nobody is held to a cutoff they were never told.
+
+## Six rules the database enforces, not the code
+
+Unique partial indexes in `migrations/001`, `003` and `004`, because the
+application must not be the only thing standing between a developer and these:
 
 - one live reservation per unit (double allocation)
 - one payment per Paystack reference (webhook replay)
 - one commission accrual per payment (paying a rep twice)
 - one open promise per installment (a promise stack instead of a latest word)
 - one receipt per payment (two receipts for one ₦5m transfer)
+- one allocation letter per reservation (three letters for one unit, disagreeing)
+- one **active** plan per reservation (two schedules counting the same debt)
+
+Regenerating any document is still fine — it rewrites the same row and the same
+storage path. What that rule forbids is a second row, i.e. a second letter with
+its own reference number.
+
+**Every one of these indexes carries `deleted_at is null`** (migrations/005).
+Without it a soft-deleted reservation would block its unit forever, and a
+deleted allocation letter would make a replacement impossible. `npm run
+test:schema` asserts both that double allocation is still refused and that a
+soft-deleted reservation releases the unit — that pair is the regression to
+watch if the predicate is ever touched.
+
+## Renegotiating a plan
+
+`POST /api/re/reservations/:id/restructure` supersedes the current plan and
+builds a new one for the remaining balance. The old plan and its paid rows stay
+exactly as they were, because the buyer's receipts refer to them; its unpaid
+rows are set to `waived` so they stop counting as owed.
+
+The new plan's `total_amount` is the **balance**, not the contract value —
+`installmentService` guarantees the schedule sums to the plan total to the kobo
+and that invariant is worth more than field convenience. The contract survives
+as `original_total_amount = carried_amount_paid + total_amount`. Read contract
+value through `restructureService.contractValue()` so nothing has to know
+whether a plan was ever restructured.
 
 ## Payments
 
@@ -228,6 +325,30 @@ a human sends** — the escalation stages set the tone of a draft, they never
 send it, and a buyer at `legal` stage gets no draft at all. See
 `docs/AI_WORKFORCE.md` for the growth path and the gates each future agent
 must clear.
+
+## Frontend gotchas that have already bitten once
+
+**`[hidden]` needs the `!important` rule at the top of the stylesheet.** The
+browser hides `[hidden]` elements through its own stylesheet, and *any* author
+`display` declaration beats a UA one — specificity does not enter into it. So
+`.gate { display: grid }` on `<main class="gate" hidden>` left the sign-in page
+fully visible, stacked above the app shell in one 200vh document. Every
+show/hide in this app uses the attribute, so that rule is load-bearing. Do not
+give a hideable element a `display` value expecting `hidden` to win.
+
+**Re-rendering must not scroll.** `renderRoute` compares a route *signature*
+(name + params + query) and only blanks to a skeleton and jumps to the top when
+the screen actually changes. Every mutation calls `reload()`, and on the
+payments screen that used to mean clicking "Record" on row 40 and being returned
+to row 1.
+
+**Phone numbers go through `R.waLink()`.** `wa.me` needs `234803…` with no
+leading zero; stripping non-digits from `08031234567` produces a link WhatsApp
+opens and then rejects.
+
+**Downloads go through `R.openFile()`,** which clicks a real anchor. Mobile
+popup blockers drop `window.open` when the call is an `await` away from the tap
+— and every one of ours is, because the signed URL has to be fetched first.
 
 ## Design
 

@@ -1,6 +1,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { createPlanWithSchedule } = require('../services/installmentService');
+const { assess, preview, restructure } = require('../services/restructureService');
 const { audit } = require('../services/auditService');
 const router = express.Router();
 
@@ -192,6 +193,75 @@ router.patch('/:id/status', async (req, res, next) => {
     });
 
     res.json(reservation);
+  } catch (e) { next(e); }
+});
+
+// ── Plan restructuring ─────────────────────────────────────────────────────
+// The alternative to cancelling. A buyer three installments down renegotiates
+// terms; before this the only route was to cancel the reservation and re-enter
+// it, losing the payment history.
+
+// What would a restructure look like? Nothing is written, so this is safe to
+// call while the rep is still on the phone agreeing the terms.
+router.get('/:id/restructure', async (req, res, next) => {
+  try {
+    const state = await assess(req.orgId, req.params.id);
+    if (state.notFound) return res.status(404).json({ error: 'Reservation not found' });
+    if (state.noPlan) {
+      return res.status(409).json({ error: 'This reservation has no payment plan to restructure.' });
+    }
+
+    const response = {
+      contract_value: state.contract_value,
+      total_paid: state.total_paid,
+      remaining: state.remaining,
+      paid_rows: state.paid_rows,
+      unpaid_rows: state.unpaid_rows,
+      current: {
+        id: state.current.id,
+        number_of_installments: state.current.number_of_installments,
+        frequency: state.current.frequency,
+        start_date: state.current.start_date,
+      },
+    };
+
+    // Proposed terms in the query string produce the actual dates and amounts,
+    // built by the same function that will build the real schedule.
+    const count = Number(req.query.number_of_installments);
+    if (count && req.query.start_date) {
+      try {
+        response.proposed = preview(state.remaining, {
+          numberOfInstallments: count,
+          frequency: req.query.frequency || 'monthly',
+          startDate: req.query.start_date,
+        });
+      } catch (err) {
+        response.proposed_error = err.message;
+      }
+    }
+
+    res.json(response);
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/restructure', async (req, res, next) => {
+  try {
+    const { number_of_installments, frequency, start_date, reason } = req.body || {};
+    if (!number_of_installments || !start_date) {
+      return res.status(400).json({
+        error: 'number_of_installments and start_date are required',
+      });
+    }
+
+    const result = await restructure(req, req.params.id, {
+      numberOfInstallments: Number(number_of_installments),
+      frequency: frequency || 'monthly',
+      startDate: start_date,
+      reason: reason || null,
+    });
+
+    if (result.notFound) return res.status(404).json({ error: 'Reservation not found' });
+    res.status(201).json(result);
   } catch (e) { next(e); }
 });
 

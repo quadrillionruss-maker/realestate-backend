@@ -12,6 +12,8 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { lagosToday } = require('../services/overdueService');
+const { toCsv } = require('../utils/csv');
+const { audit } = require('../services/auditService');
 const router = express.Router();
 
 const round2 = (value) => Math.round(Number(value) * 100) / 100;
@@ -190,6 +192,141 @@ router.get('/collections', async (req, res, next) => {
     }
 
     res.json([...buckets.values()]);
+  } catch (e) { next(e); }
+});
+
+// ── Export ─────────────────────────────────────────────────────────────────
+// "Can I get my data out?" is a question a developer asks before they trust a
+// system with their buyer list, and the honest answer has to be a button rather
+// than a support request. It is also the only backup they control: if this
+// service or its Supabase project goes away, these three files are their book.
+//
+// Streamed as a real file download with Content-Disposition, so it lands in the
+// Downloads folder and opens in Excel rather than rendering as text in a tab.
+const EXPORTS = {
+  customers: {
+    filename: 'buyers',
+    async load(orgId) {
+      const { data, error } = await supabaseAdmin
+        .from('re_customers')
+        .select('full_name, phone, email, source, created_at')
+        .eq('organization_id', orgId)
+        .order('full_name');
+      if (error) throw error;
+      return data || [];
+    },
+    columns: [
+      ['Full name', 'full_name'],
+      ['Phone', 'phone'],
+      ['Email', 'email'],
+      ['Source', 'source'],
+      ['Added', (r) => String(r.created_at || '').slice(0, 10)],
+    ],
+  },
+
+  payments: {
+    filename: 'payments',
+    async load(orgId) {
+      const { data, error } = await supabaseAdmin
+        .from('re_payments')
+        .select(`
+          amount, method, paystack_reference, paid_at, overpayment,
+          re_installment_schedule(
+            installment_number, due_date, amount_due,
+            re_installment_plans(
+              number_of_installments,
+              re_reservations(
+                re_customers(full_name, phone),
+                re_units(unit_number, re_projects(name))
+              )
+            )
+          )`)
+        .eq('organization_id', orgId)
+        .order('paid_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    columns: [
+      ['Date paid', (r) => String(r.paid_at || '').slice(0, 10)],
+      ['Buyer', (r) => reservationOf(r)?.re_customers?.full_name || ''],
+      ['Phone', (r) => reservationOf(r)?.re_customers?.phone || ''],
+      ['Project', (r) => reservationOf(r)?.re_units?.re_projects?.name || ''],
+      ['Unit', (r) => reservationOf(r)?.re_units?.unit_number || ''],
+      ['Installment', (r) => {
+        const s = r.re_installment_schedule;
+        return s ? `${s.installment_number} of ${s.re_installment_plans?.number_of_installments || '?'}` : '';
+      }],
+      ['Due date', (r) => r.re_installment_schedule?.due_date || ''],
+      ['Amount due', (r) => r.re_installment_schedule?.amount_due ?? ''],
+      ['Amount paid', 'amount'],
+      ['Overpayment', (r) => (Number(r.overpayment) > 0 ? r.overpayment : '')],
+      ['Method', (r) => String(r.method || '').replace(/_/g, ' ')],
+      ['Reference', 'paystack_reference'],
+    ],
+  },
+
+  schedule: {
+    filename: 'payment-schedule',
+    async load(orgId) {
+      const { data, error } = await supabaseAdmin
+        .from('re_installment_schedule')
+        .select(`
+          installment_number, due_date, amount_due, status, paid_at,
+          re_installment_plans!inner(
+            total_amount, number_of_installments,
+            re_reservations!inner(
+              status, escalation_stage,
+              re_customers(full_name, phone),
+              re_units(unit_number, re_projects(name))
+            )
+          )`)
+        .eq('organization_id', orgId)
+        .order('due_date');
+      if (error) throw error;
+      return data || [];
+    },
+    columns: [
+      ['Buyer', (r) => r.re_installment_plans?.re_reservations?.re_customers?.full_name || ''],
+      ['Phone', (r) => r.re_installment_plans?.re_reservations?.re_customers?.phone || ''],
+      ['Project', (r) => r.re_installment_plans?.re_reservations?.re_units?.re_projects?.name || ''],
+      ['Unit', (r) => r.re_installment_plans?.re_reservations?.re_units?.unit_number || ''],
+      ['Plan total', (r) => r.re_installment_plans?.total_amount ?? ''],
+      ['Installment', (r) => `${r.installment_number} of ${r.re_installment_plans?.number_of_installments || '?'}`],
+      ['Due date', 'due_date'],
+      ['Amount due', 'amount_due'],
+      ['Status', 'status'],
+      ['Paid at', (r) => String(r.paid_at || '').slice(0, 10)],
+      ['Escalation', (r) => r.re_installment_plans?.re_reservations?.escalation_stage || ''],
+    ],
+  },
+};
+
+const reservationOf = (payment) =>
+  payment.re_installment_schedule?.re_installment_plans?.re_reservations;
+
+router.get('/export/:kind', async (req, res, next) => {
+  try {
+    const spec = EXPORTS[req.params.kind];
+    if (!spec) {
+      return res.status(404).json({
+        error: `Nothing to export called "${req.params.kind}". Try: ${Object.keys(EXPORTS).join(', ')}`,
+      });
+    }
+
+    const rows = await spec.load(req.orgId);
+    const stamp = new Date().toISOString().slice(0, 10);
+
+    audit(req, {
+      action: 'data.exported',
+      entityType: 're_org_settings',
+      summary: `Exported ${rows.length} ${req.params.kind} rows to CSV`,
+      metadata: { kind: req.params.kind, rows: rows.length },
+    });
+
+    res
+      .type('text/csv; charset=utf-8')
+      .attachment(`realtika-${spec.filename}-${stamp}.csv`)
+      .send(toCsv(spec.columns, rows));
   } catch (e) { next(e); }
 });
 

@@ -16,7 +16,7 @@
 // "became overdue today" is a fact rather than a guess.
 
 const { supabaseAdmin } = require('../middleware/orgContext');
-const { lagosToday } = require('./overdueService');
+const { lagosToday, describeDue } = require('./overdueService');
 const { describeStage } = require('./escalationService');
 const notify = require('./notificationService');
 
@@ -234,11 +234,13 @@ async function remindUpcoming(orgId) {
       ? `Unit ${reservation.re_units.unit_number}`
       : 'your unit';
 
+    // The deadline is stated the way the system applies it — "30 Jul 2026 by
+    // 6pm" — so a buyer is never held to a cutoff nobody told them about.
     const body = kind === 'upcoming'
-      ? `${company}: a friendly reminder that ${naira(row.amount_due)} for ${where} is due on `
-        + `${formatDate(row.due_date)}. Thank you.`
-      : `${company}: we have not yet received ${naira(row.amount_due)} for ${where}, which was due on `
-        + `${formatDate(row.due_date)}. If you have already paid, please ignore this message.`;
+      ? `${company}: a friendly reminder that ${naira(row.amount_due)} for ${where} is due `
+        + `${describeDue(row.due_date)}. Thank you.`
+      : `${company}: we have not yet received ${naira(row.amount_due)} for ${where}, which was due `
+        + `${describeDue(row.due_date)}. If you have already paid, please ignore this message.`;
 
     const result = await notify.sendSms({
       orgId,

@@ -54,28 +54,121 @@
   }
 
   // Compact money for tiles, where ₦1,240,000,000 wraps and ₦1.24b does not.
+  //
+  // The cutover is 1,000, not 10,000. At 10,000 a KPI row could show "₦9,999"
+  // beside "₦10k" — the same magnitude formatted two different ways, which
+  // reads as a rendering bug. Below ₦1,000 there is nothing to abbreviate.
   function nairaShort(amount) {
     var n = Number(amount || 0);
-    if (Math.abs(n) >= 1e9) return '₦' + (n / 1e9).toFixed(2).replace(/\.00$/, '') + 'b';
-    if (Math.abs(n) >= 1e6) return '₦' + (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'm';
-    if (Math.abs(n) >= 1e4) return '₦' + Math.round(n / 1e3) + 'k';
+    var abs = Math.abs(n);
+    if (abs >= 1e9) return '₦' + trimZeros((n / 1e9).toFixed(2)) + 'b';
+    if (abs >= 1e6) return '₦' + trimZeros((n / 1e6).toFixed(1)) + 'm';
+    if (abs >= 1e3) return '₦' + trimZeros((n / 1e3).toFixed(1)) + 'k';
     return naira(n);
   }
 
+  var trimZeros = function (s) { return s.replace(/\.0+$/, ''); };
+
   function plural(count, word) { return count + ' ' + word + (count === 1 ? '' : 's'); }
+
+  // Dates are formatted with an EXPLICIT field spec and the locale is only a
+  // hint. 'en-NG' is not implemented identically everywhere — some Android
+  // WebViews fall back to US ordering and render "Jul 28, 2026" — and a due
+  // date that reads differently on the MD's laptop and the rep's phone is a
+  // dispute waiting to happen. Two-digit day so a column of dates aligns.
+  var DATE_FMT = { day: '2-digit', month: 'short', year: 'numeric' };
+  var TIME_FMT = { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false };
 
   function fmtDate(value) {
     if (!value) return '—';
     var d = new Date(value);
     if (isNaN(d.getTime())) return '—';
-    return d.toLocaleDateString('en-NG', { day: 'numeric', month: 'short', year: 'numeric' });
+    return d.toLocaleDateString('en-GB', DATE_FMT);
   }
 
   function fmtDateTime(value) {
     if (!value) return '—';
     var d = new Date(value);
     if (isNaN(d.getTime())) return '—';
-    return d.toLocaleString('en-NG', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleString('en-GB', TIME_FMT);
+  }
+
+  // Today at 07:14 / Yesterday at 07:02 / 26 Jul at 07:00.
+  // The brief runs at 7am; at 8pm the only thing worth knowing about it is
+  // whether it is this morning's, and a bare date does not answer that.
+  function fmtRelative(value) {
+    if (!value) return '';
+    var d = new Date(value);
+    if (isNaN(d.getTime())) return '';
+
+    var time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+    var days = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+
+    if (days === 0) return 'Today at ' + time;
+    if (days === 1) return 'Yesterday at ' + time;
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ' at ' + time;
+  }
+
+  var startOfDay = function (d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
+
+  // ── Phone numbers ─────────────────────────────────────────────────────
+  // wa.me requires the full international number with no punctuation and NO
+  // leading zero. Buyers' numbers are stored exactly as somebody typed them:
+  // 08031234567, +234 803 123 4567, 234-803-123-4567, 803 123 4567.
+  //
+  // The old code just stripped non-digits, so a locally-formatted number
+  // produced wa.me/08031234567 — WhatsApp opens and says "phone number is
+  // incorrect". The at-risk list is the most-used screen in the product and
+  // its WhatsApp links were failing for most numbers in most databases.
+  function waNumber(phone) {
+    var digits = String(phone || '').replace(/\D/g, '');
+    if (!digits) return null;
+    if (digits.indexOf('234') === 0) return digits;
+    if (digits.charAt(0) === '0') return '234' + digits.slice(1);
+    if (digits.length === 10) return '234' + digits; // local form, zero dropped
+    return digits;                                   // already international
+  }
+
+  function waLink(phone) {
+    var number = waNumber(phone);
+    return number ? 'https://wa.me/' + number : null;
+  }
+
+  // Downloads go through a real anchor click, not window.open. Popup blockers
+  // on Chrome Android and Safari iOS are on by default and silently drop
+  // window.open when the call is even one await away from the user's tap —
+  // which every one of ours is, because the signed URL has to be fetched
+  // first. A buyer tapping "Download" would simply see nothing happen.
+  // Export endpoints sit behind the bearer token, so a plain <a href> would
+  // arrive unauthenticated and download a 401. Fetch it, then hand the bytes to
+  // the same anchor-click path.
+  async function downloadCsv(path, filename) {
+    var res = await fetch(API_BASE + '/re' + path, {
+      headers: { Authorization: 'Bearer ' + token },
+    });
+
+    if (!res.ok) {
+      var body = await res.json().catch(function () { return {}; });
+      throw new Error(body.error || 'Export failed (' + res.status + ')');
+    }
+
+    var blob = await res.blob();
+    var url = URL.createObjectURL(blob);
+    openFile(url, filename);
+    // Revoked on a delay: revoking immediately can cancel the download in
+    // Safari, which reads the blob after the click returns.
+    setTimeout(function () { URL.revokeObjectURL(url); }, 30_000);
+  }
+
+  function openFile(url, filename) {
+    var a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    if (filename) a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   }
 
   function todayISO() { return new Date().toISOString().slice(0, 10); }
@@ -130,6 +223,15 @@
     var text = await res.text().catch(function () { return ''; });
     if (text) { try { body = JSON.parse(text); } catch (e) { body = null; } }
 
+    // The token is fine; the address is not confirmed. 403 rather than 401
+    // precisely so this does not look like an expired session — sending them
+    // back to the password form would be a loop, since signing in again
+    // succeeds and the next request fails the same way.
+    if (res.status === 403 && body && body.code === 'email_unverified' && !opts.noAuthRedirect) {
+      showVerifyGate(body.error);
+      throw Object.assign(new Error(body.error), { status: 403, code: 'email_unverified' });
+    }
+
     if (!res.ok) {
       throw Object.assign(
         new Error((body && body.error) || 'Request failed (' + res.status + ')'),
@@ -169,9 +271,18 @@
   // Returns the modal element. `onSubmit` receives the <form>; throwing from
   // it leaves the modal open with the message shown, which is what you want
   // when the server rejects a value.
+  // The submit button lives in the footer, outside the <form>, so it needs
+  // form="<id>" to submit it — which means the id has to be unique. It used to
+  // be the literal string "modal-form" on every modal, so two open at once
+  // would give the footer button of the second modal a reference that resolved
+  // to the first modal's form. Nothing in the UI opens two today; this makes
+  // that a design choice rather than a landmine.
+  var modalSeq = 0;
+
   function modal(options) {
     var opts = options || {};
     var overlay = el('overlay');
+    var formId = 'modal-form-' + (++modalSeq);
 
     var scrim = document.createElement('div');
     scrim.className = 'scrim';
@@ -182,18 +293,18 @@
           '<div class="spacer" style="flex:1"></div>' +
           '<button class="icon-btn" data-close aria-label="Close">×</button>' +
         '</div>' +
-        '<form class="modal-body" id="modal-form">' + (opts.body || '') + '</form>' +
+        '<form class="modal-body" id="' + formId + '">' + (opts.body || '') + '</form>' +
         '<div class="modal-foot">' +
           '<button class="btn ghost" type="button" data-close>' + esc(opts.cancelLabel || 'Cancel') + '</button>' +
           (opts.submitLabel
-            ? '<button class="btn primary" type="submit" form="modal-form">' + esc(opts.submitLabel) + '</button>'
+            ? '<button class="btn primary" type="submit" form="' + formId + '">' + esc(opts.submitLabel) + '</button>'
             : '') +
         '</div>' +
       '</div>';
 
     overlay.appendChild(scrim);
 
-    var form = scrim.querySelector('#modal-form');
+    var form = scrim.querySelector('form');
     var submit = scrim.querySelector('[type="submit"]');
 
     function close() {
@@ -233,7 +344,7 @@
     var first = form.querySelector('input:not([type=hidden]), select, textarea');
     if (first) setTimeout(function () { first.focus(); }, 40);
 
-    return { close: close, form: form, root: scrim };
+    return { close: close, form: form, root: scrim, formId: formId };
   }
 
   function confirmDialog(options) {
@@ -399,6 +510,13 @@
     var route = parseHash();
     var screen = RE.screens[route.name];
 
+    // Identifies "the same screen with the same arguments". Tabs and filters
+    // live in the query string, so #/payments?tab=due and #/payments?tab=history
+    // are different screens and each should start at the top; calling reload()
+    // on either is a re-render and should not move.
+    var signature = route.name + '|' + route.params.join('/') + '|' +
+      Object.keys(route.query).sort().map(function (k) { return k + '=' + route.query[k]; }).join('&');
+
     if (!screen) {
       el('view').innerHTML =
         '<div class="page-head"><div><div class="page-title">Not found</div>' +
@@ -407,24 +525,48 @@
       return;
     }
 
-    currentScreen = route.name;
+    // ── Scroll and skeleton, only when the screen actually changes ─────────
+    // Re-rendering in place — marking a task done, recording a payment, the
+    // reload() after any mutation — used to blank the view to a skeleton and
+    // throw the page back to the top. On the payments screen that means
+    // clicking "Record" on row 40 and being returned to row 1, which is
+    // unusable for the one job that screen exists to do.
+    //
+    // A route CHANGE is a new screen and deserves both. A re-render of the
+    // route you are already on gets neither: the old content stays put while
+    // the new data loads, and the scroll position is restored afterwards.
+    var isSameScreen = currentScreen === signature;
+    var keptScroll = window.scrollY;
+
+    currentScreen = signature;
     qsa('[data-nav]').forEach(function (link) {
       link.classList.toggle('is-active', link.dataset.nav === route.name);
     });
 
     var view = el('view');
-    view.className = 'page screen-enter';
-    view.innerHTML = '<div class="card">' + skeleton(5) + '</div>';
-    window.scrollTo(0, 0);
+
+    if (!isSameScreen) {
+      view.className = 'page screen-enter';
+      view.innerHTML = '<div class="card">' + skeleton(5) + '</div>';
+      window.scrollTo(0, 0);
+    } else {
+      // No screen-enter animation on a re-render either — the content
+      // flickering and sliding up every time you tick a checkbox reads as a
+      // page reload rather than an update.
+      view.className = 'page';
+    }
 
     try {
       await screen.render(view, route.params, route.query);
+      if (isSameScreen) {
+        // After the DOM is replaced the document may briefly be shorter than it
+        // was, which clamps the scroll. Restore on the next frame, once layout
+        // has settled.
+        window.requestAnimationFrame(function () { window.scrollTo(0, keptScroll); });
+      }
     } catch (err) {
       if (err.status === 401) return; // signOut already handled it
-      view.innerHTML =
-        '<div class="page-head"><div><div class="page-title">Something went wrong</div></div></div>' +
-        '<div class="notice">' + esc(err.message) + '</div>' +
-        '<button class="btn" onclick="location.reload()">Reload</button>';
+      renderFailure(view, err);
     }
 
     // Closing the mobile sidebar on navigation: leaving it open over the
@@ -432,6 +574,44 @@
     el('sidebar').classList.remove('is-open');
     var scrim = qs('.sidebar-scrim');
     if (scrim) scrim.remove();
+  }
+
+  // A failed screen has to offer a way forward. On a Nigerian mobile network
+  // one of three parallel requests timing out is routine, and the old handler
+  // said "Something went wrong" next to a full page reload — which on a slow
+  // connection costs the fonts, the CSS and every request again, to retry one.
+  //
+  // Retry re-runs the screen only. Reload is still there for when that is not
+  // enough. A status of 0 means the request never left the device, so the
+  // wording says so rather than blaming the server.
+  function renderFailure(view, err) {
+    var offline = err.status === 0 || !navigator.onLine;
+
+    view.innerHTML =
+      '<div class="page-head"><div>' +
+        '<div class="page-title">' + (offline ? 'No connection' : 'Could not load this screen') + '</div>' +
+        '<div class="page-sub">' +
+          (offline
+            ? 'Your device could not reach the server. Nothing was lost — try again when you have signal.'
+            : 'The server answered with an error.') +
+        '</div>' +
+      '</div></div>' +
+      '<div class="notice' + (offline ? ' info' : '') + '">' + esc(err.message) + '</div>' +
+      '<div class="btn-row">' +
+        '<button class="btn primary" id="btn-retry">Try again</button>' +
+        '<button class="btn ghost" id="btn-hard-reload">Reload the app</button>' +
+      '</div>';
+
+    onClick(view, '#btn-retry', async function () {
+      // Force a full re-render rather than the in-place path: there is nothing
+      // on screen worth preserving.
+      currentScreen = null;
+      await renderRoute();
+    });
+
+    qsa('#btn-hard-reload', view).forEach(function (b) {
+      b.addEventListener('click', function () { window.location.reload(); });
+    });
   }
 
   function go(hash) {
@@ -491,10 +671,21 @@
     });
 
     // "/" focuses search from anywhere, unless you are already typing.
+    //
+    // Three exclusions, all of them things a user does every day: typing into
+    // any field (a password like "Pa$$w0rd/2024" contains a slash), typing into
+    // a rich-text region, and having a modal or drawer open — stealing focus
+    // out of the "record a payment" form to open search would lose whatever
+    // had been entered.
     document.addEventListener('keydown', function (e) {
-      if (e.key !== '/' || e.metaKey || e.ctrlKey) return;
-      var tag = (e.target.tagName || '').toLowerCase();
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+
+      var target = e.target || {};
+      var tag = (target.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      if (target.isContentEditable) return;
+      if (el('overlay').children.length) return;
+
       e.preventDefault();
       input.focus();
       input.select();
@@ -556,11 +747,11 @@
   }
 
   // ── Gate ──────────────────────────────────────────────────────────────
-  var gateForms = ['form-login', 'form-register', 'form-forgot', 'form-reset'];
+  var gateForms = ['form-login', 'form-register', 'form-forgot', 'form-reset', 'form-verify'];
 
   function showGateForm(id) {
     gateForms.forEach(function (formId) { el(formId).hidden = formId !== id; });
-    el('gate-tabs').hidden = (id === 'form-forgot' || id === 'form-reset');
+    el('gate-tabs').hidden = (id !== 'form-login' && id !== 'form-register');
     el('tab-login').setAttribute('aria-selected', String(id === 'form-login'));
     el('tab-register').setAttribute('aria-selected', String(id === 'form-register'));
 
@@ -584,6 +775,41 @@
     el('link-reset-cancel').addEventListener('click', function () {
       window.location.hash = '';
       showGateForm('form-login');
+    });
+
+    el('link-verify-signin').addEventListener('click', function () {
+      window.location.hash = '';
+      showGateForm('form-login');
+    });
+
+    // Resend needs the token from the half-signed-in session: login succeeds
+    // for an unverified address, the API refuses, and this is how the person
+    // gets another link without having to remember a password again.
+    el('btn-resend-verify').addEventListener('click', async function () {
+      var button = this;
+      button.classList.add('is-working');
+      try {
+        var result = await request('/auth/resend-verification', {
+          method: 'POST', body: '{}', noAuthRedirect: true,
+        });
+        var ok = el('verify-ok');
+        ok.textContent = result.message || 'Sent.';
+        if (result.dev_url) {
+          ok.innerHTML = esc(result.message) +
+            '<br><br><b>Email is not configured on this server.</b><br>' +
+            '<a class="link-quiet" href="' + esc(result.dev_url) + '">Open the confirmation link</a>';
+        }
+        ok.classList.remove('hidden');
+        el('verify-error').classList.add('hidden');
+      } catch (err) {
+        var error = el('verify-error');
+        error.textContent = err.status === 401
+          ? 'Sign in first, then ask for a new link.'
+          : err.message;
+        error.classList.remove('hidden');
+      } finally {
+        button.classList.remove('is-working');
+      }
     });
 
     el('form-login').addEventListener('submit', async function (e) {
@@ -666,9 +892,22 @@
       button.classList.add('is-working');
 
       try {
-        var resetToken = (/[?&]token=([^&]+)/.exec(window.location.hash) || [])[1];
+        // authService builds "#/reset?token=…", so [?&] is the live format.
+        // [#&] is accepted too because the buyer portal uses "#token=…" and a
+        // link pasted from the wrong place is otherwise indistinguishable from
+        // a valid one: the regex would miss, `token` would be undefined, and
+        // the server would answer "reset link expired" — sending someone to
+        // request a new link that will fail in exactly the same way.
+        var resetToken = (/[?&#]token=([^&]+)/.exec(window.location.hash) || [])[1];
+        if (!resetToken) {
+          throw Object.assign(
+            new Error('This reset link is incomplete. Open the most recent link from your email, or request a new one.'),
+            { status: 400 }
+          );
+        }
+
         var result = await authApi.post('/reset-password', {
-          token: resetToken,
+          token: decodeURIComponent(resetToken),
           password: el('reset-password').value,
         });
         setToken(result.token);
@@ -709,10 +948,16 @@
         client_id: clientId,
         callback: window.__realtikaGoogle,
       });
-      window.google.accounts.id.renderButton(el('google-slot'), {
+      // Google only accepts a pixel width, not a percentage. 340 hardcoded
+      // overflowed the card on a 320px screen, so measure the slot instead and
+      // clamp to the range the widget accepts (200–400).
+      var slot = el('google-slot');
+      var available = Math.round(slot.getBoundingClientRect().width) || 340;
+
+      window.google.accounts.id.renderButton(slot, {
         theme: 'filled_black',
         size: 'large',
-        width: 340,
+        width: Math.max(200, Math.min(400, available)),
         text: 'continue_with',
         shape: 'rectangular',
       });
@@ -738,6 +983,16 @@
       return;
     }
 
+    // /auth/me answers for an unverified user on purpose — it is how the app
+    // finds out to show this screen instead of the dashboard. Every /api/re
+    // endpoint would 403 with code:'email_unverified', so there is nothing to
+    // show behind the gate until they confirm.
+    if (me.verification_required && !me.email_verified) {
+      showVerifyGate('Confirm ' + me.email + ' to start using Realtika. '
+        + 'We sent you a link — check your inbox, and your spam folder.');
+      return;
+    }
+
     RE.state.user = me;
 
     el('who-name').textContent = me.full_name || me.email;
@@ -754,8 +1009,37 @@
       window.location.hash = '#/dashboard';
     }
 
+    // Light the nav BEFORE the first render, not as part of it. On a cold start
+    // — a Render free-tier instance waking up, which is most first loads —
+    // renderRoute is waiting on the network for a second or more, and the
+    // sidebar sat with nothing highlighted for all of it.
+    var landing = parseHash().name;
+    qsa('[data-nav]').forEach(function (link) {
+      link.classList.toggle('is-active', link.dataset.nav === landing);
+    });
+
     await renderRoute();
     refreshCounts();
+  }
+
+  // The "confirm your email" holding screen. The token is KEPT — it is what
+  // authorises the resend — but the app is not shown, because everything behind
+  // it would 403.
+  function showVerifyGate(message) {
+    RE.state.user = null;
+    el('app').hidden = true;
+    el('gate').hidden = false;
+    el('overlay').innerHTML = '';
+    showGateForm('form-verify');
+
+    el('verify-sub').textContent = 'Almost there.';
+    el('verify-ok').classList.add('hidden');
+
+    var pending = el('verify-error');
+    pending.textContent = message || 'Confirm your email address to continue.';
+    pending.classList.remove('hidden');
+
+    el('btn-resend-verify').classList.remove('hidden');
   }
 
   function showGate() {
@@ -771,7 +1055,20 @@
   function signOut(message) {
     setToken(null);
     RE.state.user = null;
-    el('overlay').innerHTML = '';
+    RE.state.config = RE.state.config || {};
+
+    // Screens keep filter state between navigations — that is the point of it.
+    // It must not survive a sign-out: two people share a machine in a
+    // developer's office, and the second user would otherwise land on a
+    // dashboard scoped to a project they may not even have access to, with a
+    // pill lit up that they never clicked.
+    if (typeof RE.resetScreenState === 'function') RE.resetScreenState();
+
+    currentScreen = null;          // force a full render on the next sign-in
+    el('overlay').innerHTML = '';  // close any modal or drawer left open
+    el('search-input').value = '';
+    el('view').innerHTML = '';     // never leave one user's data behind the gate
+
     showGate();
     if (message) gateError('login-error', message);
   }
@@ -812,8 +1109,44 @@
       gateError('login-error', 'Cannot reach the server at ' + API_BASE + '.');
     }
 
+    // #/verify?token=… is the emailed confirmation link. Consumed before
+    // anything else, because it both confirms the address and signs them in.
+    if (window.location.hash.indexOf('#/verify') === 0) {
+      await consumeVerificationLink();
+      return;
+    }
+
     if (token) await enterApp();
     else showGate();
+  }
+
+  async function consumeVerificationLink() {
+    el('gate').hidden = false;
+    showGateForm('form-verify');
+
+    var verifyToken = (/[?&#]token=([^&]+)/.exec(window.location.hash) || [])[1];
+
+    if (!verifyToken) {
+      el('verify-sub').textContent = '';
+      el('verify-error').textContent = 'This confirmation link is incomplete. Sign in and ask for a new one.';
+      el('verify-error').classList.remove('hidden');
+      return;
+    }
+
+    try {
+      var result = await authApi.post('/verify-email', { token: decodeURIComponent(verifyToken) });
+      setToken(result.token);
+      window.location.hash = '#/dashboard';
+      await enterApp();
+      toast('Email confirmed. Welcome to Realtika.', 'ok');
+    } catch (err) {
+      el('verify-sub').textContent = '';
+      el('verify-error').textContent = err.message;
+      el('verify-error').classList.remove('hidden');
+      // Resend only helps if they can prove who they are, and an expired link
+      // proves nothing.
+      el('btn-resend-verify').classList.toggle('hidden', !token);
+    }
   }
 
   // ── Public surface ────────────────────────────────────────────────────
@@ -829,6 +1162,11 @@
     reload: reload,
     refreshCounts: refreshCounts,
     signOut: signOut,
+    // Swaps in a token the server handed back mid-session — the only case is a
+    // password change, which invalidates the token this tab is holding. Without
+    // this the very next request would 401 and bounce the user to the gate for
+    // having successfully changed their password.
+    adoptToken: setToken,
 
     esc: esc,
     naira: naira,
@@ -836,9 +1174,14 @@
     plural: plural,
     fmtDate: fmtDate,
     fmtDateTime: fmtDateTime,
+    fmtRelative: fmtRelative,
     todayISO: todayISO,
     initials: initials,
     badge: badge,
+    waNumber: waNumber,
+    waLink: waLink,
+    openFile: openFile,
+    downloadCsv: downloadCsv,
 
     el: el,
     qs: qs,

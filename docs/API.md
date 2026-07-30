@@ -31,9 +31,11 @@ Rate-limited separately from everything else: 20 attempts per 15 minutes per
 IP, successful logins not counted (a busy office behind one NAT would
 otherwise lock itself out by working normally).
 
-- `GET /config` — `{ google_client_id, allow_registration, min_password_length }`.
-  What the sign-in screen needs before anyone types anything.
-- `POST /register` — `{ email*, password*, full_name, company_name }` → `{ token, user }`
+- `GET /config` — `{ google_client_id, allow_registration, min_password_length,
+  require_email_verification }`. What the sign-in screen needs before anyone
+  types anything.
+- `POST /register` — `{ email*, password*, full_name, company_name }` →
+  `{ token, user, email_verified, verification_required, verification }`
 - `POST /login` — `{ email*, password* }` → `{ token, user }`.
   One message for a wrong password and an unknown address, and an unknown
   address burns the same time a real hash comparison would.
@@ -46,14 +48,66 @@ otherwise lock itself out by working normally).
   carries `dev_reset_url` so the flow is testable locally.
 - `POST /reset-password` — `{ token*, password* }` → `{ token, user }`. Single
   use, time-boxed, and only the token's SHA-256 is ever stored.
-- `GET /me` *(auth)* — profile plus `organization_id`, `is_team`, `role`, `has_password`
+- `POST /verify-email` — `{ token* }` → `{ token, user }`. Confirms the address
+  and signs them in, because a second trip through the login form immediately
+  after proving they own the email is friction for nothing.
+- `POST /resend-verification` *(auth)* — another link. Requires a valid token, so
+  it can only ever mail the address on the caller's own account; otherwise it
+  would be a way to have this server mail an arbitrary stranger on demand.
+- `GET /me` *(auth)* — profile plus `organization_id`, `is_team`, `role`,
+  `has_password`, `email_verified`, `verification_required`
 - `PATCH /me` *(auth)* — `{ full_name, company_name, password, current_password }`.
   Changing an existing password requires the current one; an account created
   through Google is *setting* one and has nothing to prove.
 
+  **A password change ends every other session** and therefore returns
+  `{ …, token, sessions_ended: true }`. The caller must adopt that token — the
+  one it was using has just been invalidated, and the next request with it would
+  401. The browser app does this in `R.adoptToken`.
+
 Passwords are scrypt verifiers — `scrypt$N$r$p$salt$key`, parameters stored
 with the hash so the cost can be raised without invalidating old rows. Node's
 `crypto`, so no native module and nothing to compile on the deploy host.
+
+### Email verification
+
+Registration used to accept any address, so anyone could sign up as
+ceo@somedeveloper.com and be inside the product immediately.
+
+The gate lives in `orgContext`, which guards `/api/re` **only**. An unverified
+user can still reach `/api/auth/me` and `/api/auth/resend-verification` — the two
+endpoints they need to fix it. Gating in `authenticate` would lock them out of
+exactly those.
+
+`/api/re/*` answers `403 { code: 'email_unverified' }`. 403 and not 401: the
+token is valid, and a 401 would bounce the browser back to the sign-in form in a
+loop, where signing in would succeed and the next request would fail the same
+way. The frontend switches on `code`, never on the message.
+
+**It defaults to whether email can actually be sent** (`RESEND_API_KEY` +
+`RESEND_FROM`). Requiring verification with no working mail provider would brick
+the product: nobody could receive the link, so nobody could get in.
+`REQUIRE_EMAIL_VERIFICATION` overrides either way. Google accounts are verified
+on arrival — `verifyGoogleIdToken` already refuses an unverified Google address.
+
+### Sessions
+
+Every staff token carries `tv`, compared on each request against
+`users.token_version`. Bumping that column revokes every token issued to that
+user, immediately:
+
+| Event | Effect |
+|---|---|
+| `PATCH /auth/me` with a new password | all sessions ended, caller re-issued |
+| `POST /auth/reset-password` | all sessions ended, caller re-issued |
+| `PATCH /re/settings/team/:id` with `status: 'removed'` | that member's sessions ended |
+
+Without this, a token has no revocation story at all: an employee removed on
+Monday keeps API access for the remaining lifetime of their token (30 days by
+default), and a password change does not touch tokens already issued.
+
+A token minted before `migrations/004` has no `tv` claim and is read as `0`, so
+applying the migration does not sign existing users out.
 
 ---
 
@@ -100,6 +154,15 @@ document.
   requests cannot both win; a unique partial index backs it up. If the plan is
   invalid the whole thing unwinds — no orphan reservation, unit released.
 - `PATCH /:id/status` — syncs unit status (cancel → available, complete → sold)
+- `GET /:id/restructure` — what a renegotiation would look like. Nothing is
+  written, so it is safe to call while a rep is still agreeing terms on the
+  phone. Pass `number_of_installments`, `frequency` and `start_date` to get the
+  proposed schedule back, built by the same function that will build the real one.
+- `POST /:id/restructure` — `{ number_of_installments*, start_date*, frequency, reason }`.
+  Supersedes the current plan, waives its unpaid rows, and creates a new plan for
+  the **remaining balance**. Paid rows and their receipts are untouched. The
+  contract value survives as `original_total_amount = carried_amount_paid +
+  total_amount`.
 
 ## Payments — `/api/re/payments`
 - `GET /?limit&method&from&to` — most recent first (default 100, max 500)
@@ -112,6 +175,14 @@ document.
   an `effects` object saying what actually happened: receipt generated,
   buyer emailed or not, commission accrued. The person who just took ₦2m
   should not have to guess.
+
+  Also returns `overpayment` — how much of this transfer exceeded the amount
+  due. Overpayment is **recorded, not refused**: a buyer really does send ₦5m
+  against a ₦500k installment, and rejecting it would leave money in the bank
+  with nothing in the system to explain it. What it must not do is pass in
+  silence, so the figure is returned, stored on the payment row, and named in
+  the audit summary. Nothing reallocates it automatically — which installment a
+  credit belongs to is a conversation with the buyer.
 - `POST /:id/receipt` — re-render. Idempotent (same row, same storage path), so
   it doubles as "the buyer lost it, send it again".
 - `GET /:id/receipt` — fresh signed URL for an already-generated receipt
@@ -178,6 +249,14 @@ not a welcome.
   collection rate, sell-through. Scoped to one project when asked, because an
   investor backed one development and has no business seeing the whole book.
 - `GET /collections?months` — month-by-month collections (default 12, max 36)
+- `GET /export/:kind` — `customers`, `payments` or `schedule`, as a CSV file
+  download. UTF-8 with a BOM and CRLF line endings, because Excel on Windows
+  reads a plain UTF-8 CSV as the system codepage and turns every ₦ into
+  mojibake — in a file whose whole purpose is Naira amounts.
+
+  This exists so the answer to "can I get my data out?" is a button. It is also
+  the only backup a developer controls without a Supabase login. Exports are
+  audited.
 
 ## Settings — `/api/re/settings`
 - `GET /` · `PUT /` — letterhead, default commission rate, notification
@@ -187,7 +266,33 @@ not a welcome.
   every row**, because `organization_id` itself changes. Returns per-table
   counts so a partial move is visible. Sign out and back in afterwards.
 - `POST /team/invite` — `{ email*, role }` · owner/admin only
-- `PATCH /team/:id` — `{ role, status }` · the owner cannot be removed or demoted
+- `GET /team/:id/workload` — what a departing member is holding: open
+  reservations, their value, and the active reps their work can go to. Called
+  before the removal is confirmed so the question is concrete.
+- `PATCH /team/:id` — `{ role, status, reassign_to }` · the owner cannot be
+  removed or demoted.
+
+  `status: 'removed'` does three things at once: ends every session they hold,
+  moves their **open** reservations to `reassign_to` (or leaves them unassigned
+  and says how many), and deactivates their sales-rep record. Completed and
+  cancelled reservations keep their name, and commission already earned stays
+  theirs — it was earned on money that had already arrived.
+
+## Delete and restore — `/api/re/recycle`
+
+There is no hard delete anywhere in this API.
+
+- `GET /:resource/:id/impact` — what a delete would take with it, in words
+- `DELETE /:resource/:id` — stamps `deleted_at` and cascades; returns per-table counts
+- `POST /:resource/:id/restore` — brings it and its cascade back
+- `GET /:resource` — the bin
+
+`:resource` is one of `projects`, `units`, `customers`, `reservations`,
+`documents`, `tasks`, `promises`. **Payments and commissions are deliberately
+absent**: a recorded payment is a financial fact, and the correction for a wrong
+one is another entry, not the disappearance of the first. Deleting the
+reservation above it takes the payment with it and leaves a cascade record
+saying so.
 
 ## Audit — `/api/re/audit`
 - `GET /?action&entity_type&entity_id&actor_id&from&to&limit`

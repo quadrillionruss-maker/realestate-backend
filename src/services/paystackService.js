@@ -63,7 +63,11 @@ async function applyPaymentsToSchedule(scheduleId) {
 }
 
 // ── Payment link for one installment ──────────────────────────────────────
-async function initInstallmentPayment(orgId, scheduleId, customerEmail) {
+// `callbackUrl` is where Paystack sends the payer once they are done. It
+// matters most for the buyer portal: without it Paystack uses the account-wide
+// default, and a buyer who has just paid lands on some generic page with no
+// route back to their own schedule.
+async function initInstallmentPayment(orgId, scheduleId, customerEmail, { callbackUrl = null } = {}) {
   if (!process.env.PAYSTACK_SECRET_KEY) {
     throw Object.assign(new Error('Paystack is not configured.'), { statusCode: 503 });
   }
@@ -104,6 +108,7 @@ async function initInstallmentPayment(orgId, scheduleId, customerEmail) {
       email: customerEmail,
       amount: outstandingKobo,
       reference,
+      ...(callbackUrl ? { callback_url: callbackUrl } : {}),
       metadata: { product: 'realestate', schedule_id: scheduleId, organization_id: orgId },
     }),
   });
@@ -177,7 +182,22 @@ async function handleRealEstateCharge(event) {
 }
 
 // ── Manual payment (bank transfer dominates Nigerian off-plan sales) ───────
-async function recordManualPayment(orgId, scheduleId, { amount, method = 'bank_transfer', reference = null }) {
+//
+// OVERPAYMENT is not rejected, and that is deliberate: a buyer really does send
+// ₦5m against a ₦500k installment, either to get ahead or because they
+// misread the schedule. Refusing the record would leave money in the bank
+// account with nothing in the system to account for it, which is worse than
+// recording it.
+//
+// What it must not do is pass silently. An unexplained credit is a dispute
+// trigger in Nigerian property sales — the buyer expects the excess carried
+// forward and will say so months later. So the excess is computed, returned,
+// and written to the audit trail, and the UI warns before the record is made.
+async function recordManualPayment(orgId, scheduleId, {
+  amount,
+  method = 'bank_transfer',
+  reference = null,
+}) {
   const numericAmount = Number(amount);
   if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
     throw Object.assign(new Error('amount must be a positive number'), { statusCode: 400 });
@@ -185,13 +205,18 @@ async function recordManualPayment(orgId, scheduleId, { amount, method = 'bank_t
 
   const { data: schedule, error } = await supabaseAdmin
     .from('re_installment_schedule')
-    .select('id, amount_due')
+    .select('id, amount_due, plan_id')
     .eq('id', scheduleId)
     .eq('organization_id', orgId)
     .single();
   if (error || !schedule) {
     throw Object.assign(new Error('Installment not found'), { statusCode: 404 });
   }
+
+  // What was already on this installment before today's money.
+  const { data: priorPayments } = await supabaseAdmin
+    .from('re_payments').select('amount').eq('schedule_id', scheduleId);
+  const priorKobo = (priorPayments || []).reduce((sum, p) => sum + toKobo(p.amount), 0);
 
   const { data: payment, error: payErr } = await supabaseAdmin
     .from('re_payments')
@@ -207,7 +232,21 @@ async function recordManualPayment(orgId, scheduleId, { amount, method = 'bank_t
   if (payErr) throw payErr;
 
   const result = await applyPaymentsToSchedule(scheduleId);
-  return { ...payment, installment_fully_paid: result.fullyPaid, total_paid: result.totalPaid };
+
+  // Kobo arithmetic, like everywhere else money is compared here.
+  const excessKobo = priorKobo + toKobo(numericAmount) - toKobo(schedule.amount_due);
+  const overpayment = excessKobo > 0 ? toNaira(excessKobo) : 0;
+
+  return {
+    ...payment,
+    installment_fully_paid: result.fullyPaid,
+    total_paid: result.totalPaid,
+    amount_due: Number(schedule.amount_due),
+    // Positive means the buyer is in credit on this installment. The caller
+    // surfaces it; nothing here moves it automatically, because deciding which
+    // installment a credit belongs to is a conversation, not an inference.
+    overpayment,
+  };
 }
 
 module.exports = {

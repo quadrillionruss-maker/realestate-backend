@@ -33,5 +33,6 @@ router.use('/imports', require('./imports'));
 router.use('/reports', require('./reports'));
 router.use('/audit', require('./audit'));
 router.use('/settings', require('./settings'));
+router.use('/recycle', require('./recycle'));
 
 module.exports = router;
