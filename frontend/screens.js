@@ -74,6 +74,37 @@
     '</div>';
   }
 
+  // Simple Previous/Next pagination over a list already held in memory —
+  // these screens already fetch a bounded batch in one request, so slicing it
+  // client-side is the whole feature, with no new backend query parameters.
+  // Only three screens need this (Buyers, Payments History, Payments
+  // Due/Overdue), so it is a small shared helper rather than a new primitive
+  // on R — nothing else in the app currently has enough rows to need it.
+  function paginate(rows, perPage, page) {
+    var total = rows.length;
+    var pageCount = Math.max(1, Math.ceil(total / perPage));
+    var current = Math.min(Math.max(1, page || 1), pageCount);
+    var start = (current - 1) * perPage;
+    var slice = rows.slice(start, start + perPage);
+    return {
+      page: current,
+      pageCount: pageCount,
+      slice: slice,
+      label: total === 0 ? '' : 'Showing ' + (start + 1) + '-' + Math.min(start + perPage, total) + ' of ' + total,
+    };
+  }
+
+  function paginationControls(p) {
+    if (p.pageCount <= 1) return '';
+    return '<div class="pagination">' +
+      '<span class="page-sub">' + esc(p.label) + '</span>' +
+      '<div class="btn-row">' +
+        '<button class="btn-quiet" data-page-prev' + (p.page <= 1 ? ' disabled' : '') + '>Previous</button>' +
+        '<button class="btn-quiet" data-page-next' + (p.page >= p.pageCount ? ' disabled' : '') + '>Next</button>' +
+      '</div>' +
+    '</div>';
+  }
+
   // Supabase returns a nested one-to-many as an array, but a relationship it
   // resolves as one-to-one comes back as a bare object — and which of the two
   // you get depends on the foreign keys it can see, not on the query. Every
@@ -326,7 +357,7 @@
           '<div class="field"><label for="p-date">Promised date</label>' +
             '<input class="input" id="p-date" name="promised_date" type="date" required min="' + R.todayISO() + '"></div>' +
           '<div class="field"><label for="p-amount">Amount promised</label>' +
-            '<div class="input-money"><input class="input" id="p-amount" name="promised_amount" type="number" min="0" step="1000" placeholder="Optional"></div></div>' +
+            '<div class="input-money"><input class="input" id="p-amount" name="promised_amount" type="number" min="1" step="1" placeholder="Optional"></div></div>' +
         '</div>' +
         '<div class="field"><label for="p-who">Who did you speak to?</label>' +
           '<input class="input" id="p-who" name="spoke_to" placeholder="The buyer, their spouse, their PA…"></div>' +
@@ -731,33 +762,61 @@
           '<div class="field"><label for="m-label">Label</label>' +
             '<input class="input" id="m-label" name="label" placeholder="Ground floor"></div>' +
         '</div>' +
-        '<div class="field"><label for="m-file">File</label>' +
-          '<input class="input" id="m-file" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" required>' +
-          '<p class="field-hint">JPEG, PNG, WebP or PDF, up to 6MB. These are publicly readable so a rep can send one straight to a buyer.</p></div>',
+        '<div class="field"><label for="m-file">Files</label>' +
+          '<input class="input" id="m-file" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple required>' +
+          '<p class="field-hint">JPEG, PNG, WebP or PDF, up to 6MB each. These are publicly readable so a rep can send one straight to a buyer.</p>' +
+          '<p class="field-hint" id="m-progress"></p></div>',
       submitLabel: 'Upload',
       onSubmit: async function (form, close) {
         var input = R.el('m-file');
-        var file = input.files[0];
-        if (!file) throw new Error('Choose a file to upload.');
-        if (file.size > 6 * 1024 * 1024) throw new Error('That file is larger than 6MB.');
-
-        var base64 = await new Promise(function (resolve, reject) {
-          var reader = new FileReader();
-          reader.onload = function () { resolve(String(reader.result).split(',')[1]); };
-          reader.onerror = function () { reject(new Error('Could not read that file.')); };
-          reader.readAsDataURL(file);
-        });
+        var files = Array.prototype.slice.call(input.files || []);
+        if (!files.length) throw new Error('Choose at least one file to upload.');
 
         var v = R.values(form);
-        await api.post('/units/' + unit.id + '/media', {
-          content: base64,
-          content_type: file.type,
-          kind: v.kind,
-          label: v.label || null,
-        });
+        var progress = R.el('m-progress');
+        var uploaded = 0;
+        var failures = [];
 
+        // Sequential, not parallel — the progress line only means something if
+        // one upload finishes before the next starts, and it is one file at a
+        // time on a rep's phone data connection anyway.
+        for (var i = 0; i < files.length; i++) {
+          var file = files[i];
+          progress.textContent = 'Uploading ' + (i + 1) + ' of ' + files.length + '…';
+
+          try {
+            if (file.size > 6 * 1024 * 1024) throw new Error('larger than 6MB');
+
+            var base64 = await new Promise(function (resolve, reject) {
+              var reader = new FileReader();
+              reader.onload = function () { resolve(String(reader.result).split(',')[1]); };
+              reader.onerror = function () { reject(new Error('could not be read')); };
+              reader.readAsDataURL(file);
+            });
+
+            await api.post('/units/' + unit.id + '/media', {
+              content: base64,
+              content_type: file.type,
+              kind: v.kind,
+              label: v.label || null,
+            });
+            uploaded += 1;
+          } catch (err) {
+            failures.push(file.name + ' (' + err.message + ')');
+          }
+        }
+
+        progress.textContent = '';
         close();
-        toast('Uploaded.', 'ok');
+
+        // Whatever succeeded is already saved — one bad file in a batch of ten
+        // should not cost the other nine, so this closes and reloads either way
+        // and simply names what did not make it.
+        if (failures.length) {
+          toast(uploaded + ' of ' + files.length + ' uploaded. Failed: ' + failures.join(', '), 'err');
+        } else {
+          toast(R.plural(uploaded, 'file') + ' uploaded.', 'ok');
+        }
         R.reload();
       },
     });
@@ -779,7 +838,7 @@
           '<div class="field"><label for="u-size">Size (m²)</label>' +
             '<input class="input" id="u-size" name="size_sqm" type="number" min="0" step="0.1" placeholder="145"></div>' +
           '<div class="field"><label for="u-price">List price</label>' +
-            '<div class="input-money"><input class="input" id="u-price" name="list_price" type="number" min="0" step="10000" required placeholder="45000000"></div></div>' +
+            '<div class="input-money"><input class="input" id="u-price" name="list_price" type="number" min="1" step="1" required placeholder="45000000"></div></div>' +
         '</div>' +
         '<div class="field"><label for="u-plan">Floor plan URL</label>' +
           '<input class="input" id="u-plan" name="floor_plan_url" type="url" placeholder="https://…">' +
@@ -826,7 +885,7 @@
           '<div class="field"><label for="b-type">Type (all)</label>' +
             '<input class="input" id="b-type" name="unit_type" placeholder="3-bed terrace"></div>' +
           '<div class="field"><label for="b-price">List price (all)</label>' +
-            '<div class="input-money"><input class="input" id="b-price" name="list_price" type="number" min="0" step="10000" required placeholder="45000000"></div></div>' +
+            '<div class="input-money"><input class="input" id="b-price" name="list_price" type="number" min="1" step="1" required placeholder="45000000"></div></div>' +
         '</div>' +
         '<p class="field-hint" id="b-preview"></p>',
       submitLabel: 'Create units',
@@ -930,6 +989,8 @@
   }
 
   /* ══ BUYERS ═════════════════════════════════════════════════════════════ */
+  var CUSTOMERS_PER_PAGE = 50;
+
   R.screens.customers = {
     render: async function (view, params, query) {
       // #/customers/<id> opens the buyer straight from a search result.
@@ -937,48 +998,67 @@
 
       var search = query.q || '';
       var customers = await api('/customers' + (search ? '?search=' + encodeURIComponent(search) : ''));
+      var page = 1;
 
-      view.innerHTML =
-        head('Buyers', R.plural(customers.length, 'buyer') + (search ? ' matching “' + search + '”' : ''),
-          '<button class="btn" id="btn-import-buyers">Import CSV</button>' +
-          '<button class="btn primary" id="btn-new-buyer">Add buyer</button>') +
+      function renderPage() {
+        var p = paginate(customers, CUSTOMERS_PER_PAGE, page);
+        page = p.page;
 
-        card(null, table(
-          [{ label: 'Name' }, { label: 'Phone' }, { label: 'Email' }, { label: 'Source' },
-            { label: 'Added' }, { label: '' }],
-          customers,
-          function (c) {
-            return '<tr class="is-clickable" data-open="' + esc(c.id) + '">' +
-              '<td class="cell-primary">' + esc(c.full_name) + '</td>' +
-              '<td class="mono muted">' + esc(c.phone || '—') + '</td>' +
-              '<td class="muted">' + esc(c.email || '—') + '</td>' +
-              '<td class="muted">' + esc(c.source || '—') + '</td>' +
-              '<td class="muted">' + esc(fmtDate(c.created_at)) + '</td>' +
-              // data-stop keeps the row's own click handler from firing and
-              // opening the drawer behind the confirmation.
-              '<td class="right"><button class="btn-quiet" data-stop data-delete-customer="' + esc(c.id) +
-                '" data-label="' + esc(c.full_name) + '">Delete</button></td>' +
-            '</tr>';
-          },
-          {
-            emptyTitle: search ? 'Nobody matched that' : 'No buyers yet',
-            emptyHint: search ? 'Try a phone number or part of a surname.' : 'Add them one at a time, or import the list you already have.',
-          }
-        ), { flush: true });
+        view.innerHTML =
+          head('Buyers', R.plural(customers.length, 'buyer') + (search ? ' matching “' + search + '”' : ''),
+            '<button class="btn" id="btn-export-buyers">Export CSV</button>' +
+            '<button class="btn" id="btn-import-buyers">Import CSV</button>' +
+            '<button class="btn primary" id="btn-new-buyer">Add buyer</button>') +
 
-      R.qsa('[data-open]', view).forEach(function (row) {
-        row.addEventListener('click', function (event) {
-          if (event.target.closest('[data-stop]')) return;
-          openCustomer(row.dataset.open);
+          card(null, table(
+            [{ label: 'Name' }, { label: 'Phone' }, { label: 'Email' }, { label: 'Source' },
+              { label: 'Added' }, { label: '' }],
+            p.slice,
+            function (c) {
+              return '<tr class="is-clickable" data-open="' + esc(c.id) + '">' +
+                '<td class="cell-primary">' + esc(c.full_name) + '</td>' +
+                '<td class="mono muted">' + esc(c.phone || '—') + '</td>' +
+                '<td class="muted">' + esc(c.email || '—') + '</td>' +
+                '<td class="muted">' + esc(c.source || '—') + '</td>' +
+                '<td class="muted">' + esc(fmtDate(c.created_at)) + '</td>' +
+                // data-stop keeps the row's own click handler from firing and
+                // opening the drawer behind the confirmation.
+                '<td class="right"><button class="btn-quiet" data-stop data-delete-customer="' + esc(c.id) +
+                  '" data-label="' + esc(c.full_name) + '">Delete</button></td>' +
+              '</tr>';
+            },
+            {
+              emptyTitle: search ? 'Nobody matched that' : 'No buyers yet',
+              emptyHint: search ? 'Try a phone number or part of a surname.' : 'Add them one at a time, or import the list you already have.',
+            }
+          ), { flush: true }) +
+          paginationControls(p);
+
+        R.qsa('[data-open]', view).forEach(function (row) {
+          row.addEventListener('click', function (event) {
+            if (event.target.closest('[data-stop]')) return;
+            openCustomer(row.dataset.open);
+          });
         });
-      });
 
-      R.onClick(view, '[data-delete-customer]', async function (button) {
-        await deleteModal('customers', button.dataset.deleteCustomer, button.dataset.label);
-      });
+        R.onClick(view, '[data-delete-customer]', async function (button) {
+          await deleteModal('customers', button.dataset.deleteCustomer, button.dataset.label);
+        });
 
-      R.qs('#btn-new-buyer', view).addEventListener('click', customerModal);
-      R.qs('#btn-import-buyers', view).addEventListener('click', importCustomersModal);
+        R.qs('#btn-new-buyer', view).addEventListener('click', customerModal);
+        R.qs('#btn-import-buyers', view).addEventListener('click', importCustomersModal);
+        R.onClick(view, '#btn-export-buyers', async function () {
+          await R.downloadCsv('/reports/export/customers', 'archta-buyers.csv');
+          toast('Exported. Check your downloads.', 'ok');
+        });
+
+        var prev = R.qs('[data-page-prev]', view);
+        if (prev) prev.addEventListener('click', function () { page -= 1; renderPage(); });
+        var next = R.qs('[data-page-next]', view);
+        if (next) next.addEventListener('click', function () { page += 1; renderPage(); });
+      }
+
+      renderPage();
     },
   };
 
@@ -1100,8 +1180,17 @@
       });
 
       var pct = totalPlan ? Math.round((totalPaid / totalPlan) * 100) : 0;
+      var credit = unallocatedCreditFor(c.id);
 
       panel.body.innerHTML =
+        // A credit from an overpayment that nobody has allocated yet stays
+        // visible every time this drawer is opened, not just in the moment it
+        // happened — otherwise it is forgotten the instant the drawer closes.
+        (credit
+          ? '<div class="notice warn" id="d-credit-notice">Unallocated credit of ' + esc(naira(credit.amount)) +
+              ' — tap to allocate</div>'
+          : '') +
+
         '<div class="grid cols-3">' +
           stat('Contracted', nairaShort(totalPlan)) +
           stat('Paid', nairaShort(totalPaid), { tone: 'moss' }) +
@@ -1131,6 +1220,14 @@
             .slice() // never sort the array the API handed us in place
             .sort(function (a, b) { return a.installment_number - b.installment_number; });
 
+          // Paid rows collapse behind a summary line by default — a buyer
+          // eighteen months into a plan has eighteen settled rows nobody needs
+          // to see every time this drawer opens. Unpaid and overdue rows,
+          // where the actual work is, always show.
+          var openRows = schedule.filter(function (s) { return s.status !== 'paid'; });
+          var paidRows = schedule.filter(function (s) { return s.status === 'paid'; });
+          var paidTotal = paidRows.reduce(function (sum, s) { return sum + Number(s.amount_due || 0); }, 0);
+
           return '<div class="drawer-section">' +
             '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center">' +
               '<div><b>' + esc(unit.unit_number ? 'Unit ' + unit.unit_number : 'Reservation') + '</b>' +
@@ -1140,7 +1237,14 @@
             (plan
               ? '<div class="page-sub mt-1">' + plan.number_of_installments + ' ' + esc(plan.frequency) +
                 ' installments · ' + naira(plan.total_amount) + ' · from ' + esc(fmtDate(plan.start_date)) + '</div>' +
-                '<div class="mt-1">' + schedule.map(scheduleRow).join('') + '</div>'
+                '<div class="mt-1">' + openRows.map(scheduleRow).join('') + '</div>' +
+                (paidRows.length
+                  ? '<div class="sched-paid-summary">' +
+                      '<span class="page-sub">' + R.plural(paidRows.length, 'paid installment') + ' — ' + esc(naira(paidTotal)) + ' total</span>' +
+                      '<button class="btn-quiet" data-toggle-paid="' + esc(r.id) + '">Show</button>' +
+                    '</div>' +
+                    '<div class="hidden" data-paid-rows="' + esc(r.id) + '">' + paidRows.map(scheduleRow).join('') + '</div>'
+                  : '')
               : '<div class="page-sub mt-1">Outright purchase — no installment plan.</div>') +
           '</div>';
         }).join('') +
@@ -1185,14 +1289,40 @@
 
       R.onClick(panel.body, '[data-pay]', async function (button) {
         panel.close();
-        recordPaymentModal(button.dataset.pay, button.dataset.outstanding, c.full_name);
+        recordPaymentModal(button.dataset.pay, button.dataset.outstanding, c.full_name, c.id);
       });
+
+      R.onClick(panel.body, '[data-waive]', async function (button) {
+        await waiveModal(button.dataset.waive, button.dataset.installment, c.full_name);
+        openCustomer(id); // the row has to reflect the new status immediately
+      });
+
+      R.qsa('[data-toggle-paid]', panel.body).forEach(function (button) {
+        button.addEventListener('click', function () {
+          var rows = R.qs('[data-paid-rows="' + button.dataset.togglePaid + '"]', panel.body);
+          var wasHidden = rows.classList.contains('hidden');
+          rows.classList.toggle('hidden');
+          button.textContent = wasHidden ? 'Hide' : 'Show';
+        });
+      });
+
+      var creditNotice = R.qs('#d-credit-notice', panel.body);
+      if (creditNotice) {
+        creditNotice.addEventListener('click', function () {
+          allocateOverpaymentModal(null, c.id, credit.amount, credit.method, function (resolved) {
+            if (resolved) openCustomer(id);
+          });
+        });
+      }
     } catch (err) {
       panel.body.innerHTML = '<div class="notice">' + esc(err.message) + '</div>';
     }
   }
 
   function scheduleRow(s) {
+    // Waiving only ever applies to money still owed — a paid row has nothing
+    // left to write off, and an already-waived one has been through this once.
+    var waivable = s.status === 'pending' || s.status === 'overdue';
     return '<div class="sched ' + esc(s.status) + '">' +
       '<span class="sched-n">' + s.installment_number + '</span>' +
       '<span class="sched-main"><span class="mono">' + naira(s.amount_due) + '</span>' +
@@ -1200,6 +1330,9 @@
       badge(s.status) +
       (s.status !== 'paid'
         ? '<button class="btn-quiet" data-pay="' + esc(s.id) + '" data-outstanding="' + esc(s.amount_due) + '">Record</button>'
+        : '') +
+      (waivable
+        ? '<button class="btn-quiet" data-waive="' + esc(s.id) + '" data-installment="' + esc(s.installment_number) + '">Waive</button>'
         : '') +
     '</div>';
   }
@@ -1212,6 +1345,7 @@
 
       view.innerHTML =
         head('Reservations', 'Unit, buyer, rep and payment plan.',
+          '<button class="btn" id="btn-export-reservations">Export CSV</button>' +
           '<button class="btn primary" id="btn-new-res">New reservation</button>') +
 
         '<div class="filter-row">' +
@@ -1263,6 +1397,11 @@
         ), { flush: true });
 
       R.qs('#btn-new-res', view).addEventListener('click', function () { openReservationModal({}); });
+
+      R.onClick(view, '#btn-export-reservations', async function () {
+        await R.downloadCsv('/reports/export/schedule', 'archta-reservations.csv');
+        toast('Exported. Check your downloads.', 'ok');
+      });
 
       R.qsa('[data-res-menu]', view).forEach(function (button) {
         button.addEventListener('click', function () {
@@ -1534,7 +1673,7 @@
         '<div id="r-plan">' +
           '<div class="field-row">' +
             '<div class="field"><label for="r-total">Total amount</label>' +
-              '<div class="input-money"><input class="input" id="r-total" name="total_amount" type="number" min="1" step="10000"></div></div>' +
+              '<div class="input-money"><input class="input" id="r-total" name="total_amount" type="number" min="1" step="1"></div></div>' +
             '<div class="field"><label for="r-count">Number of installments</label>' +
               '<input class="input" id="r-count" name="number_of_installments" type="number" min="1" max="120" value="12"></div>' +
           '</div>' +
@@ -1748,98 +1887,166 @@
   }
 
   /* ══ PAYMENTS ═══════════════════════════════════════════════════════════ */
+  var PAYMENTS_HISTORY_PER_PAGE = 50;
+  var PAYMENTS_SCHEDULE_PER_PAGE = 100;
+
   R.screens.payments = {
     render: async function (view, params, query) {
       var tab = query.tab || 'due';
 
       if (tab === 'history') {
         var payments = await api('/payments?limit=200');
-        view.innerHTML = head('Payments', 'Every naira received, most recent first.') + paymentTabs(tab) +
-          card(null, table(
-            [{ label: 'Date' }, { label: 'Buyer' }, { label: 'Unit' }, { label: 'Method' },
-              { label: 'Amount', num: true }, { label: '' }],
-            payments,
-            function (p) {
-              var s = p.re_installment_schedule || {};
-              var reservation = (s.re_installment_plans && s.re_installment_plans.re_reservations) || {};
-              var unit = reservation.re_units || {};
-              return '<tr>' +
-                '<td class="muted">' + esc(fmtDate(p.paid_at)) + '</td>' +
-                '<td class="cell-primary">' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</td>' +
-                '<td class="muted">' + esc(unit.unit_number || '—') +
-                  '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
-                '<td class="muted">' + esc(String(p.method).replace(/_/g, ' ')) + '</td>' +
-                '<td class="num moss">' + naira(p.amount) + '</td>' +
-                '<td class="right"><button class="btn-quiet" data-receipt="' + esc(p.id) + '">Receipt</button></td>' +
-              '</tr>';
-            },
-            { emptyTitle: 'No payments recorded yet' }
-          ), { flush: true });
+        var historyPage = 1;
 
-        R.onClick(view, '[data-receipt]', async function (button) {
-          var result = await api.post('/payments/' + button.dataset.receipt + '/receipt');
-          R.openFile(result.download_url);
-          toast('Receipt ' + result.receipt_number + ' ready.', 'ok');
-        });
+        var renderHistory = function () {
+          var p = paginate(payments, PAYMENTS_HISTORY_PER_PAGE, historyPage);
+          historyPage = p.page;
+
+          view.innerHTML =
+            head('Payments', 'Every naira received, most recent first.',
+              '<button class="btn" id="btn-export-payments">Export CSV</button>') +
+            paymentTabs(tab) +
+            card(null, table(
+              [{ label: 'Date' }, { label: 'Buyer' }, { label: 'Unit' }, { label: 'Method' },
+                { label: 'Amount', num: true }, { label: '' }],
+              p.slice,
+              function (row) {
+                var s = row.re_installment_schedule || {};
+                var reservation = (s.re_installment_plans && s.re_installment_plans.re_reservations) || {};
+                var unit = reservation.re_units || {};
+                return '<tr>' +
+                  '<td class="muted">' + esc(fmtDate(row.paid_at)) + '</td>' +
+                  '<td class="cell-primary">' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</td>' +
+                  '<td class="muted">' + esc(unit.unit_number || '—') +
+                    '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
+                  '<td class="muted">' + esc(String(row.method).replace(/_/g, ' ')) + '</td>' +
+                  '<td class="num moss">' + naira(row.amount) + '</td>' +
+                  '<td class="right"><button class="btn-quiet" data-receipt="' + esc(row.id) + '">Receipt</button></td>' +
+                '</tr>';
+              },
+              { emptyTitle: 'No payments recorded yet' }
+            ), { flush: true }) +
+            paginationControls(p);
+
+          R.onClick(view, '[data-receipt]', async function (button) {
+            var result = await api.post('/payments/' + button.dataset.receipt + '/receipt');
+            R.openFile(result.download_url);
+            toast('Receipt ' + result.receipt_number + ' ready.', 'ok');
+          });
+
+          R.onClick(view, '#btn-export-payments', async function () {
+            await R.downloadCsv('/reports/export/payments', 'archta-payments.csv');
+            toast('Exported. Check your downloads.', 'ok');
+          });
+
+          var prev = R.qs('[data-page-prev]', view);
+          if (prev) prev.addEventListener('click', function () { historyPage -= 1; renderHistory(); });
+          var next = R.qs('[data-page-next]', view);
+          if (next) next.addEventListener('click', function () { historyPage += 1; renderHistory(); });
+        };
+
+        renderHistory();
         return;
       }
 
       var status = tab === 'overdue' ? 'overdue' : 'pending';
       var schedule = await api('/payments/schedule?status=' + status + '&limit=400');
+      var schedulePage = 1;
 
       var due = schedule.reduce(function (sum, s) { return sum + Number(s.amount_outstanding || 0); }, 0);
+      var buyerCount = new Set(schedule.map(function (s) {
+        var r = s.re_installment_plans.re_reservations;
+        return r.re_customers && r.re_customers.id;
+      })).size;
 
-      view.innerHTML =
-        head('Payments', tab === 'overdue' ? 'Installments past their due date.' : 'What is scheduled and not yet settled.') +
-        paymentTabs(tab) +
-        '<div class="grid cols-3 mb-2">' +
-          stat(tab === 'overdue' ? 'Overdue installments' : 'Open installments', String(schedule.length)) +
-          stat('Outstanding', naira(due), { tone: tab === 'overdue' ? 'clay' : null }) +
-          stat('Buyers', String(new Set(schedule.map(function (s) {
-            var r = s.re_installment_plans.re_reservations;
-            return r.re_customers && r.re_customers.id;
-          })).size)) +
-        '</div>' +
+      var renderSchedule = function () {
+        var p = paginate(schedule, PAYMENTS_SCHEDULE_PER_PAGE, schedulePage);
+        schedulePage = p.page;
 
-        card(null, table(
-          [{ label: 'Due' }, { label: 'Buyer' }, { label: 'Unit' }, { label: 'No.' },
-            { label: 'Due', num: true }, { label: 'Outstanding', num: true }, { label: '' }],
-          schedule,
-          function (s) {
-            var reservation = s.re_installment_plans.re_reservations;
-            var customer = reservation.re_customers || {};
-            var unit = reservation.re_units || {};
-            return '<tr>' +
-              '<td class="muted nowrap">' + esc(fmtDate(s.due_date)) + '</td>' +
-              '<td class="cell-primary">' + esc(customer.full_name || '—') + '</td>' +
-              '<td class="muted">' + esc(unit.unit_number || '—') +
-                '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
-              '<td class="muted">' + s.installment_number + '/' + s.re_installment_plans.number_of_installments + '</td>' +
-              '<td class="num muted">' + naira(s.amount_due) + '</td>' +
-              '<td class="num">' + naira(s.amount_outstanding) + '</td>' +
-              '<td class="right nowrap">' +
-                '<button class="btn-quiet" data-record="' + esc(s.id) + '" data-outstanding="' + esc(s.amount_outstanding) +
-                  '" data-name="' + esc(customer.full_name || '') + '">Record</button> ' +
-                (customer.email
-                  ? '<button class="btn-quiet" data-link="' + esc(s.id) + '" data-email="' + esc(customer.email) + '">Link</button>'
-                  : '') +
-              '</td>' +
-            '</tr>';
-          },
-          { emptyTitle: tab === 'overdue' ? 'Nothing is overdue' : 'Nothing is scheduled', emptyHint: 'Reservations with a payment plan appear here.' }
-        ), { flush: true });
+        view.innerHTML =
+          head('Payments', tab === 'overdue' ? 'Installments past their due date.' : 'What is scheduled and not yet settled.') +
+          paymentTabs(tab) +
+          '<div class="grid cols-3 mb-2">' +
+            stat(tab === 'overdue' ? 'Overdue installments' : 'Open installments', String(schedule.length)) +
+            stat('Outstanding', naira(due), { tone: tab === 'overdue' ? 'clay' : null }) +
+            stat('Buyers', String(buyerCount)) +
+          '</div>' +
 
-      R.qsa('[data-record]', view).forEach(function (button) {
-        button.addEventListener('click', function () {
-          recordPaymentModal(button.dataset.record, button.dataset.outstanding, button.dataset.name);
+          card(null, table(
+            [{ label: 'Due' }, { label: 'Buyer' }, { label: 'Unit' }, { label: 'No.' },
+              { label: 'Due', num: true }, { label: 'Outstanding', num: true }, { label: '' }],
+            p.slice,
+            function (s) {
+              var reservation = s.re_installment_plans.re_reservations;
+              var customer = reservation.re_customers || {};
+              var unit = reservation.re_units || {};
+              return '<tr>' +
+                '<td class="muted nowrap">' + esc(fmtDate(s.due_date)) + '</td>' +
+                '<td class="cell-primary">' + esc(customer.full_name || '—') + '</td>' +
+                '<td class="muted">' + esc(unit.unit_number || '—') +
+                  '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
+                '<td class="muted">' + s.installment_number + '/' + s.re_installment_plans.number_of_installments + '</td>' +
+                '<td class="num muted">' + naira(s.amount_due) + '</td>' +
+                '<td class="num">' + naira(s.amount_outstanding) + '</td>' +
+                '<td class="right nowrap">' +
+                  '<button class="btn-quiet" data-record="' + esc(s.id) + '" data-outstanding="' + esc(s.amount_outstanding) +
+                    '" data-name="' + esc(customer.full_name || '') + '" data-customer="' + esc(customer.id || '') + '">Record</button> ' +
+                  (customer.email
+                    ? '<button class="btn-quiet" data-link="' + esc(s.id) + '">Link</button>' +
+                      // Hidden until the button above is clicked — generating and
+                      // copying a payment link used to fire the instant it was
+                      // clicked, with no way to back out of a misclick.
+                      '<span class="hidden" data-link-confirm="' + esc(s.id) + '">' +
+                        '<span class="page-sub">Send Paystack link to ' + esc(customer.full_name || 'this buyer') +
+                          ' for ' + esc(naira(s.amount_outstanding)) + '?</span> ' +
+                        '<button class="btn-quiet" data-link-yes="' + esc(s.id) + '" data-email="' + esc(customer.email) + '">Confirm</button> ' +
+                        '<button class="btn-quiet" data-link-no="' + esc(s.id) + '">Cancel</button>' +
+                      '</span>'
+                    : '') +
+                '</td>' +
+              '</tr>';
+            },
+            { emptyTitle: tab === 'overdue' ? 'Nothing is overdue' : 'Nothing is scheduled', emptyHint: 'Reservations with a payment plan appear here.' }
+          ), { flush: true }) +
+          paginationControls(p);
+
+        R.qsa('[data-record]', view).forEach(function (button) {
+          button.addEventListener('click', function () {
+            recordPaymentModal(button.dataset.record, button.dataset.outstanding, button.dataset.name, button.dataset.customer);
+          });
         });
-      });
 
-      R.onClick(view, '[data-link]', async function (button) {
-        var result = await api.post('/payments/' + button.dataset.link + '/init', { customer_email: button.dataset.email });
-        await R.copyText(result.authorization_url);
-        toast('Paystack link for ' + naira(result.amount) + ' copied to your clipboard.', 'ok');
-      });
+        R.qsa('[data-link]', view).forEach(function (button) {
+          button.addEventListener('click', function () {
+            button.classList.add('hidden');
+            R.qs('[data-link-confirm="' + button.dataset.link + '"]', view).classList.remove('hidden');
+          });
+        });
+
+        R.qsa('[data-link-no]', view).forEach(function (button) {
+          button.addEventListener('click', function () {
+            var id = button.dataset.linkNo;
+            R.qs('[data-link-confirm="' + id + '"]', view).classList.add('hidden');
+            R.qs('[data-link="' + id + '"]', view).classList.remove('hidden');
+          });
+        });
+
+        R.onClick(view, '[data-link-yes]', async function (button) {
+          var id = button.dataset.linkYes;
+          var result = await api.post('/payments/' + id + '/init', { customer_email: button.dataset.email });
+          await R.copyText(result.authorization_url);
+          toast('Paystack link for ' + naira(result.amount) + ' copied to your clipboard.', 'ok');
+          R.qs('[data-link-confirm="' + id + '"]', view).classList.add('hidden');
+          R.qs('[data-link="' + id + '"]', view).classList.remove('hidden');
+        });
+
+        var prev = R.qs('[data-page-prev]', view);
+        if (prev) prev.addEventListener('click', function () { schedulePage -= 1; renderSchedule(); });
+        var next = R.qs('[data-page-next]', view);
+        if (next) next.addEventListener('click', function () { schedulePage += 1; renderSchedule(); });
+      };
+
+      renderSchedule();
     },
   };
 
@@ -1851,7 +2058,7 @@
     '</div>';
   }
 
-  function recordPaymentModal(scheduleId, outstanding, customerName) {
+  function recordPaymentModal(scheduleId, outstanding, customerName, customerId) {
     var due = Number(outstanding || 0);
 
     var panel = R.modal({
@@ -1859,7 +2066,7 @@
       body:
         (customerName ? '<p class="muted mb-2">From <b>' + esc(customerName) + '</b>.</p>' : '') +
         '<div class="field"><label for="pay-amount">Amount received</label>' +
-          '<div class="input-money"><input class="input" id="pay-amount" name="amount" type="number" min="1" step="1000" required value="' + esc(outstanding || '') + '"></div>' +
+          '<div class="input-money"><input class="input" id="pay-amount" name="amount" type="number" min="1" step="1" required value="' + esc(outstanding || '') + '"></div>' +
           '<p class="field-hint">Part payments are fine. The installment settles once it is fully covered.</p>' +
           '<div id="pay-warn"></div></div>' +
         '<div class="field"><label for="pay-method">Method</label>' +
@@ -1894,10 +2101,20 @@
         toast('Payment recorded' + (notes.length ? ' — ' + notes.join(', ') : '') + '.', 'ok');
 
         // An overpayment gets its own message, not a clause in a list. It is
-        // the thing the buyer will phone about.
+        // the thing the buyer will phone about — and immediately after it, a
+        // chance to actually do something about it rather than a note to
+        // "agree with the buyer later" that nobody comes back to.
         if (result.overpayment > 0) {
-          toast(naira(result.overpayment) + ' more than this installment required. '
-            + 'Agree with the buyer which installment it goes against, then record it there.', 'err');
+          toast(naira(result.overpayment) + ' more than this installment required.', 'err');
+
+          if (customerId) {
+            // Marked as unresolved BEFORE the picker opens, not after it
+            // closes — every dismissal path (backdrop, Escape, Cancel) then
+            // leaves the credit correctly flagged without having to be
+            // caught individually. A successful allocation clears it.
+            setUnallocatedCredit(customerId, result.overpayment, v.method);
+            await allocateOverpaymentModal(scheduleId, customerId, result.overpayment, v.method);
+          }
         }
 
         R.refreshCounts();
@@ -1924,6 +2141,136 @@
         warn.innerHTML = '';
       }
     });
+  }
+
+  /* ══ WAIVE AN INSTALLMENT ══════════════════════════════════════════════
+     A write-off, not a payment — a goodwill gesture, a dispute settled
+     another way, a bad debt finally accepted. The reason is required because,
+     unlike a payment, there is no receipt behind this to explain later why the
+     money stopped being owed. */
+  function waiveModal(scheduleId, installmentNumber, customerName) {
+    return new Promise(function (resolve) {
+      var panel = R.modal({
+        title: 'Waive installment ' + installmentNumber,
+        body:
+          (customerName ? '<p class="muted mb-2">For <b>' + esc(customerName) + '</b>.</p>' : '') +
+          '<div class="field"><label for="waive-reason">Reason</label>' +
+            '<textarea class="textarea" id="waive-reason" name="reason" rows="3" required ' +
+              'placeholder="Why is this being written off?"></textarea>' +
+            '<p class="field-hint">Recorded in the activity log.</p></div>',
+        submitLabel: 'Waive installment',
+        onSubmit: async function (form, close) {
+          var v = R.values(form);
+          if (!v.reason) throw new Error('A reason is required.');
+          await api.patch('/payments/' + scheduleId + '/waive', { reason: v.reason });
+          close();
+          toast('Installment waived.', 'ok');
+          resolve(true);
+        },
+      });
+      var submit = R.qs('.modal-foot [type="submit"]');
+      if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
+      qsaCloseWatch(panel, resolve);
+    });
+  }
+
+  // Every dismissal path a modal can take — the × button, "Cancel", the
+  // backdrop, Escape — resolves the same outer promise with `false` if
+  // nothing has resolved it already. `resolve` is a no-op the second time it
+  // is called, so a real Confirm followed by the modal's own close() calling
+  // this again costs nothing.
+  function qsaCloseWatch(panel, resolve) {
+    R.qsa('[data-close]', panel.root).forEach(function (button) {
+      button.addEventListener('click', function () { resolve(false); });
+    });
+    panel.root.addEventListener('mousedown', function (e) {
+      if (e.target === panel.root) resolve(false);
+    });
+  }
+
+  /* ══ OVERPAYMENT ALLOCATION ═════════════════════════════════════════════
+     A buyer sends more than one installment required. The excess is real
+     money already recorded — what it is not yet is ASSIGNED to anything, and
+     "agree with the buyer which installment it goes against" used to be the
+     whole plan. This is that conversation, made concrete: every other open
+     installment for the same buyer, one tap to apply the credit to it. */
+  var UNALLOCATED_KEY_PREFIX = 'archta.unallocated.';
+
+  function unallocatedCreditFor(customerId) {
+    try {
+      var raw = window.localStorage.getItem(UNALLOCATED_KEY_PREFIX + customerId);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  function setUnallocatedCredit(customerId, amount, method) {
+    try {
+      window.localStorage.setItem(UNALLOCATED_KEY_PREFIX + customerId,
+        JSON.stringify({ amount: amount, method: method || 'bank_transfer' }));
+    } catch (e) { /* private mode: the reminder just will not survive a reload */ }
+  }
+
+  function clearUnallocatedCredit(customerId) {
+    try { window.localStorage.removeItem(UNALLOCATED_KEY_PREFIX + customerId); }
+    catch (e) { /* ignore */ }
+  }
+
+  // `onResolved(true)` fires only once the excess has actually been applied
+  // somewhere — that is the one signal the caller needs, to know whether to
+  // refresh a drawer that might now be showing the persistent notice.
+  async function allocateOverpaymentModal(excludeScheduleId, customerId, overpaymentAmount, method, onResolved) {
+    var rows = await api('/payments/schedule?customer_id=' + encodeURIComponent(customerId) + '&limit=200');
+    var candidates = rows.filter(function (s) {
+      return s.id !== excludeScheduleId && (s.status === 'pending' || s.status === 'overdue');
+    });
+
+    var panel = R.modal({
+      title: 'Allocate the credit',
+      wide: true,
+      body:
+        '<p class="muted mb-2">' + esc(naira(overpaymentAmount)) +
+          ' was paid over what this installment required. Pick which installment it should go against instead.</p>' +
+        (candidates.length
+          ? '<div>' + candidates.map(function (s) {
+              var reservation = s.re_installment_plans.re_reservations;
+              var unit = reservation.re_units || {};
+              return '<div class="sched ' + esc(s.status) + '">' +
+                '<span class="sched-n">' + s.installment_number + '</span>' +
+                '<span class="sched-main"><span class="mono">' + naira(s.amount_outstanding) + '</span>' +
+                  '<span class="page-sub">' + (unit.unit_number ? 'Unit ' + esc(unit.unit_number) + ' · ' : '') +
+                    'due ' + esc(fmtDate(s.due_date)) + '</span></span>' +
+                badge(s.status) +
+                '<button class="btn-quiet" data-allocate="' + esc(s.id) + '">Apply here</button>' +
+              '</div>';
+            }).join('') + '</div>'
+          : '<p class="muted">This buyer has no other pending or overdue installment to allocate it to right now.</p>'),
+      cancelLabel: 'Decide later',
+    });
+
+    R.qsa('[data-allocate]', panel.root).forEach(function (button) {
+      button.addEventListener('click', async function () {
+        if (button.disabled) return;
+        button.disabled = true;
+        try {
+          await api.post('/payments/' + button.dataset.allocate + '/record', {
+            amount: overpaymentAmount, method: method, reference: 'Overpayment credit allocation',
+          });
+          clearUnallocatedCredit(customerId);
+          panel.close();
+          toast('Credit allocated.', 'ok');
+          if (onResolved) onResolved(true);
+        } catch (err) {
+          button.disabled = false;
+          toast(err.message, 'err');
+        }
+      });
+    });
+
+    // "Decide later", the × button, the backdrop or Escape all leave the
+    // credit exactly as unallocated as it was before this opened — the
+    // persistent notice (set the moment the overpayment was recorded) is what
+    // carries that forward, so nothing extra needs to happen here.
+    if (onResolved) qsaCloseWatch(panel, function () { onResolved(false); });
   }
 
   /* ══ DOCUMENTS ══════════════════════════════════════════════════════════ */
@@ -2232,7 +2579,7 @@
       // controls without a Supabase login.
       R.onClick(view, '[data-export]', async function (button) {
         var kind = button.dataset.export;
-        await R.downloadCsv('/reports/export/' + kind, 'realtika-' + kind + '.csv');
+        await R.downloadCsv('/reports/export/' + kind, 'archta-' + kind + '.csv');
         toast('Exported. Check your downloads.', 'ok');
       });
     },

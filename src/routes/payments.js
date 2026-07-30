@@ -149,6 +149,48 @@ router.post('/:scheduleId/record', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Writing off an installment the developer has decided not to collect — a
+// goodwill gesture, a dispute settled another way, a bad debt finally
+// accepted. Requires a reason: unlike a payment, there is no receipt behind
+// this to explain later why the money stopped being owed.
+router.patch('/:scheduleId/waive', async (req, res, next) => {
+  try {
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'A reason is required.' });
+
+    const { data: schedule, error: findErr } = await supabaseAdmin
+      .from('re_installment_schedule')
+      .select('id, status, amount_due, installment_number')
+      .eq('id', req.params.scheduleId)
+      .eq('organization_id', req.orgId)
+      .maybeSingle();
+    if (findErr) throw findErr;
+    if (!schedule) return res.status(404).json({ error: 'Installment not found' });
+    if (schedule.status === 'paid') {
+      return res.status(409).json({ error: 'This installment is already paid — nothing to waive.' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('re_installment_schedule')
+      .update({ status: 'waived' })
+      .eq('id', req.params.scheduleId)
+      .eq('organization_id', req.orgId)
+      .select()
+      .single();
+    if (error) throw error;
+
+    audit(req, {
+      action: 'installment.waived',
+      entityType: 're_installment_schedule',
+      entityId: req.params.scheduleId,
+      summary: `Installment ${schedule.installment_number} (₦${Number(schedule.amount_due).toLocaleString('en-NG')}) waived — ${reason}`,
+      metadata: { reason, amount_due: schedule.amount_due, was_status: schedule.status },
+    });
+
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
 // Re-render a receipt. Idempotent — it writes back to the same document row
 // and the same storage path — so this doubles as "the buyer lost it, send it
 // again" without producing a second receipt for one payment.

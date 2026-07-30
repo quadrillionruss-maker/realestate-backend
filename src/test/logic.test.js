@@ -41,6 +41,23 @@ const {
   rentTotalForPeriod, computeNewTenancyEndDate,
 } = require('../services/rentalService');
 
+// frontend/realestate.js is a browser script, not a CommonJS module — it
+// assigns onto `window.RE` rather than `module.exports`, and its very last
+// line registers a DOMContentLoaded listener that expects `document` to
+// exist. A minimal `window` stub is enough to load it here: every other
+// top-level use of `window` is already wrapped in its own try/catch, so the
+// only thing this needs to survive is `window.__API_BASE__` at the top of
+// the file. The DOMContentLoaded line still throws — harmlessly, and after
+// `window.RE` has already been populated — so it is swallowed rather than
+// treated as a real failure.
+global.window = global.window || {};
+try {
+  require('../../frontend/realestate.js');
+} catch (err) {
+  if (!/document is not defined/.test(err.message)) throw err;
+}
+const { waNumber, waLink } = global.window.RE;
+
 let passed = 0;
 const failures = [];
 
@@ -797,6 +814,33 @@ test('normalizes every form a buyer list contains', () => {
   assert.strictEqual(normalizeNigerianPhone('234-803-123-4567'), '2348031234567');
   assert.strictEqual(normalizeNigerianPhone('8031234567'), '2348031234567');
   assert.strictEqual(normalizeNigerianPhone(''), null);
+});
+
+// waNumber() is the frontend's own normalizer, feeding wa.me links directly —
+// a different file from notificationService's normalizeNigerianPhone above,
+// tested separately because a bug here renders a broken link in the browser,
+// not just a malformed outbound SMS.
+test('waNumber accepts every normal form and produces exactly 13 digits', () => {
+  assert.strictEqual(waNumber('08031234567'), '2348031234567');
+  assert.strictEqual(waNumber('+234 803 123 4567'), '2348031234567');
+  assert.strictEqual(waNumber('234-803-123-4567'), '2348031234567');
+  assert.strictEqual(waNumber('8031234567'), '2348031234567');
+});
+
+test('waNumber returns null for anything that does not normalize to 13 digits', () => {
+  // A landline-length or partially-pasted number.
+  assert.strictEqual(waNumber('803 123 456'), null);
+  // Too long — an extra digit, or a non-Nigerian number.
+  assert.strictEqual(waNumber('070312345678'), null);
+  assert.strictEqual(waNumber(''), null);
+  assert.strictEqual(waNumber(null), null);
+});
+
+test('waLink renders no link at all for a number waNumber rejects', () => {
+  // A broken wa.me link — one WhatsApp opens and then refuses — is worse than
+  // no link, because it looks like it should have worked.
+  assert.strictEqual(waLink('12345'), null);
+  assert.strictEqual(waLink('08031234567'), 'https://wa.me/2348031234567');
 });
 
 // ── Report ───────────────────────────────────────────────────────────────

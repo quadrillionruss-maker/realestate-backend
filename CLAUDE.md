@@ -1,4 +1,4 @@
-# Realtika — Real Estate Sales Operations — Working Guide
+# Archta — Real Estate Sales Operations — Working Guide
 
 A **standalone product**: an Express API, its own browser app, and a buyer
 portal. It owns its authentication, error handling and scheduled work, and

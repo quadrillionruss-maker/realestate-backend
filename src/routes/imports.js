@@ -57,7 +57,7 @@ router.get('/template/:kind', (req, res) => {
   }
 
   const csv = [template.headers.join(','), template.example.map(quote).join(',')].join('\n');
-  res.type('text/csv').attachment(`realtika-${req.params.kind}-template.csv`).send(csv);
+  res.type('text/csv').attachment(`archta-${req.params.kind}-template.csv`).send(csv);
 });
 
 const quote = (value) => /[",\n]/.test(String(value)) ? `"${String(value).replace(/"/g, '""')}"` : String(value);

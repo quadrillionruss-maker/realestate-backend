@@ -224,7 +224,7 @@ function emailShell({ heading, intro, rows = [], body = '', ctaLabel, ctaUrl, fo
   <tr><td align="center">
     <table role="presentation" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;background:#fff;border:1px solid #e4e0d8;border-radius:8px;overflow:hidden">
       <tr><td style="background:#0b0b0b;padding:18px 28px">
-        <span style="color:#c9a45c;font-size:12px;letter-spacing:.22em;text-transform:uppercase;font-family:Helvetica,Arial,sans-serif">Realtika</span>
+        <span style="color:#c9a45c;font-size:12px;letter-spacing:.22em;text-transform:uppercase;font-family:Helvetica,Arial,sans-serif">Archta</span>
       </td></tr>
       <tr><td style="padding:30px 28px;font-family:Helvetica,Arial,sans-serif;color:#111">
         <h1 style="margin:0 0 12px;font-size:20px;font-weight:600">${escapeHtml(heading)}</h1>
@@ -234,7 +234,7 @@ function emailShell({ heading, intro, rows = [], body = '', ctaLabel, ctaUrl, fo
         ${ctaHtml}
       </td></tr>
       <tr><td style="padding:16px 28px;background:#fafafa;border-top:1px solid #ececec;font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#8a8a8a">
-        ${escapeHtml(footer || 'Sent by Realtika on behalf of your property developer.')}
+        ${escapeHtml(footer || 'Sent by Archta on behalf of your property developer.')}
       </td></tr>
     </table>
   </td></tr>

@@ -95,7 +95,7 @@ function orgContext(req, res, next) {
     return res.status(403).json({
       success: false,
       code: 'email_unverified',
-      error: 'Confirm your email address to start using Realtika. Check your inbox for the link.',
+      error: 'Confirm your email address to start using Archta. Check your inbox for the link.',
     });
   }
   req.orgId = orgId;

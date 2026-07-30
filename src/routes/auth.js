@@ -58,10 +58,10 @@ async function sendVerificationEmail(user) {
     subject: 'Confirm your email address',
     html: notify.emailShell({
       heading: 'Confirm your email address',
-      intro: `Click below to confirm ${user.email} and start using Realtika. The link expires in ${env.auth.verifyTokenTtlHours} hours.`,
+      intro: `Click below to confirm ${user.email} and start using Archta. The link expires in ${env.auth.verifyTokenTtlHours} hours.`,
       ctaLabel: 'Confirm my email',
       ctaUrl: link.url,
-      footer: 'If you did not create a Realtika account, ignore this email — nothing will happen.',
+      footer: 'If you did not create an Archta account, ignore this email — nothing will happen.',
     }),
     text: `Confirm your email address: ${link.url}`,
     template: 'email_verification',
@@ -177,7 +177,7 @@ router.post('/forgot-password', credentialLimiter, async (req, res, next) => {
       await notify.sendEmail({
         orgId: result.user.id,
         to: result.user.email,
-        subject: 'Reset your Realtika password',
+        subject: 'Reset your Archta password',
         html,
         text: `Reset your password: ${result.resetUrl}`,
         template: 'password_reset',

@@ -430,7 +430,7 @@ router.get('/export/:kind', async (req, res, next) => {
 
     res
       .type('text/csv; charset=utf-8')
-      .attachment(`realtika-${spec.filename}-${stamp}.csv`)
+      .attachment(`archta-${spec.filename}-${stamp}.csv`)
       .send(toCsv(spec.columns, rows));
   } catch (e) { next(e); }
 });

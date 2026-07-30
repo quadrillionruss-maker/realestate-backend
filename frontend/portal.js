@@ -34,8 +34,8 @@
   // buyer leaves for Paystack and comes back to portal.html with no fragment,
   // and without this they would land on "this link is incomplete" immediately
   // after paying, which is the worst possible moment for it.
-  var STORE_KEY = 'realtika.portal.token';
-  var PAID_KEY = 'realtika.portal.paid';
+  var STORE_KEY = 'archta.portal.token';
+  var PAID_KEY = 'archta.portal.paid';
 
   var fragmentToken = (/[#&]token=([^&]+)/.exec(window.location.hash) || [])[1] || '';
   var token = fragmentToken || session(STORE_KEY) || '';
@@ -160,7 +160,7 @@
     if (developer.company_name) el('developer-name').textContent = developer.company_name;
 
     // With no phone and no email configured this used to render "Questions
-    // about your account? Contact Realtika." — an instruction with nothing to
+    // about your account? Contact Archta." — an instruction with nothing to
     // act on, naming the wrong company. If there is no way to make contact,
     // the offer is not made.
     var reach = [developer.phone, developer.email].filter(Boolean);

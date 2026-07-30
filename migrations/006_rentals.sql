@@ -1,7 +1,7 @@
 -- ============================================================
 -- RENTAL TENANCIES
 --
--- Realtika started as an off-plan and outright sales product.
+-- Archta started as an off-plan and outright sales product.
 -- Developers running both a sales book and a rental portfolio
 -- were keeping the second one in a separate spreadsheet. This
 -- migration makes a reservation able to represent a tenancy as

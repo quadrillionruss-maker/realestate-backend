@@ -1,4 +1,4 @@
-/* realestate.js — Realtika core: session, API, router, shell, UI primitives.
+/* realestate.js — Archta core: session, API, router, shell, UI primitives.
  *
  * Plain script, no bundler and no framework. The page is static HTML served
  * as-is, which means there is no build step between editing this file and
@@ -28,7 +28,7 @@
   'use strict';
 
   var API_BASE = window.__API_BASE__ || 'http://localhost:4000/api';
-  var TOKEN_KEY = 'realtika.token';
+  var TOKEN_KEY = 'archta.token';
 
   // ── Session ───────────────────────────────────────────────────────────
   var token = null;
@@ -123,10 +123,18 @@
   function waNumber(phone) {
     var digits = String(phone || '').replace(/\D/g, '');
     if (!digits) return null;
-    if (digits.indexOf('234') === 0) return digits;
-    if (digits.charAt(0) === '0') return '234' + digits.slice(1);
-    if (digits.length === 10) return '234' + digits; // local form, zero dropped
-    return digits;                                   // already international
+
+    var normalized;
+    if (digits.indexOf('234') === 0) normalized = digits;
+    else if (digits.charAt(0) === '0') normalized = '234' + digits.slice(1);
+    else if (digits.length === 10) normalized = '234' + digits; // local form, zero dropped
+    else normalized = digits;                                   // already international
+
+    // wa.me needs exactly 234 + 10 digits. A landline, a typo, a partial paste
+    // or a non-Nigerian number all produce something the wrong length here —
+    // rendering no link at all beats one that opens WhatsApp and then says
+    // "the phone number is incorrect".
+    return normalized.length === 13 ? normalized : null;
   }
 
   function waLink(phone) {
@@ -928,7 +936,7 @@
   function mountGoogle(clientId) {
     if (!clientId) return;
 
-    window.__realtikaGoogle = async function (response) {
+    window.__archtaGoogle = async function (response) {
       try {
         var result = await authApi.post('/google', { credential: response.credential });
         setToken(result.token);
@@ -946,7 +954,7 @@
       if (!window.google || !window.google.accounts) return;
       window.google.accounts.id.initialize({
         client_id: clientId,
-        callback: window.__realtikaGoogle,
+        callback: window.__archtaGoogle,
       });
       // Google only accepts a pixel width, not a percentage. 340 hardcoded
       // overflowed the card on a 320px screen, so measure the slot instead and
@@ -964,7 +972,7 @@
       el('alt-login').hidden = false;
     };
     // A blocked or failed CDN must not take the password form down with it.
-    script.onerror = function () { console.warn('[realtika] Google sign-in script did not load'); };
+    script.onerror = function () { console.warn('[archta] Google sign-in script did not load'); };
     document.head.appendChild(script);
   }
 
@@ -988,7 +996,7 @@
     // endpoint would 403 with code:'email_unverified', so there is nothing to
     // show behind the gate until they confirm.
     if (me.verification_required && !me.email_verified) {
-      showVerifyGate('Confirm ' + me.email + ' to start using Realtika. '
+      showVerifyGate('Confirm ' + me.email + ' to start using Archta. '
         + 'We sent you a link — check your inbox, and your spam folder.');
       return;
     }
@@ -1079,6 +1087,7 @@
     wireSearch();
 
     el('btn-signout').addEventListener('click', function () { signOut(); });
+    el('btn-signout-icon').addEventListener('click', function () { signOut(); });
     el('btn-account').addEventListener('click', function () { go('#/settings'); });
 
     el('btn-menu').addEventListener('click', function () {
@@ -1138,7 +1147,7 @@
       setToken(result.token);
       window.location.hash = '#/dashboard';
       await enterApp();
-      toast('Email confirmed. Welcome to Realtika.', 'ok');
+      toast('Email confirmed. Welcome to Archta.', 'ok');
     } catch (err) {
       el('verify-sub').textContent = '';
       el('verify-error').textContent = err.message;

@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="Realtika — installment sales, allocations, collections and a daily AI brief for property developers.">
-  <title>Realtika — Real Estate Intelligence</title>
+  <meta name="description" content="Archta — installment sales, allocations, collections and a daily AI brief for property developers.">
+  <title>Archta — Real Estate Intelligence</title>
 
   <!-- Favicon as an inline SVG data URI: no extra file, no extra request, and
        no 404 in the console. The gold lozenge is the same mark as the sidebar. -->
@@ -18,8 +18,8 @@
        fetched by WhatsApp or Twitter, so point this at a real file once you
        have one. -->
   <meta property="og:type" content="website">
-  <meta property="og:site_name" content="Realtika">
-  <meta property="og:title" content="Realtika — Real Estate Intelligence">
+  <meta property="og:site_name" content="Archta">
+  <meta property="og:title" content="Archta — Real Estate Intelligence">
   <meta property="og:description" content="Installment sales, allocations and collections for property developers — with a brief on your desk at 7am telling you who has fallen behind.">
   <meta property="og:image" content="https://realestate-frontend-pi.vercel.app/og.png">
   <meta property="og:image:width" content="1200">
@@ -49,7 +49,7 @@
      still exists — it is a debugging tool now, not the only way in. -->
 <main class="gate" id="gate" hidden>
   <section class="gate-brand">
-    <div class="gate-mark"><i>◆</i> REALTIKA</div>
+    <div class="gate-mark"><i>◆</i> ARCHTA</div>
 
     <div>
       <h1 class="gate-headline">Every naira, <em>accounted for.</em></h1>
@@ -83,7 +83,7 @@
            what you were signing into. Shown here instead of unhiding the panel
            because nobody scrolls past a product pitch to reach a password
            field on a phone. -->
-      <div class="gate-card-brand"><i>◆</i> REALTIKA
+      <div class="gate-card-brand"><i>◆</i> ARCHTA
         <span>Sales operations for property developers</span>
       </div>
 
@@ -227,7 +227,7 @@
 <div class="shell" id="app" hidden>
 
   <aside class="sidebar" id="sidebar">
-    <div class="sidebar-brand"><i>◆</i> REALTIKA</div>
+    <div class="sidebar-brand"><i>◆</i> ARCHTA</div>
 
     <nav class="nav" id="nav">
       <div class="nav-group">
@@ -289,6 +289,10 @@
       <div class="topbar-right">
         <span class="dateline" id="dateline"></span>
         <button class="btn ghost sm" id="btn-signout" type="button">Sign out</button>
+        <!-- Under 640px the search bar gets squeezed between the hamburger and
+             this button. Text hides, this icon-only twin takes over — same
+             handler, .icon-btn like every other icon-only control in the app. -->
+        <button class="icon-btn signout-icon-btn" id="btn-signout-icon" type="button" aria-label="Sign out">⎋</button>
       </div>
     </header>
 

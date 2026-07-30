@@ -79,7 +79,7 @@ const env = {
   // Termii: Nigerian SMS, cheaper than Twilio locally and with local support.
   termii: {
     apiKey: process.env.TERMII_API_KEY || '',
-    senderId: process.env.TERMII_SENDER_ID || 'Realtika',
+    senderId: process.env.TERMII_SENDER_ID || 'Archta',
   },
 
   cors: {
