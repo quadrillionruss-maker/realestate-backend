@@ -6,13 +6,16 @@
 //
 // PRIVACY: these files carry a buyer's name and what they paid for a house.
 // The bucket is private and the row stores an object PATH, never a bearer
-// link; a signed URL is minted per request and expires in minutes.
+// link; a signed URL is minted per request and expires within the hour.
 
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 
 const BUCKET = env.storage.documentsBucket;
-const SIGNED_URL_TTL_SECONDS = 300;
+// One hour: long enough that a link pasted into WhatsApp or opened from a slow
+// mobile connection is still good by the time someone taps it, short enough
+// that a leaked link is not a standing liability.
+const SIGNED_URL_TTL_SECONDS = 3600;
 
 // Created on first use so deploying needs no manual Storage step.
 async function ensureBucket() {

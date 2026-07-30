@@ -20,13 +20,13 @@ router.get('/', async (req, res, next) => {
     const monthStart = today.slice(0, 8) + '01';
     const in7 = new Date(Date.parse(today) + 7 * 86_400_000).toISOString().slice(0, 10);
 
-    // Scoping money to a project means walking payment → schedule → plan →
-    // reservation → unit → project. That join is only built when a project is
-    // actually selected, so the common unscoped path stays one flat read.
+    // Scoping money to a project, and splitting it into sales vs rental
+    // income, both mean walking payment → schedule → plan → reservation →
+    // unit → project. That join used to be built only when a project was
+    // actually selected; property_type now needs it every time, so the
+    // unscoped path pays that one join cost unconditionally.
     let paymentsQuery = supabaseAdmin.from('re_payments')
-      .select(projectId
-        ? 'amount, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(re_units!inner(project_id))))'
-        : 'amount')
+      .select('amount, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(property_type, re_units!inner(project_id))))')
       .eq('organization_id', orgId)
       .gte('paid_at', monthStart);
 
@@ -73,10 +73,22 @@ router.get('/', async (req, res, next) => {
     const taskRows = tasks.data || [];
     const sum = (rows, key) => rows.reduce((total, row) => total + Number(row[key] || 0), 0);
 
+    // Two revenue streams under one roof read as one number without this —
+    // a developer running both a sales book and a rental portfolio cannot
+    // otherwise tell whether this month's collections came from buyers
+    // paying down installments or tenants paying rent.
+    const paymentRows = payments.data || [];
+    const isRentalPayment = (row) => row.re_installment_schedule
+      ?.re_installment_plans?.re_reservations?.property_type === 'rental';
+    const rentalPayments = paymentRows.filter(isRentalPayment);
+    const salesPayments = paymentRows.filter((row) => !isRentalPayment(row));
+
     res.json({
       project_id: projectId,
       projects: projects.data || [],
-      collected_this_month: sum(payments.data || [], 'amount'),
+      collected_this_month: sum(paymentRows, 'amount'),
+      collected_sales_this_month: sum(salesPayments, 'amount'),
+      collected_rental_this_month: sum(rentalPayments, 'amount'),
       outstanding_total: sum(scheduleRows, 'amount_due'),
       overdue: {
         count: overdueRows.length,

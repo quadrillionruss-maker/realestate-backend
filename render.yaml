@@ -7,11 +7,16 @@
 #    root directory to the folder holding this file, or Render will build the
 #    wrong tree and fail with "Cannot find module".
 #
-# 2. PUPPETEER. Allocation letters and receipts render with headless Chromium,
-#    which is not present on Render's default Node runtime. On the plain Node
-#    runtime, PDF generation is the one thing that will fail — payments are
-#    still recorded, the buyer is still emailed, and the receipt is simply
-#    absent (set RE_AUTO_RECEIPTS=false to stop trying).
+# 2. PDF RENDERING. Allocation letters and receipts render with headless
+#    Chromium via puppeteer-core + @sparticuz/chromium — a Chromium build
+#    compiled for exactly this kind of constrained Linux environment, so no
+#    separate install step or cache directory is needed and no ~300MB browser
+#    download happens at build time. This is chosen automatically by platform
+#    (src/services/pdfAdapter.js); PDF_ENGINE=core|full overrides it if you
+#    ever need to force one path while diagnosing a deploy. If rendering ever
+#    does fail, PDF generation is the one thing affected — payments are still
+#    recorded and the buyer is still emailed (set RE_AUTO_RECEIPTS=false to
+#    stop retrying receipts specifically).
 #
 # 3. THE PAYSTACK WEBHOOK. Point Paystack at
 #    https://<your-service>.onrender.com/api/webhooks/paystack
@@ -23,18 +28,16 @@ services:
     name: realestate-sales-ops-api
     runtime: node
     plan: starter
-    # --omit=dev keeps the schema test's in-process Postgres out of the deploy.
+    # --omit=dev keeps the schema test's in-process Postgres, AND full
+    # `puppeteer` (a devDependency — see package.json), out of the deploy.
+    # Production renders through puppeteer-core + @sparticuz/chromium instead,
+    # which needs no separate cache directory or install step.
     buildCommand: npm ci --omit=dev
     startCommand: node server.js
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
-
-      # Chromium is downloaded at install time into the build cache; without
-      # this Render's read-only home directory can break the download.
-      - key: PUPPETEER_CACHE_DIR
-        value: /opt/render/project/.cache/puppeteer
 
       # Set these in the dashboard (or a secret group) — never in this file.
       - key: SUPABASE_URL

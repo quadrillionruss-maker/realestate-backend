@@ -21,16 +21,18 @@ const { generateDailyBrief } = require('../services/aiBrief');
 const { sweepBrokenPromises } = require('../services/promiseService');
 const { sweepEscalations } = require('../services/escalationService');
 const { notifyOverdue, remindUpcoming } = require('../services/overdueAlerts');
+const { checkTenancyRenewals } = require('../services/rentalService');
 
 const SCHEDULE = process.env.RE_BRIEF_CRON || '0 7 * * *';
 
 // ORDER MATTERS, and each step depends on the one above it:
 //
-//   1. markOverdue        pending → overdue, so "overdue" means one thing
-//   2. sweepBrokenPromises a promise whose date passed unpaid is now broken
-//   3. sweepEscalations    stage follows the (now correct) overdue counts
-//   4. notifyOverdue       reps and the MD hear about it
-//   5. generateDailyBrief  the AI reads the settled picture, not a moving one
+//   1. markOverdue          pending → overdue, so "overdue" means one thing
+//   2. sweepBrokenPromises  a promise whose date passed unpaid is now broken
+//   3. sweepEscalations     stage follows the (now correct) overdue counts
+//   4. checkTenancyRenewals a lease due inside 60 days gets flagged, once
+//   5. notifyOverdue        reps and the MD hear about it
+//   6. generateDailyBrief   the AI reads the settled picture, not a moving one
 //
 // Running the brief before the sweeps would have it describe yesterday's state
 // in this morning's email, which is the one thing it must never do.
@@ -52,6 +54,17 @@ async function runDailyJob() {
   });
   if (escalations.raised) {
     console.log(`[re-daily] raised escalation on ${escalations.raised} reservation(s)`);
+  }
+
+  // A tenancy inside 60 days of its end gets a task asking whether to renew or
+  // end it. Filed once per lease (title-matched against open AI tasks), so a
+  // sweep that runs every morning for two months does not ask twice.
+  const renewals = await checkTenancyRenewals().catch((err) => {
+    console.error('[re-daily] tenancy renewal sweep failed:', err.message);
+    return { evaluated: 0, filed: 0 };
+  });
+  if (renewals.filed) {
+    console.log(`[re-daily] flagged ${renewals.filed} tenancy renewal(s) for a decision`);
   }
 
   // Brief every org that has at least one RESERVATION.
@@ -105,8 +118,9 @@ async function runDailyJob() {
     }
   }
 
-  console.log(`[re-daily] briefed ${succeeded}/${orgIds.length} org(s), ${alerted} alert(s), ${reminded} reminder(s)`);
-  return { flipped, promises, escalations, orgs: orgIds.length, succeeded, alerted, reminded };
+  console.log(`[re-daily] briefed ${succeeded}/${orgIds.length} org(s), ${alerted} alert(s), ${reminded} reminder(s), `
+    + `${renewals.filed} renewal flag(s)`);
+  return { flipped, promises, escalations, renewals, orgs: orgIds.length, succeeded, alerted, reminded };
 }
 
 // The evening sweep. Installments are due by 18:00 Africa/Lagos

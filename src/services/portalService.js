@@ -95,7 +95,7 @@ async function loadPortalAccount(customer) {
     supabaseAdmin
       .from('re_reservations')
       .select(`
-        id, status, reserved_at,
+        id, status, reserved_at, property_type, tenancy_start_date, tenancy_end_date,
         re_units(unit_number, unit_type, size_sqm, list_price, re_projects(name, location)),
         re_installment_plans(
           id, total_amount, number_of_installments, frequency, start_date,
@@ -148,8 +148,24 @@ async function loadPortalAccount(customer) {
   let overdueAmount = 0;
   let overdueCount = 0;
   let nextDue = null;
+  let tenancy = null;
 
   for (const reservation of reservations || []) {
+    // Shown prominently, not buried in the reservation list — a tenant opens
+    // this page to answer exactly one question ("how long have I got left?"),
+    // and the soonest-ending live tenancy is the one worth surfacing if a
+    // buyer somehow holds more than one.
+    if (reservation.property_type === 'rental' && reservation.tenancy_end_date
+      && (!tenancy || reservation.tenancy_end_date < tenancy.tenancy_end_date)) {
+      tenancy = {
+        reservation_id: reservation.id,
+        tenancy_start_date: reservation.tenancy_start_date || null,
+        tenancy_end_date: reservation.tenancy_end_date,
+        unit_number: reservation.re_units?.unit_number || null,
+        project_name: reservation.re_units?.re_projects?.name || null,
+      };
+    }
+
     for (const plan of asArray(reservation.re_installment_plans)) {
       totalContracted += Number(plan.total_amount || 0);
       for (const row of plan.re_installment_schedule || []) {
@@ -165,6 +181,9 @@ async function loadPortalAccount(customer) {
             installment_number: row.installment_number,
             unit_number: reservation.re_units?.unit_number || null,
             project_name: reservation.re_units?.re_projects?.name || null,
+            // "Monthly rent" reads correctly on a lease; "Installment" reads
+            // correctly on a sale. portal.js switches its label on this.
+            property_type: reservation.property_type || 'off_plan',
           };
         }
       }
@@ -199,6 +218,9 @@ async function loadPortalAccount(customer) {
       overdue_count: overdueCount,
       progress_percent: totalContracted > 0 ? Math.min(100, Math.round((totalPaid / totalContracted) * 100)) : 0,
       next_due: nextDue,
+      // null for a buyer who owns rather than rents — portal.js only shows
+      // this block when it is present.
+      tenancy,
     },
     reservations: reservations || [],
     documents: documents || [],

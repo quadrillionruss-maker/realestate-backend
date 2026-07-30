@@ -159,6 +159,111 @@ router.get('/investor', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Rental portfolio summary. A developer running both a sales book and a
+// rental portfolio needs this as its own page — "how full is the building"
+// and "how much sold" are different questions with different answers, and
+// folding rental units into the sales occupancy numbers above would answer
+// neither one correctly.
+router.get('/rental', async (req, res, next) => {
+  try {
+    const today = lagosToday();
+    const monthStart = today.slice(0, 8) + '01';
+    const horizon90 = new Date(Date.parse(today) + 90 * 86_400_000).toISOString().slice(0, 10);
+
+    const [units, rentals, rentalPayments, upcoming] = await Promise.all([
+      supabaseAdmin.from('re_units')
+        .select('status').eq('organization_id', req.orgId),
+
+      // Every LIVE rental reservation, with its current plan's monthly rent
+      // (total_amount / number_of_installments — the same arithmetic a
+      // rental's schedule was built from in the first place).
+      supabaseAdmin.from('re_reservations')
+        .select(`
+          id, tenancy_start_date, tenancy_end_date,
+          re_customers(full_name),
+          re_units(unit_number, re_projects(name)),
+          re_installment_plans(status, total_amount, number_of_installments)`)
+        .eq('organization_id', req.orgId)
+        .eq('property_type', 'rental')
+        .in('status', ['reserved', 'confirmed']),
+
+      // Rental income specifically, this month — the number this report
+      // exists to answer, distinct from the sales collection figures above.
+      supabaseAdmin.from('re_payments')
+        .select('amount, paid_at, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(property_type)))')
+        .eq('organization_id', req.orgId)
+        .eq('re_installment_schedule.re_installment_plans.re_reservations.property_type', 'rental')
+        .gte('paid_at', monthStart),
+
+      // Renewals due in the next 90 days — the same fact
+      // rentalService.checkTenancyRenewals() flags as a task at the 60-day
+      // mark, shown here as a forward-looking list rather than a to-do.
+      supabaseAdmin.from('re_reservations')
+        .select(`
+          id, tenancy_end_date,
+          re_customers(full_name),
+          re_units(unit_number, re_projects(name)),
+          re_installment_plans(status, total_amount, number_of_installments)`)
+        .eq('organization_id', req.orgId)
+        .eq('property_type', 'rental')
+        .in('status', ['reserved', 'confirmed'])
+        .not('tenancy_end_date', 'is', null)
+        .lte('tenancy_end_date', horizon90)
+        .order('tenancy_end_date'),
+    ]);
+
+    for (const result of [units, rentals, rentalPayments, upcoming]) {
+      if (result.error) throw result.error;
+    }
+
+    const unitRows = units.data || [];
+    const occupied = (rentals.data || []).length;
+    const vacant = unitRows.filter((u) => u.status === 'available').length;
+
+    // A renewed tenancy carries BOTH its active and superseded plans in this
+    // array (migrations/005) — the superseded one is history, and picking
+    // whichever happens to come back first would report last year's rent
+    // half the time.
+    const monthlyRentOf = (reservation) => {
+      const plans = Array.isArray(reservation.re_installment_plans)
+        ? reservation.re_installment_plans
+        : [reservation.re_installment_plans].filter(Boolean);
+      const plan = plans.find((p) => p.status !== 'superseded') || plans[0];
+      return plan && plan.number_of_installments
+        ? Number(plan.total_amount) / Number(plan.number_of_installments)
+        : 0;
+    };
+
+    const describeRenewal = (r) => ({
+      reservation_id: r.id,
+      tenant_name: r.re_customers?.full_name || null,
+      unit_number: r.re_units?.unit_number || null,
+      project_name: r.re_units?.re_projects?.name || null,
+      tenancy_end_date: r.tenancy_end_date,
+      current_monthly_rent: round2(monthlyRentOf(r)),
+      days_remaining: Math.max(0, Math.round((Date.parse(r.tenancy_end_date) - Date.parse(today)) / 86_400_000)),
+    });
+
+    res.json({
+      generated_at: new Date().toISOString(),
+      period_end: today,
+      occupancy: {
+        occupied,
+        vacant,
+        // Against the currently-vacant pool, not the whole unit count — a
+        // unit mid-sale-process is neither occupied nor vacant for a rental
+        // portfolio's purposes.
+        rate: (occupied + vacant) > 0 ? Math.round((occupied / (occupied + vacant)) * 100) : 0,
+      },
+      monthly_rental_income: round2(sum(rentalPayments.data || [], 'amount')),
+      current_monthly_rent_roll: round2(
+        (rentals.data || []).reduce((total, r) => total + monthlyRentOf(r), 0)
+      ),
+      upcoming_renewals: (upcoming.data || []).map(describeRenewal),
+    });
+  } catch (e) { next(e); }
+});
+
 // Month-by-month collections, for the chart on the reports screen and the
 // "are we speeding up or slowing down" question underneath it.
 router.get('/collections', async (req, res, next) => {

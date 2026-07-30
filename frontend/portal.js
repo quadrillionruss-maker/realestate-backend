@@ -85,6 +85,17 @@
     return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-NG', { day: 'numeric', month: 'long', year: 'numeric' });
   }
 
+  // "142 days left" reads faster than doing the subtraction from a date
+  // stamped at the top of the same card.
+  function daysUntil(dateStr) {
+    var target = new Date(dateStr);
+    if (isNaN(target.getTime())) return '';
+    var days = Math.round((target.getTime() - Date.now()) / 86400000);
+    if (days < 0) return 'Expired ' + Math.abs(days) + (Math.abs(days) === 1 ? ' day ago' : ' days ago');
+    if (days === 0) return 'Ends today';
+    return days + (days === 1 ? ' day left' : ' days left');
+  }
+
   function el(id) { return document.getElementById(id); }
 
   function toast(message, kind) {
@@ -161,6 +172,12 @@
       'This page is personal to you — please do not forward the link.';
 
     var nextDue = s.next_due;
+    var tenancy = s.tenancy;
+    // A tenant's page and a buyer's page ask different first questions — "how
+    // long have I got left?" vs "how much is left to pay?". `tenancy` is only
+    // present when the customer holds a live rental, so this is the one flag
+    // that decides the vocabulary for the rest of the page.
+    var isRental = Boolean(tenancy) || (nextDue && nextDue.property_type === 'rental');
 
     el('portal-view').innerHTML =
       '<h1 class="serif" style="font-size:27px;font-weight:400;letter-spacing:-.02em">' +
@@ -180,6 +197,23 @@
         '<div class="page-sub mt-1">' + s.progress_percent + '% of ' + esc(naira(s.total_contracted)) + ' settled</div>' +
       '</div></div>' +
 
+      // The tenancy end date, prominent and near the top — not folded into the
+      // reservation card below, because "how long have I got left?" is the
+      // first thing a tenant opens this page to answer.
+      (tenancy
+        ? '<div class="card mt-2"><div class="card-body">' +
+            '<div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-end;flex-wrap:wrap">' +
+              '<div><div class="stat-label">Tenancy ends</div>' +
+                '<div class="stat-value">' + esc(fmtDate(tenancy.tenancy_end_date)) + '</div></div>' +
+              (tenancy.unit_number
+                ? '<div class="page-sub" style="text-align:right">Unit ' + esc(tenancy.unit_number) +
+                  (tenancy.project_name ? '<br>' + esc(tenancy.project_name) : '') + '</div>'
+                : '') +
+            '</div>' +
+            '<div class="page-sub mt-1">' + daysUntil(tenancy.tenancy_end_date) + '</div>' +
+          '</div></div>'
+        : '') +
+
       // Shown at the top, before anything else, because a buyer returning from
       // Paystack is looking for exactly one thing.
       (justPaidSchedule
@@ -193,14 +227,16 @@
       (s.overdue_count
         ? '<div class="notice mt-2">' +
             esc(naira(s.overdue_amount)) + ' is past due across ' +
-            s.overdue_count + (s.overdue_count === 1 ? ' installment' : ' installments') +
-            '. If you have already paid, please contact the sales office so it can be recorded.' +
+            s.overdue_count + (isRental
+              ? (s.overdue_count === 1 ? ' rent payment' : ' rent payments')
+              : (s.overdue_count === 1 ? ' installment' : ' installments')) +
+            '. If you have already paid, please contact the ' + (isRental ? 'lettings' : 'sales') + ' office so it can be recorded.' +
           '</div>'
         : '') +
 
       (nextDue
         ? '<div class="card mt-2"><div class="card-body">' +
-            '<div class="stat-label">Next payment</div>' +
+            '<div class="stat-label">' + (nextDue.property_type === 'rental' ? 'Next rent due' : 'Next payment') + '</div>' +
             '<div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-end;margin-top:8px;flex-wrap:wrap">' +
               '<div><div class="mono" style="font-size:21px">' + esc(naira(nextDue.amount_due)) + '</div>' +
                 '<div class="page-sub">due ' + esc(fmtDate(nextDue.due_date)) +
@@ -284,6 +320,7 @@
     var unit = r.re_units || {};
     var project = unit.re_projects || {};
     var plans = Array.isArray(r.re_installment_plans) ? r.re_installment_plans : (r.re_installment_plans ? [r.re_installment_plans] : []);
+    var rental = r.property_type === 'rental';
 
     var schedule = [];
     plans.forEach(function (plan) {
@@ -303,7 +340,10 @@
           (unit.unit_type ? ' · ' + esc(unit.unit_type) : '') +
         '</div>' +
         (schedule.length
-          ? '<div class="mt-2">' + schedule.map(function (row) {
+          ? '<div class="page-sub mt-2" style="text-transform:uppercase;letter-spacing:.04em;font-size:11px">' +
+              (rental ? 'Monthly rent' : 'Payment plan') +
+            '</div>' +
+            '<div class="mt-1">' + schedule.map(function (row) {
               return '<div class="sched ' + esc(row.status) + '">' +
                 '<span class="sched-n">' + row.installment_number + '</span>' +
                 '<span class="sched-main"><span class="mono">' + esc(naira(row.amount_due)) + '</span>' +
@@ -324,7 +364,9 @@
                   : '') +
               '</div>';
             }).join('') + '</div>'
-          : '<div class="page-sub mt-1">Outright purchase — no installment plan.</div>') +
+          : '<div class="page-sub mt-1">' +
+              (rental ? 'No rent schedule set up yet.' : 'Outright purchase — no installment plan.') +
+            '</div>') +
       '</div>' +
     '</div>';
   }

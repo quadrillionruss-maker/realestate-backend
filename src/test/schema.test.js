@@ -30,7 +30,7 @@ function check(name, cond, detail) {
 
   // ── Apply migrations, twice, to prove idempotency ───────────────────────
   for (const pass of ['first', 'second']) {
-    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql']) {
+    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -61,7 +61,7 @@ function check(name, cond, detail) {
     end $$;
   `);
 
-  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql']) {
+  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -551,6 +551,74 @@ function check(name, cond, detail) {
     await q(`update re_installment_plans set status='whatever' where reservation_id=$1`, [planRes]);
   } catch (err) { badPlanStatus = /check/i.test(err.message); }
   check('plan status is constrained to active|superseded', badPlanStatus);
+
+  // ── 006: rentals ─────────────────────────────────────────────────────────
+
+  const rentCols = await colsOf('re_reservations');
+  check('re_reservations has property_type', rentCols.includes('property_type'), rentCols.join(', '));
+  check('re_reservations has tenancy_start_date and tenancy_end_date',
+    rentCols.includes('tenancy_start_date') && rentCols.includes('tenancy_end_date'),
+    rentCols.join(', '));
+
+  // Existing reservations — the ones created earlier in this very file, before
+  // 006 ran — must have been backfilled to 'off_plan', or every reservation
+  // that predates this migration silently loses its type on deploy.
+  const [{ untyped }] = await q(
+    `select count(*)::int as untyped from re_reservations where property_type is null`);
+  check('every existing reservation defaulted to a property_type', untyped === 0, `${untyped} null`);
+
+  const [{ offPlanCount }] = await q(
+    `select count(*)::int as "offPlanCount" from re_reservations where property_type = 'off_plan'`);
+  check('reservations created before 006 read as off_plan', offPlanCount > 0, `${offPlanCount}`);
+
+  let badPropertyType = false;
+  try {
+    await q(`update re_reservations set property_type='timeshare' where id=$1`, [planRes]);
+  } catch (err) { badPropertyType = /check/i.test(err.message); }
+  check('property_type is constrained to off_plan|outright|rental', badPropertyType);
+
+  // An open-ended tenancy is a legitimate state — a null end date must not be
+  // rejected the way a null start date should be (application-level, not the
+  // database's job per the migration's own comment, but the COLUMN itself
+  // must allow it).
+  let openEndedTenancyAllowed = true;
+  try {
+    await q(`update re_reservations set property_type='rental', tenancy_start_date='2026-01-01',
+             tenancy_end_date=null where id=$1`, [planRes]);
+  } catch (err) { openEndedTenancyAllowed = false; console.log(`       ${err.message}`); }
+  check('tenancy_end_date can be null for an open-ended tenancy', openEndedTenancyAllowed);
+
+  // lease_agreement is a real doc_type now, and the existing types must still
+  // work — this is the check most likely to be broken by a careless
+  // drop/recreate of the constraint.
+  let leaseAgreementAllowed = true;
+  try {
+    await q(`insert into re_documents (organization_id, reservation_id, doc_type)
+             values ($1,$2,'lease_agreement')`, [userId, planRes]);
+  } catch (err) { leaseAgreementAllowed = false; console.log(`       ${err.message}`); }
+  check('lease_agreement is an accepted doc_type', leaseAgreementAllowed);
+
+  let allocationLetterStillAllowed = true;
+  try {
+    await q(`insert into re_documents (organization_id, reservation_id, doc_type)
+             values ($1, (select id from re_reservations where unit_id!=$2 limit 1),'deed_of_assignment')`,
+      [userId, lockUnit]);
+  } catch (err) { allocationLetterStillAllowed = false; console.log(`       ${err.message}`); }
+  check('deed_of_assignment (an existing doc_type) still works after the constraint was rebuilt',
+    allocationLetterStillAllowed);
+
+  let badDocType = false;
+  try {
+    await q(`insert into re_documents (organization_id, reservation_id, doc_type)
+             values ($1,$2,'eviction_notice')`, [userId, planRes]);
+  } catch (err) { badDocType = /check/i.test(err.message); }
+  check('an unknown doc_type is still refused', badDocType);
+
+  // The renewal sweep's index has to actually exist, or the "which tenancies
+  // expire soon" query is a sequential scan once there is real data.
+  const [{ hasIndex }] = await q(
+    `select exists(select 1 from pg_indexes where indexname='idx_re_reservations_tenancy_end') as "hasIndex"`);
+  check('the tenancy-renewal sweep index exists', hasIndex);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

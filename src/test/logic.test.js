@@ -37,6 +37,9 @@ const env = require('../config/env');
 const {
   preview: restructurePreview, contractValue,
 } = require('../services/restructureService');
+const {
+  rentTotalForPeriod, computeNewTenancyEndDate,
+} = require('../services/rentalService');
 
 let passed = 0;
 const failures = [];
@@ -196,6 +199,17 @@ test('renders buyer, unit and plan into the letter', () => {
   assert.ok(html.includes('145 sqm'));
   assert.ok(html.includes('₦45,000,000'));
   assert.ok(!html.includes('{{'), 'every placeholder should be substituted');
+});
+
+test('the reference number is keyed on the reservation, not the document row', () => {
+  // migrations/004+005 already enforce one live allocation letter per
+  // reservation, which is what makes this stable across a re-generation —
+  // and it is the number a buyer, a bank or a lawyer asks for later, so it
+  // should name the sale, not an internal row id.
+  const html = buildAllocationLetterHtml(sampleDoc, {});
+  assert.ok(html.includes('ALLOC-RES-1'), 'expected the reservation id, uppercased, in the reference');
+  assert.ok(!html.includes(sampleDoc.id.slice(0, 8).toUpperCase()),
+    'must not fall back to the document id when a reservation id is present');
 });
 
 test('escapes buyer-supplied text instead of injecting it as markup', () => {
@@ -409,6 +423,120 @@ test('a buyer at legal stage gets no drafted message at all', () => {
   const brief = buildFallbackBrief(legal);
   assert.strictEqual(brief.follow_ups.length, 0, 'nothing written to a buyer whose file is with a lawyer');
   assert.match(brief.recommendations[0].title, /Refer Mr Silent to legal review/);
+});
+
+// A tenant 30 days late on rent is a different situation from an off-plan
+// buyer who missed a payment, and the brief must not use the same word for
+// both (requirement: "Brief should say 'rent' not 'installment' for rental
+// reservations").
+const mixedState = {
+  today: '2026-07-26',
+  overdue: [
+    { reservation_id: 'r10', customer_name: 'Mr Bello', project: 'Lekki Gardens', unit_number: 'A3',
+      amount: 500_000, days_late: 40, property_type: 'off_plan' },
+    { reservation_id: 'r11', customer_name: 'Mrs Okafor', project: 'Ikoyi Heights', unit_number: '4B',
+      amount: 300_000, days_late: 35, property_type: 'rental' },
+    { reservation_id: 'r11', customer_name: 'Mrs Okafor', project: 'Ikoyi Heights', unit_number: '4B',
+      amount: 300_000, days_late: 5, property_type: 'rental' },
+  ],
+  upcomingWeek: [], pendingDocuments: [], promises: [],
+};
+
+test('the summary distinguishes buyers behind on installments from tenants behind on rent', () => {
+  const brief = buildFallbackBrief(mixedState);
+  assert.match(brief.summary, /1 buyer is behind on ₦500,000 across 1 installment/);
+  assert.match(brief.summary, /1 tenant is behind on ₦600,000 in rent across 2 payments/);
+  assert.ok(!/1 tenant is behind on[^.]*installment/.test(brief.summary), 'a tenant\'s arrears must not be called an installment');
+});
+
+test('a rental risk reason says rent payments, not installments', () => {
+  const brief = buildFallbackBrief(mixedState);
+  const tenant = brief.risks.find((r) => r.customer_name === 'Mrs Okafor');
+  const buyer = brief.risks.find((r) => r.customer_name === 'Mr Bello');
+  assert.match(tenant.reason, /2 missed rent payments/);
+  assert.match(buyer.reason, /1 missed installment/);
+});
+
+test('a rental WhatsApp draft references the Tenancy Agreement, not the Contract of Sale', () => {
+  const brief = buildFallbackBrief(mixedState);
+  const tenantDraft = brief.follow_ups.find((f) => f.customer_name === 'Mrs Okafor');
+  const buyerDraft = brief.follow_ups.find((f) => f.customer_name === 'Mr Bello');
+  // Both are at 'reminder' stage (fewer than 3 missed) in this fixture, so
+  // neither draft mentions the contract yet — assert the SUBJECT LINE instead,
+  // which does differ at every stage.
+  assert.match(tenantDraft.email_subject, /Outstanding rent payment/);
+  assert.match(buyerDraft.email_subject, /Outstanding installment/);
+});
+
+test('a rental recommendation is phrased in rent, not installments', () => {
+  const brief = buildFallbackBrief(mixedState);
+  const tenantRec = brief.recommendations.find((r) => r.title.includes('Okafor'));
+  assert.match(tenantRec.title, /2 missed rent payments/);
+});
+
+test('a rental in final-notice arrears references the Tenancy Agreement and tenancy risk', () => {
+  // 5 missed reaches 'final_notice' (see stageKeyForCount) — the stage whose
+  // wording states a consequence at all. 'formal_notice' (3-4 missed) is
+  // still deliberately silent on risk, matching the same ladder off-plan
+  // buyers are held to.
+  const formalRental = {
+    today: '2026-07-26',
+    overdue: Array.from({ length: 5 }, (_, i) => ({
+      reservation_id: 'r20', customer_name: 'Mr Eze', project: 'Victoria Island', unit_number: '2A',
+      amount: 400_000, days_late: 150 - i * 30, property_type: 'rental',
+    })),
+    upcomingWeek: [], pendingDocuments: [], promises: [],
+  };
+  const brief = buildFallbackBrief(formalRental);
+  const draft = brief.follow_ups[0];
+  assert.match(draft.whatsapp_draft, /Tenancy Agreement/);
+  assert.match(draft.whatsapp_draft, /this tenancy is at risk/);
+  assert.ok(!/Contract of Sale/.test(draft.whatsapp_draft));
+  assert.ok(!/this allocation is at risk/.test(draft.whatsapp_draft));
+});
+
+// ── Rental tenancies ─────────────────────────────────────────────────────
+// A rental's monthly-rent schedule is an installment plan in every sense
+// installmentService already understands one; these two are the only pieces
+// specific to a LEASE rather than a sale — the total for a renewal period,
+// and the new end date "renew" produces.
+section('Rental tenancy renewal');
+
+test('a 12-month renewal totals monthly rent times the duration', () => {
+  assert.strictEqual(rentTotalForPeriod(500_000, 12), 6_000_000);
+});
+
+test('rounds to the kobo rather than drifting', () => {
+  // 333,333.335 × 3 is 1,000,000.005 in floating point; the total must round
+  // to the nearest kobo rather than carrying that fraction forward.
+  assert.strictEqual(rentTotalForPeriod(333_333.335, 3), 1_000_000.01);
+});
+
+test('a renewal schedule sums to exactly the rent total, same as any plan', () => {
+  const rows = buildSchedule({
+    totalAmount: rentTotalForPeriod(450_000, 11), numberOfInstallments: 11,
+    frequency: 'monthly', startDate: '2027-01-01',
+  });
+  assert.strictEqual(sumOf(rows), 450_000 * 11);
+});
+
+test('a 12-month renewal ends exactly one year after it starts', () => {
+  assert.strictEqual(computeNewTenancyEndDate('2026-01-01', 12), '2027-01-01');
+});
+
+test('renewal end dates clamp at month-end, same as installment due dates', () => {
+  // A tenancy starting 31 Jan renews to 28/29 Feb rather than spilling into
+  // March — the same clamp addMonthsUTC applies everywhere else.
+  assert.strictEqual(computeNewTenancyEndDate('2026-01-31', 1), '2026-02-28');
+  assert.strictEqual(computeNewTenancyEndDate('2028-01-31', 1), '2028-02-29'); // leap year
+});
+
+test('renewing from an existing tenancy_end_date extends it forward, not from today', () => {
+  // A lease renewed two weeks before it actually expires must not shorten the
+  // tenant's paid-for period — the new term starts where the old one ends.
+  const currentEnd = '2026-06-01';
+  const newEnd = computeNewTenancyEndDate(currentEnd, 6);
+  assert.strictEqual(newEnd, '2026-12-01');
 });
 
 // ── Plan restructuring ───────────────────────────────────────────────────

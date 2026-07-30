@@ -7,7 +7,7 @@ database that already has an identity schema — every CREATE is
 `IF NOT EXISTS` and every column add is `ADD COLUMN IF NOT EXISTS`, so
 existing tables are topped up rather than fought over.
 
-Run `001` through `005` in order. All five are idempotent; `npm run test:schema`
+Run `001` through `006` in order. All six are idempotent; `npm run test:schema`
 applies them twice against a real Postgres to prove it.
 
 ## Identity tables
@@ -325,3 +325,33 @@ original_total_amount = carried_amount_paid + total_amount
 `uniq_re_active_plan_per_reservation` allows exactly one active plan per
 reservation. Two would mean two schedules and a dashboard counting the same debt
 twice.
+
+## What `006` adds
+
+Rental tenancies, alongside the existing off-plan and outright sales —
+additive, and every existing reservation is backfilled to `off_plan` so
+nothing already in the product changes shape.
+
+| Column | Table | Purpose |
+|---|---|---|
+| `property_type` | `re_reservations` | `off_plan` (default) \| `outright` \| `rental` |
+| `tenancy_start_date`, `tenancy_end_date` | `re_reservations` | both nullable; `tenancy_end_date` legitimately null for an open-ended tenancy |
+
+`doc_type` on `re_documents` gains `lease_agreement`, on the same footing
+`deed_of_assignment` has held since `001`: a real, creatable value with no
+template yet.
+
+**Nothing was added to `re_installment_plans` or `re_installment_schedule`.**
+A rental's monthly-rent schedule is an installment plan in every sense those
+tables already understand one — `total_amount = monthly_rent ×
+duration_months`, `number_of_installments = duration_months`, `frequency =
+'monthly'` — so `installmentService` needed no change, and a renewal reuses
+the exact `active`/`superseded` plan lifecycle `005` built for mid-term
+restructuring. `uniq_re_active_plan_per_reservation` already guarantees
+exactly one active plan per reservation, rental or not — no new lock was
+needed for renewals.
+
+The one new index, `idx_re_reservations_tenancy_end`, is what makes "which
+rentals expire in the next 60/90 days" (the renewal-reminder sweep, and the
+Reports rental section) a fast query rather than a sequential scan once a
+developer has a real number of tenancies under management.

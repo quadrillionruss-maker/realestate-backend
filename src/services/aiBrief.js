@@ -96,7 +96,7 @@ async function gatherOrgState(orgId) {
     re_installment_plans!inner(
       id, reservation_id,
       re_reservations!inner(
-        id, escalation_stage,
+        id, escalation_stage, property_type,
         re_customers(id, full_name, phone, email),
         re_units(unit_number, re_projects(name))
       )
@@ -152,6 +152,10 @@ async function gatherOrgState(orgId) {
       // five are the same word ("overdue") without it, and the model happily
       // writes the same warm nudge to both.
       escalation_stage: reservation.escalation_stage || 'none',
+      // A tenant 30 days late on rent and a buyer who missed an off-plan
+      // installment are different situations, and the brief should not use
+      // one word for both. See termsFor() below.
+      property_type: reservation.property_type || 'off_plan',
     };
   });
 
@@ -199,6 +203,11 @@ function buildFallbackBrief(state) {
       amount: 0,
       max_days_late: 0,
       escalation_stage: row.escalation_stage || null,
+      // Taken from this row like reservation_id and unit_number are: the
+      // per-customer grouping already collapses to one representative
+      // reservation, so a tenant is not going to be mislabelled a buyer
+      // partway through their own entry.
+      property_type: row.property_type || 'off_plan',
     };
     entry.count += 1;
     entry.amount += row.amount;
@@ -218,14 +227,29 @@ function buildFallbackBrief(state) {
   })).sort((a, b) => b.amount - a.amount);
 
   const brokenPromises = behind.filter((c) => c.promise?.status === 'broken');
-  const overdueTotal = state.overdue.reduce((sum, r) => sum + r.amount, 0);
   const upcomingTotal = state.upcomingWeek.reduce((sum, r) => sum + r.amount, 0);
+
+  // A tenant 30 days late on rent and an off-plan buyer who missed a payment
+  // are different situations, and the summary line should not flatten them
+  // into the same word — split by CUSTOMER (not by row) so "3 buyers" never
+  // silently includes a tenant, or the reverse.
+  const behindTenants = behind.filter((c) => c.property_type === 'rental');
+  const behindBuyers = behind.filter((c) => c.property_type !== 'rental');
+  const rowCount = (rows) => rows.reduce((sum, c) => sum + c.count, 0);
+  const rowAmount = (rows) => rows.reduce((sum, c) => sum + c.amount, 0);
 
   const sentences = [];
   if (behind.length) {
-    sentences.push(
-      `${behind.length} buyer${behind.length > 1 ? 's are' : ' is'} behind on ${naira(overdueTotal)} across ${state.overdue.length} installment${state.overdue.length > 1 ? 's' : ''}.`
-    );
+    const parts = [];
+    if (behindBuyers.length) {
+      const n = rowCount(behindBuyers);
+      parts.push(`${behindBuyers.length} buyer${behindBuyers.length > 1 ? 's are' : ' is'} behind on ${naira(rowAmount(behindBuyers))} across ${n} installment${n > 1 ? 's' : ''}`);
+    }
+    if (behindTenants.length) {
+      const n = rowCount(behindTenants);
+      parts.push(`${behindTenants.length} tenant${behindTenants.length > 1 ? 's are' : ' is'} behind on ${naira(rowAmount(behindTenants))} in rent across ${n} payment${n > 1 ? 's' : ''}`);
+    }
+    sentences.push(`${parts.join('; ')}.`);
   } else {
     sentences.push('No overdue installments today.');
   }
@@ -247,33 +271,42 @@ function buildFallbackBrief(state) {
 
   return {
     summary: sentences.join(' '),
-    risks: behind.map((c) => ({
-      customer_name: c.customer_name,
-      reason: `${c.count} missed installment${c.count > 1 ? 's' : ''} totalling ${naira(c.amount)}, oldest ${c.max_days_late} day${c.max_days_late === 1 ? '' : 's'} late`
-        + (c.promise?.status === 'broken' ? `; promised to pay by ${c.promise.promised_date} and did not` : '')
-        + (c.promise?.status === 'open' ? `; promised to pay by ${c.promise.promised_date}` : ''),
-      severity: severityFor(c),
-    })),
+    risks: behind.map((c) => {
+      const t = termsFor(c);
+      return {
+        customer_name: c.customer_name,
+        reason: `${c.count} missed ${t.noun}${c.count > 1 ? 's' : ''} totalling ${naira(c.amount)}, oldest ${c.max_days_late} day${c.max_days_late === 1 ? '' : 's'} late`
+          + (c.promise?.status === 'broken' ? `; promised to pay by ${c.promise.promised_date} and did not` : '')
+          + (c.promise?.status === 'open' ? `; promised to pay by ${c.promise.promised_date}` : ''),
+        severity: severityFor(c),
+      };
+    }),
     // Nobody at legal stage gets a drafted message. Anything written to a
     // buyer whose file is with a lawyer can be read back in court, and that
     // is not a sentence an automated draft should be composing.
-    follow_ups: behind.filter((c) => c.stage.key !== 'legal').slice(0, 10).map((c) => ({
-      customer_name: c.customer_name,
-      reservation_id: c.reservation_id,
-      whatsapp_draft: draftFor(c),
-      email_subject: c.stage.key === 'reminder'
-        ? `Outstanding installment — ${c.unit_number ? `Unit ${c.unit_number}` : 'your allocation'}`
-        : `Arrears notice — ${c.unit_number ? `Unit ${c.unit_number}` : 'your allocation'}`,
-      email_draft: emailFor(c),
-    })),
-    recommendations: behind.slice(0, 5).map((c) => ({
-      title: c.stage.key === 'legal'
-        ? `Refer ${c.customer_name} to legal review — ${c.count} missed installments (${naira(c.amount)})`
-        : c.promise?.status === 'broken'
-          ? `Call ${c.customer_name} — broke a promise to pay by ${c.promise.promised_date} (${naira(c.amount)})`
-          : `Call ${c.customer_name} about ${c.count} missed installment${c.count > 1 ? 's' : ''} (${naira(c.amount)})`,
-      reservation_id: c.reservation_id,
-    })),
+    follow_ups: behind.filter((c) => c.stage.key !== 'legal').slice(0, 10).map((c) => {
+      const t = termsFor(c);
+      return {
+        customer_name: c.customer_name,
+        reservation_id: c.reservation_id,
+        whatsapp_draft: draftFor(c),
+        email_subject: c.stage.key === 'reminder'
+          ? `Outstanding ${t.noun} — ${c.unit_number ? `Unit ${c.unit_number}` : t.theirUnit}`
+          : `Arrears notice — ${c.unit_number ? `Unit ${c.unit_number}` : t.theirUnit}`,
+        email_draft: emailFor(c),
+      };
+    }),
+    recommendations: behind.slice(0, 5).map((c) => {
+      const t = termsFor(c);
+      return {
+        title: c.stage.key === 'legal'
+          ? `Refer ${c.customer_name} to legal review — ${c.count} missed ${t.noun}${c.count > 1 ? 's' : ''} (${naira(c.amount)})`
+          : c.promise?.status === 'broken'
+            ? `Call ${c.customer_name} — broke a promise to pay by ${c.promise.promised_date} (${naira(c.amount)})`
+            : `Call ${c.customer_name} about ${c.count} missed ${t.noun}${c.count > 1 ? 's' : ''} (${naira(c.amount)})`,
+        reservation_id: c.reservation_id,
+      };
+    }),
   };
 }
 
@@ -294,7 +327,27 @@ function severityFor(c) {
 const where = (c) =>
   `${c.unit_number ? `Unit ${c.unit_number}` : 'your unit'}${c.project ? ` at ${c.project}` : ''}`;
 
+// A tenant 30 days late on rent is a different situation from an off-plan
+// buyer who missed a payment, and the drafted message must not use the wrong
+// vocabulary for either one — "your Contract of Sale" means nothing to a
+// renter, and "installment" undersells what a tenant actually owes monthly.
+// One lookup, everywhere a wording site would otherwise need its own
+// property_type check.
+function termsFor(c) {
+  const rental = c.property_type === 'rental';
+  return {
+    isRental: rental,
+    noun: rental ? 'rent payment' : 'installment',
+    theirUnit: rental ? 'your tenancy' : 'your allocation',
+    planWord: rental ? 'rent schedule' : 'payment plan',
+    contractWord: rental ? 'Tenancy Agreement' : 'Contract of Sale',
+    atRiskPhrase: rental ? 'this tenancy is at risk' : 'this allocation is at risk',
+  };
+}
+
 function draftFor(c) {
+  const t = termsFor(c);
+
   if (c.promise?.status === 'broken') {
     return `Good morning ${c.customer_name}. We spoke about ${where(c)} and understood payment would come through by `
       + `${c.promise.promised_date}. We have not seen it yet — is there anything holding it up? `
@@ -302,37 +355,38 @@ function draftFor(c) {
   }
 
   if (c.stage.key === 'final_notice') {
-    return `Dear ${c.customer_name}, our records show ${naira(c.amount)} outstanding across ${c.count} installments on `
-      + `${where(c)}. Under the terms of your Contract of Sale, continued arrears place this allocation at risk. `
+    return `Dear ${c.customer_name}, our records show ${naira(c.amount)} outstanding across ${c.count} ${t.noun}${c.count > 1 ? 's' : ''} on `
+      + `${where(c)}. Under the terms of your ${t.contractWord}, continued arrears mean ${t.atRiskPhrase}. `
       + `Please contact us before the end of this week to settle the balance or agree a revised schedule.`;
   }
 
   if (c.stage.key === 'formal_notice') {
     return `Dear ${c.customer_name}, this is a formal reminder that ${naira(c.amount)} is outstanding across `
-      + `${c.count} installments on ${where(c)}, as scheduled in your Contract of Sale. `
+      + `${c.count} ${t.noun}${c.count > 1 ? 's' : ''} on ${where(c)}, as set out in your ${t.contractWord}. `
       + `Kindly confirm a specific date on which we should expect payment, or contact us to discuss the schedule.`;
   }
 
-  return `Good morning ${c.customer_name}, this is a gentle reminder from the sales team regarding ${where(c)}. `
-    + `We have ${naira(c.amount)} outstanding on your payment plan. `
+  return `Good morning ${c.customer_name}, this is a gentle reminder from the ${t.isRental ? 'lettings' : 'sales'} team regarding ${where(c)}. `
+    + `We have ${naira(c.amount)} outstanding on your ${t.planWord}. `
     + `Kindly let us know when we should expect it, or reply here if you would like to discuss the schedule. Thank you.`;
 }
 
 function emailFor(c) {
+  const t = termsFor(c);
   const opening = c.stage.key === 'reminder'
     ? 'We hope this message finds you well. Our records show'
     : 'Our records show';
 
   const body = `Dear ${c.customer_name},\n\n`
-    + `${opening} ${naira(c.amount)} outstanding across ${c.count} installment${c.count > 1 ? 's' : ''} on ${where(c)}.\n\n`
+    + `${opening} ${naira(c.amount)} outstanding across ${c.count} ${t.noun}${c.count > 1 ? 's' : ''} on ${where(c)}.\n\n`
     + (c.promise?.status === 'broken'
       ? `We understood from our last conversation that payment would be made by ${c.promise.promised_date}.\n\n`
       : '')
     + (c.stage.key === 'final_notice'
-      ? 'Under the terms of your Contract of Sale, continued arrears place this allocation at risk. Please settle the balance or contact us to agree a revised schedule before the end of this week.\n\n'
+      ? `Under the terms of your ${t.contractWord}, continued arrears mean ${t.atRiskPhrase}. Please settle the balance or contact us to agree a revised schedule before the end of this week.\n\n`
       : 'Please let us know when we can expect payment, or contact us if you would like to review the schedule.\n\n');
 
-  return `${body}Kind regards,\nSales Team`;
+  return `${body}Kind regards,\n${t.isRental ? 'Lettings' : 'Sales'} Team`;
 }
 
 // ── Model call ─────────────────────────────────────────────────────────────
@@ -377,6 +431,16 @@ async function requestBriefFromModel(state) {
             '- legal: do NOT write a follow_up for this buyer at all. Add a recommendation to refer the file to the legal team.\n\n' +
             'These are valued installment customers, not debtors — never threaten, never use the word "debt", ' +
             'and never state a consequence the contract does not provide for.\n\n' +
+            // A tenant 30 days late on rent and an off-plan buyer who missed a
+            // payment are different situations. Without this the model happily
+            // writes "your Contract of Sale" to somebody who is renting, not
+            // buying.
+            'CHECK property_type ON EACH OVERDUE/UPCOMING ROW:\n' +
+            '- property_type "rental": say "rent" or "rent payment", never "installment". Reference their ' +
+            '"Tenancy Agreement", never "Contract of Sale". If arrears put the tenancy at risk, say ' +
+            '"this tenancy is at risk" — never "this allocation is at risk", which describes a sale, not a lease.\n' +
+            '- property_type "off_plan" or "outright": wording stays exactly as before — "installment", ' +
+            '"Contract of Sale", "this allocation is at risk".\n\n' +
             'The `promises` array is what buyers themselves said they would do. A buyer with a status:"broken" ' +
             'promise should be high severity and appear first: they named the date, not us. Reference it directly ' +
             '("we understood payment would come through by the 15th"), and never repeat a due date they have ' +

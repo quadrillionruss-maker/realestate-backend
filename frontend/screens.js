@@ -34,6 +34,20 @@
 
   R.resetScreenState = function () { projectFilter = null; };
 
+  // Mirrors src/services/installmentService.js addMonthsUTC exactly: a lease
+  // starting 31 Jan renews to 28/29 Feb, not 3 March, which is what native
+  // Date arithmetic (setMonth past a short month) would silently produce.
+  // The reservation-creation and renewal modals both compute a tenancy end
+  // date client-side to show the rep before they submit, and it has to match
+  // what the server would derive, or the confirmation lies.
+  function addMonthsClamped(dateStr, months) {
+    var parts = String(dateStr).slice(0, 10).split('-').map(Number);
+    var year = parts[0], month = parts[1] - 1, day = parts[2];
+    var lastDayOfTarget = new Date(Date.UTC(year, month + months + 1, 0)).getUTCDate();
+    var result = new Date(Date.UTC(year, month + months, Math.min(day, lastDayOfTarget)));
+    return result.toISOString().slice(0, 10);
+  }
+
   function head(title, sub, actions) {
     return '<div class="page-head"><div>' +
       '<div class="page-title">' + esc(title) + '</div>' +
@@ -176,6 +190,16 @@
           }) +
           stat('Due in 7 days', naira(d.due_next_7_days)) +
         '</div>' +
+
+        // Two revenue streams read as one number without this. Only shown once
+        // there is actually a rental portfolio to report on — a pure off-plan
+        // developer does not need "₦0 rental income" taking up a row forever.
+        (d.collected_rental_this_month
+          ? '<div class="grid cols-2 mt-2">' +
+              stat('Sales income this month', naira(d.collected_sales_this_month), { tone: 'moss' }) +
+              stat('Rental income this month', naira(d.collected_rental_this_month), { tone: 'gold', accent: 'gold' }) +
+            '</div>'
+          : '') +
 
         '<div class="grid split mt-2">' +
           '<div>' +
@@ -1089,7 +1113,14 @@
         '<div class="btn-row mt-2">' +
           (c.phone ? '<a class="btn-quiet" href="tel:' + esc(c.phone) + '">Call</a>' : '') +
           (R.waLink(c.phone) ? '<a class="btn-quiet" target="_blank" rel="noopener" href="' + esc(R.waLink(c.phone)) + '">WhatsApp</a>' : '') +
-          '<button class="btn-quiet" id="d-portal">Buyer portal link</button>' +
+          // Two independent actions, not one button with a shared side effect.
+          // Emailing and copying used to happen together — send_email was tied
+          // to whether an email existed, so there was no way to hand a rep a
+          // WhatsApp link without also silently emailing the buyer. Each button
+          // below issues its OWN portal link and reports its OWN outcome.
+          '<button class="btn-quiet" id="d-portal-email"' +
+            (c.email ? '' : ' disabled title="Add buyer email first"') + '>Email link</button>' +
+          '<button class="btn-quiet" id="d-portal-copy">Copy for WhatsApp</button>' +
         '</div>' +
 
         reservations.map(function (r) {
@@ -1126,12 +1157,30 @@
         });
       }
 
-      R.onClick(panel.body, '#d-portal', async function () {
-        var result = await api.post('/customers/' + c.id + '/portal-link', { send_email: Boolean(c.email) });
-        R.copyText(result.url);
-        toast(result.emailed === 'sent'
-          ? 'Link emailed to the buyer and copied to your clipboard.'
-          : 'Portal link copied. Paste it into WhatsApp.', 'ok');
+      // Each mints its own link (a fresh token, same underlying buyer account)
+      // and reports its own result — R.onClick disables only the button it is
+      // wired to, so triggering one never disables or affects the other.
+      R.onClick(panel.body, '#d-portal-email', async function () {
+        var result = await api.post('/customers/' + c.id + '/portal-link', { send_email: true });
+        if (result.emailed === 'sent') {
+          toast('Sent to ' + c.email, 'ok');
+        } else {
+          // send_email:true was requested but the send did not go through
+          // (Resend unconfigured, or it failed) — say so rather than claiming
+          // success on an email that never left.
+          toast('Could not email the link — check Settings → Notifications.', 'err');
+        }
+      });
+
+      R.onClick(panel.body, '#d-portal-copy', async function (button) {
+        var result = await api.post('/customers/' + c.id + '/portal-link', { send_email: false });
+        await R.copyText(result.url);
+        button.textContent = 'Copied ✓';
+        button.classList.add('is-done');
+        setTimeout(function () {
+          button.textContent = 'Copy for WhatsApp';
+          button.classList.remove('is-done');
+        }, 1700);
       });
 
       R.onClick(panel.body, '[data-pay]', async function (button) {
@@ -1180,20 +1229,31 @@
           function (r) {
             var unit = r.re_units || {};
             var plan = asArray(r.re_installment_plans)[0];
+            var rental = r.property_type === 'rental';
             return '<tr>' +
               '<td class="cell-primary">' + esc((r.re_customers && r.re_customers.full_name) || '—') +
                 '<div class="cell-meta">' + esc((r.re_customers && r.re_customers.phone) || '') + '</div></td>' +
               '<td>' + esc(unit.unit_number || '—') +
                 '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
-              '<td class="muted">' + (plan ? plan.number_of_installments + ' installments' : 'Outright') + '</td>' +
-              '<td class="num">' + naira(plan ? plan.total_amount : unit.list_price) + '</td>' +
+              '<td class="muted">' +
+                (rental
+                  ? (plan ? plan.number_of_installments + '-month lease' : 'Rental') +
+                    (r.tenancy_end_date ? '<div class="cell-meta">ends ' + esc(fmtDate(r.tenancy_end_date)) + '</div>' : '')
+                  : (plan ? plan.number_of_installments + ' installments' : 'Outright')) +
+              '</td>' +
+              '<td class="num">' + naira(plan ? (rental ? plan.total_amount / plan.number_of_installments : plan.total_amount) : unit.list_price) +
+                (rental && plan ? '<div class="cell-meta">/month</div>' : '') +
+              '</td>' +
               '<td class="muted">' + esc(fmtDate(r.reserved_at)) + '</td>' +
               '<td>' + badge(r.status) + (r.escalation_stage && r.escalation_stage !== 'none' ? ' ' + badge(r.escalation_stage) : '') + '</td>' +
               '<td class="right nowrap">' +
-                (asArray(r.re_installment_plans).length
-                  ? '<button class="btn-quiet" data-restructure="' + esc(r.id) + '" data-buyer-name="' +
-                    esc((r.re_customers && r.re_customers.full_name) || '') + '">Restructure</button> '
-                  : '') +
+                (rental
+                  ? '<button class="btn-quiet" data-renew="' + esc(r.id) + '" data-buyer-name="' +
+                    esc((r.re_customers && r.re_customers.full_name) || '') + '">Renew tenancy</button> '
+                  : asArray(r.re_installment_plans).length
+                    ? '<button class="btn-quiet" data-restructure="' + esc(r.id) + '" data-buyer-name="' +
+                      esc((r.re_customers && r.re_customers.full_name) || '') + '">Restructure</button> '
+                    : '') +
                 '<button class="btn-quiet" data-res-menu="' + esc(r.id) + '" data-status="' + esc(r.status) +
                   '" data-buyer-name="' + esc((r.re_customers && r.re_customers.full_name) || '') + '">Change</button>' +
               '</td>' +
@@ -1213,8 +1273,89 @@
       R.onClick(view, '[data-restructure]', async function (button) {
         await restructureModal(button.dataset.restructure, button.dataset.buyerName);
       });
+
+      R.onClick(view, '[data-renew]', async function (button) {
+        await renewTenancyModal(button.dataset.renew, button.dataset.buyerName);
+      });
     },
   };
+
+  /* ══ RENEW A TENANCY ═════════════════════════════════════════════════════
+     The rental equivalent of restructuring. 60 days before a lease ends the
+     morning sweep files a task asking whether to renew or end it
+     (src/services/rentalService.js) — this is the "renew" side of that
+     decision. The old plan, its schedule and its payments are left exactly as
+     they were; a new plan is created for the new period, and the tenancy end
+     date moves forward to match. */
+  async function renewTenancyModal(reservationId, tenantName) {
+    var state = await api('/reservations/' + reservationId + '/renew-tenancy');
+
+    var panel = R.modal({
+      title: 'Renew ' + (tenantName ? tenantName + '’s' : 'this') + ' tenancy',
+      wide: true,
+      body:
+        '<div class="grid cols-2 mb-2">' +
+          stat('Current monthly rent', state.current_monthly_rent ? naira(state.current_monthly_rent) : '—') +
+          stat('Current tenancy ends', fmtDate(state.current_tenancy_end_date), { tone: 'clay' }) +
+        '</div>' +
+
+        '<div class="notice info" style="font-size:12px">' +
+          'The current plan and its payment history are kept exactly as they are. A new rent schedule is ' +
+          'created for the renewal period, and the tenancy end date moves forward to match.' +
+        '</div>' +
+
+        '<div class="field-row">' +
+          '<div class="field"><label for="rn-rent">Monthly rent</label>' +
+            '<div class="input-money"><input class="input" id="rn-rent" name="monthly_rent" type="number" min="1" step="10000" value="' +
+              (state.current_monthly_rent || '') + '"></div></div>' +
+          '<div class="field"><label for="rn-duration">Renewal duration (months)</label>' +
+            '<input class="input" id="rn-duration" name="duration_months" type="number" min="1" max="120" value="12"></div>' +
+        '</div>' +
+        '<div class="field"><label for="rn-start">Renewal start date</label>' +
+          '<input class="input" id="rn-start" name="start_date" type="date" value="' +
+            (state.current_tenancy_end_date || R.todayISO()) + '">' +
+          '<p class="field-hint">Defaults to the day the current tenancy ends, so the tenant\'s paid-for period is never shortened.</p></div>' +
+
+        '<div class="field"><label for="rn-reason">Note (optional)</label>' +
+          '<input class="input" id="rn-reason" name="reason" placeholder="Renewed at the same rate"></div>' +
+
+        '<p class="field-hint" id="rn-preview"></p>',
+      submitLabel: 'Renew the tenancy',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        if (!v.monthly_rent || !v.duration_months) {
+          throw new Error('Set the monthly rent and the renewal duration.');
+        }
+        var result = await api.post('/reservations/' + reservationId + '/renew-tenancy', {
+          monthly_rent: v.monthly_rent,
+          duration_months: v.duration_months,
+          start_date: v.start_date || null,
+          reason: v.reason || null,
+        });
+        close();
+        toast('Tenancy renewed — new end date ' + fmtDate(result.new_tenancy_end_date) + '.', 'ok');
+        R.reload();
+      },
+    });
+
+    var updateRenewalPreview = function () {
+      var v = R.values(panel.form);
+      var months = Number(v.duration_months);
+      if (v.monthly_rent && months > 0 && v.start_date) {
+        var endDate = addMonthsClamped(v.start_date, months);
+        R.el('rn-preview').textContent = months + ' × ' + naira(v.monthly_rent) +
+          ' per month, from ' + fmtDate(v.start_date) + ' — new tenancy end date ' + fmtDate(endDate);
+      } else {
+        R.el('rn-preview').textContent = '';
+      }
+    };
+
+    ['rn-rent', 'rn-duration', 'rn-start'].forEach(function (id) {
+      R.el(id).addEventListener('input', updateRenewalPreview);
+      R.el(id).addEventListener('change', updateRenewalPreview);
+    });
+    updateRenewalPreview();
+  }
 
   /* ══ RESTRUCTURE A PAYMENT PLAN ═════════════════════════════════════════
      The alternative to cancelling. A buyer three installments down agrees new
@@ -1365,6 +1506,13 @@
               options(customers, 'id', 'full_name', preset.customerId) + '</select></div>' +
         '</div>' +
 
+        '<div class="field"><label for="r-property-type">What is this?</label>' +
+          '<select class="select" id="r-property-type" name="property_type">' +
+            '<option value="off_plan">Off-plan sale</option>' +
+            '<option value="outright">Outright sale</option>' +
+            '<option value="rental">Rental / tenancy</option>' +
+          '</select></div>' +
+
         '<div class="field"><label for="r-rep">Sales rep</label>' +
           '<select class="select" id="r-rep" name="sales_rep_id">' +
             '<option value="">Unassigned</option>' +
@@ -1378,7 +1526,9 @@
 
         '<div class="divider"></div>' +
 
-        '<label class="check mb-2"><input type="checkbox" id="r-has-plan" name="has_plan" checked>' +
+        // Off-plan / outright: a plan is optional (an outright buyer often
+        // pays in full, off-book).
+        '<label class="check mb-2" id="r-has-plan-row"><input type="checkbox" id="r-has-plan" name="has_plan" checked>' +
           '<span>Set up an installment plan</span></label>' +
 
         '<div id="r-plan">' +
@@ -1397,13 +1547,46 @@
               '<input class="input" id="r-start" name="start_date" type="date" value="' + R.todayISO() + '"></div>' +
           '</div>' +
           '<p class="field-hint" id="r-preview"></p>' +
+        '</div>' +
+
+        // Rental: always has a rent schedule — "Monthly rent amount" and
+        // "Tenancy duration in months" replace "Total amount" and "Number of
+        // installments", and the schedule is generated from those two values
+        // exactly the way an off-plan plan is (monthly_rent × months = total,
+        // months = installment count) — installmentService needs no change.
+        '<div id="r-plan-rental" class="hidden">' +
+          '<div class="field-row">' +
+            '<div class="field"><label for="r-rent">Monthly rent amount</label>' +
+              '<div class="input-money"><input class="input" id="r-rent" name="monthly_rent" type="number" min="1" step="10000"></div></div>' +
+            '<div class="field"><label for="r-duration">Tenancy duration (months)</label>' +
+              '<input class="input" id="r-duration" name="duration_months" type="number" min="1" max="120" value="12"></div>' +
+          '</div>' +
+          '<div class="field"><label for="r-tenancy-start">Tenancy start date</label>' +
+            '<input class="input" id="r-tenancy-start" name="tenancy_start_date" type="date" value="' + R.todayISO() + '"></div>' +
+          '<p class="field-hint" id="r-rental-preview"></p>' +
         '</div>',
       submitLabel: 'Create reservation',
       onSubmit: async function (form, close) {
         var v = R.values(form);
-        var payload = { unit_id: v.unit_id, customer_id: v.customer_id, sales_rep_id: v.sales_rep_id || null };
+        var payload = {
+          unit_id: v.unit_id, customer_id: v.customer_id, sales_rep_id: v.sales_rep_id || null,
+          property_type: v.property_type,
+        };
 
-        if (v.has_plan) {
+        if (v.property_type === 'rental') {
+          if (!v.monthly_rent || !v.duration_months || !v.tenancy_start_date) {
+            throw new Error('A rental needs a monthly rent amount, a duration and a tenancy start date.');
+          }
+          var months = Number(v.duration_months);
+          payload.tenancy_start_date = v.tenancy_start_date;
+          payload.tenancy_end_date = addMonthsClamped(v.tenancy_start_date, months);
+          payload.plan = {
+            total_amount: Number(v.monthly_rent) * months,
+            number_of_installments: months,
+            frequency: 'monthly',
+            start_date: v.tenancy_start_date,
+          };
+        } else if (v.has_plan) {
           if (!v.total_amount || !v.number_of_installments || !v.start_date) {
             throw new Error('A plan needs a total, a count and a start date.');
           }
@@ -1417,7 +1600,7 @@
 
         await api.post('/reservations', payload);
         close();
-        toast('Reservation created.', 'ok');
+        toast(v.property_type === 'rental' ? 'Tenancy created.' : 'Reservation created.', 'ok');
         R.reload();
       },
     });
@@ -1444,10 +1627,36 @@
         : '';
     };
 
+    var updateRentalPreview = function () {
+      var v = R.values(form);
+      var months = Number(v.duration_months);
+      if (v.monthly_rent && months > 0 && v.tenancy_start_date) {
+        var endDate = addMonthsClamped(v.tenancy_start_date, months);
+        R.el('r-rental-preview').textContent = months + ' × ' + naira(v.monthly_rent) +
+          ' per month, from ' + fmtDate(v.tenancy_start_date) + ' — tenancy ends ' + fmtDate(endDate);
+      } else {
+        R.el('r-rental-preview').textContent = '';
+      }
+    };
+
     unitSelect.addEventListener('change', setPrice);
     ['r-total', 'r-count', 'r-freq', 'r-start'].forEach(function (id) {
       R.el(id).addEventListener('input', updatePreview);
       R.el(id).addEventListener('change', updatePreview);
+    });
+    ['r-rent', 'r-duration', 'r-tenancy-start'].forEach(function (id) {
+      R.el(id).addEventListener('input', updateRentalPreview);
+      R.el(id).addEventListener('change', updateRentalPreview);
+    });
+
+    // The whole point of requirement #10: picking "Rental" swaps the plan
+    // fields for rent fields rather than showing both at once.
+    R.el('r-property-type').addEventListener('change', function (e) {
+      var rental = e.target.value === 'rental';
+      R.el('r-plan-rental').classList.toggle('hidden', !rental);
+      R.el('r-has-plan-row').classList.toggle('hidden', rental);
+      R.el('r-plan').classList.toggle('hidden', rental || !R.el('r-has-plan').checked);
+      if (rental) updateRentalPreview();
     });
 
     R.el('r-has-plan').addEventListener('change', function (e) {
@@ -1923,9 +2132,14 @@
   R.screens.reports = {
     render: async function (view, params, query) {
       var scope = query.project ? '?project_id=' + encodeURIComponent(query.project) : '';
-      var results = await Promise.all([api('/reports/investor' + scope), api('/reports/collections?months=12')]);
-      var report = results[0], collections = results[1];
+      var results = await Promise.all([
+        api('/reports/investor' + scope), api('/reports/collections?months=12'), api('/reports/rental'),
+      ]);
+      var report = results[0], collections = results[1], rental = results[2];
       var t = report.totals;
+      // Only a developer who actually runs a rental portfolio sees this
+      // section — nothing to report on is nothing to show.
+      var hasRentals = rental.occupancy.occupied > 0 || rental.upcoming_renewals.length > 0;
 
       var peak = Math.max.apply(null, collections.map(function (m) { return m.amount; }).concat([1]));
 
@@ -1973,9 +2187,46 @@
             '</tr>';
           },
           { emptyTitle: 'No projects to report on yet' }
-        ), { flush: true });
+        ), { flush: true }) +
+
+        // "How full is the building" and "how much sold" are different
+        // questions with different answers — folding rental units into the
+        // sales occupancy numbers above would answer neither correctly.
+        (hasRentals
+          ? card('Rental portfolio',
+              '<div class="grid cols-3">' +
+                stat('Occupancy', rental.occupancy.rate + '%', {
+                  tone: rental.occupancy.rate >= 70 ? 'moss' : null,
+                  sub: rental.occupancy.occupied + ' occupied · ' + rental.occupancy.vacant + ' vacant',
+                }) +
+                stat('Rental income this month', naira(rental.monthly_rental_income), { tone: 'gold', accent: 'gold' }) +
+                stat('Current monthly rent roll', naira(rental.current_monthly_rent_roll)) +
+              '</div>', { flush: false }) +
+
+            card('Renewals due in the next 90 days', table(
+              [{ label: 'Tenant' }, { label: 'Unit' }, { label: 'Monthly rent', num: true },
+                { label: 'Tenancy ends' }, { label: '' }],
+              rental.upcoming_renewals,
+              function (r) {
+                return '<tr>' +
+                  '<td class="cell-primary">' + esc(r.tenant_name || '—') + '</td>' +
+                  '<td>' + esc(r.unit_number || '—') + '<div class="cell-meta">' + esc(r.project_name || '') + '</div></td>' +
+                  '<td class="num">' + naira(r.current_monthly_rent) + '</td>' +
+                  '<td class="muted">' + esc(fmtDate(r.tenancy_end_date)) +
+                    '<div class="cell-meta">' + R.plural(r.days_remaining, 'day') + ' left</div></td>' +
+                  '<td class="right"><button class="btn-quiet" data-renew="' + esc(r.reservation_id) +
+                    '" data-buyer-name="' + esc(r.tenant_name || '') + '">Renew tenancy</button></td>' +
+                '</tr>';
+              },
+              { emptyTitle: 'Nothing expiring soon', emptyHint: 'Renewals due in the next 90 days will appear here.' }
+            ), { flush: true })
+          : '');
 
       R.qs('#btn-print', view).addEventListener('click', function () { window.print(); });
+
+      R.onClick(view, '[data-renew]', async function (button) {
+        await renewTenancyModal(button.dataset.renew, button.dataset.buyerName);
+      });
 
       // Your data, in a file you keep. Also the only backup a developer
       // controls without a Supabase login.

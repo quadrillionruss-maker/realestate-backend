@@ -2,10 +2,17 @@ const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { createPlanWithSchedule } = require('../services/installmentService');
 const { assess, preview, restructure } = require('../services/restructureService');
+const { assessTenancy, renewTenancy } = require('../services/rentalService');
 const { audit } = require('../services/auditService');
 const router = express.Router();
 
 const RESERVATION_STATUSES = ['reserved', 'confirmed', 'cancelled', 'completed'];
+
+// Off-plan and outright are the product's original two, and stay the default
+// so every existing integration and every existing reservation is unaffected.
+// Rental is additive: a third kind of reservation, not a replacement for the
+// other two.
+const PROPERTY_TYPES = ['off_plan', 'outright', 'rental'];
 
 router.get('/', async (req, res, next) => {
   try {
@@ -16,6 +23,7 @@ router.get('/', async (req, res, next) => {
       .order('created_at', { ascending: false });
 
     if (req.query.status) query = query.eq('status', req.query.status);
+    if (req.query.property_type) query = query.eq('property_type', req.query.property_type);
 
     const { data, error } = await query;
     if (error) throw error;
@@ -24,7 +32,9 @@ router.get('/', async (req, res, next) => {
 });
 
 // Create reservation (+ optional installment plan) in one call.
-// Body: { unit_id, customer_id, sales_rep_id?, plan?: { total_amount, number_of_installments, frequency, start_date } }
+// Body: { unit_id, customer_id, sales_rep_id?, property_type?,
+//         tenancy_start_date?, tenancy_end_date?,
+//         plan?: { total_amount, number_of_installments, frequency, start_date } }
 //
 // DOUBLE ALLOCATION is the failure this endpoint exists to prevent — selling
 // one unit to two buyers is the sin that costs a Nigerian developer their
@@ -33,11 +43,31 @@ router.get('/', async (req, res, next) => {
 // CLAIMED with a conditional UPDATE: Postgres applies the status='available'
 // predicate under row lock, exactly one caller gets a row back, and the loser
 // gets a 409. A partial unique index (migrations/001) backs this up.
+//
+// A RENTAL is not a different endpoint. Its monthly-rent schedule is an
+// installment plan in every sense installmentService already understands one
+// — total_amount = monthly rent × months, number_of_installments = months,
+// frequency = 'monthly'. The frontend does that multiplication before it
+// calls here (screens.js), so this handler never needs to know "rent" as a
+// concept distinct from "plan".
 router.post('/', async (req, res, next) => {
   try {
     const { unit_id, customer_id, sales_rep_id, plan } = req.body || {};
+    const property_type = req.body?.property_type || 'off_plan';
+    const tenancy_start_date = req.body?.tenancy_start_date || null;
+    const tenancy_end_date = req.body?.tenancy_end_date || null;
+
     if (!unit_id || !customer_id) {
       return res.status(400).json({ error: 'unit_id and customer_id are required' });
+    }
+    if (!PROPERTY_TYPES.includes(property_type)) {
+      return res.status(400).json({ error: `property_type must be one of: ${PROPERTY_TYPES.join(', ')}` });
+    }
+    if (property_type === 'rental' && !tenancy_start_date) {
+      return res.status(400).json({ error: 'A rental reservation needs a tenancy_start_date.' });
+    }
+    if (tenancy_end_date && tenancy_start_date && tenancy_end_date <= tenancy_start_date) {
+      return res.status(400).json({ error: 'tenancy_end_date must be after tenancy_start_date.' });
     }
 
     const [{ data: unit }, { data: customer }] = await Promise.all([
@@ -89,7 +119,10 @@ router.post('/', async (req, res, next) => {
     try {
       const { data, error } = await supabaseAdmin
         .from('re_reservations')
-        .insert({ organization_id: req.orgId, unit_id, customer_id, sales_rep_id: sales_rep_id || null })
+        .insert({
+          organization_id: req.orgId, unit_id, customer_id, sales_rep_id: sales_rep_id || null,
+          property_type, tenancy_start_date, tenancy_end_date,
+        })
         .select()
         .single();
       if (error) throw error;
@@ -129,11 +162,16 @@ router.post('/', async (req, res, next) => {
       action: 'reservation.created',
       entityType: 're_reservations',
       entityId: reservation.id,
-      summary: `Unit reserved for a buyer${planResult ? ` on a ${plan.number_of_installments}-installment plan` : ' (no payment plan)'}`,
+      summary: property_type === 'rental'
+        ? `Unit let to a tenant${planResult ? ` at ₦${(plan.total_amount / plan.number_of_installments).toLocaleString('en-NG')}/month` : ''}`
+        : `Unit reserved for a buyer${planResult ? ` on a ${plan.number_of_installments}-installment plan` : ' (no payment plan)'}`,
       metadata: {
         unit_id,
         customer_id,
         sales_rep_id: sales_rep_id || null,
+        property_type,
+        tenancy_start_date,
+        tenancy_end_date,
         plan: planResult ? {
           total_amount: plan.total_amount,
           number_of_installments: plan.number_of_installments,
@@ -257,6 +295,47 @@ router.post('/:id/restructure', async (req, res, next) => {
       numberOfInstallments: Number(number_of_installments),
       frequency: frequency || 'monthly',
       startDate: start_date,
+      reason: reason || null,
+    });
+
+    if (result.notFound) return res.status(404).json({ error: 'Reservation not found' });
+    res.status(201).json(result);
+  } catch (e) { next(e); }
+});
+
+// ── Tenancy renewal ─────────────────────────────────────────────────────────
+// The rental equivalent of restructuring: 60 days before a lease ends the
+// morning sweep (rentalService.checkTenancyRenewals) files a task asking
+// whether to renew or end it. This is the "renew" side of that decision —
+// "end" is just the existing status transition above (cancelled/completed).
+
+router.get('/:id/renew-tenancy', async (req, res, next) => {
+  try {
+    const state = await assessTenancy(req.orgId, req.params.id);
+    if (state.notFound) return res.status(404).json({ error: 'Reservation not found' });
+    if (state.notRental) {
+      return res.status(409).json({ error: 'This reservation is not a rental — only rentals have a tenancy to renew.' });
+    }
+
+    res.json({
+      current_monthly_rent: state.currentMonthlyRent,
+      current_tenancy_end_date: state.reservation.tenancy_end_date,
+      has_active_plan: Boolean(state.current),
+    });
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/renew-tenancy', async (req, res, next) => {
+  try {
+    const { monthly_rent, duration_months, start_date, reason } = req.body || {};
+    if (!monthly_rent || !duration_months) {
+      return res.status(400).json({ error: 'monthly_rent and duration_months are required' });
+    }
+
+    const result = await renewTenancy(req, req.params.id, {
+      monthlyRent: Number(monthly_rent),
+      durationMonths: Number(duration_months),
+      startDate: start_date || null,
       reason: reason || null,
     });
 

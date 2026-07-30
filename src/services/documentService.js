@@ -97,10 +97,17 @@ function buildAllocationLetterHtml(doc, branding) {
     branding.brand_website || branding.website,
   ].filter(Boolean).map(escapeHtml).join(' · ');
 
+  // Keyed on the RESERVATION, not the document row: migrations/004/005 already
+  // enforce one live allocation letter per reservation, so this is stable
+  // across a re-generation and reads as "which sale" rather than "which
+  // internal row" — the number a buyer, a bank, or a lawyer would actually ask
+  // for later.
+  const referenceNumber = `ALLOC-${String(reservation.id || doc.id).slice(0, 8).toUpperCase()}`;
+
   return template
     .replace(/{{COMPANY_NAME}}/g, escapeHtml(companyName))
     .replace(/{{LOGO_BLOCK}}/g, logoBlock)
-    .replace(/{{REFERENCE_NUMBER}}/g, `ALLOC-${String(doc.id).slice(0, 8).toUpperCase()}`)
+    .replace(/{{REFERENCE_NUMBER}}/g, referenceNumber)
     .replace(/{{DATE}}/g, formatDate(new Date()))
     .replace(/{{CUSTOMER_NAME}}/g, escapeHtml(customer.full_name || ''))
     .replace(/{{CUSTOMER_CONTACT_BLOCK}}/g, customerContactBlock)

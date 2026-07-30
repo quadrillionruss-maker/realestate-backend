@@ -146,13 +146,20 @@ document.
   A rate change affects **future accruals only**.
 
 ## Reservations — `/api/re/reservations`
-- `GET /?status`
-- `POST /` — `{ unit_id*, customer_id*, sales_rep_id, plan?: { total_amount, number_of_installments, frequency, start_date } }`
+- `GET /?status&property_type`
+- `POST /` — `{ unit_id*, customer_id*, sales_rep_id, property_type, tenancy_start_date, tenancy_end_date, plan?: { total_amount, number_of_installments, frequency, start_date } }`
   → creates the reservation and the full schedule.
   **409 if the unit is not available.** The unit is claimed with a conditional
   UPDATE (`status='available'` in the WHERE clause), so two simultaneous
   requests cannot both win; a unique partial index backs it up. If the plan is
   invalid the whole thing unwinds — no orphan reservation, unit released.
+
+  `property_type` is `off_plan` (default), `outright` or `rental`. A `rental`
+  requires `tenancy_start_date`; `tenancy_end_date` may be omitted for an
+  open-ended tenancy. A rental's `plan` is an ordinary installment plan —
+  `total_amount = monthly_rent × duration_months`, frequency `monthly` — the
+  frontend does that multiplication before calling here, so this endpoint
+  never needs to know "rent" as a concept distinct from "plan".
 - `PATCH /:id/status` — syncs unit status (cancel → available, complete → sold)
 - `GET /:id/restructure` — what a renegotiation would look like. Nothing is
   written, so it is safe to call while a rep is still agreeing terms on the
@@ -163,6 +170,14 @@ document.
   the **remaining balance**. Paid rows and their receipts are untouched. The
   contract value survives as `original_total_amount = carried_amount_paid +
   total_amount`.
+- `GET /:id/renew-tenancy` — 404 if not a rental. `{ current_monthly_rent, current_tenancy_end_date, has_active_plan }`.
+- `POST /:id/renew-tenancy` — `{ monthly_rent*, duration_months*, start_date, reason }`.
+  The rental sibling of restructuring: supersedes the expiring plan and builds
+  a new one for the renewal period. Unlike a restructure, **nothing is carried
+  forward** — a renewal is a fresh lease term, not a renegotiation of an
+  existing debt. `start_date` defaults to the current `tenancy_end_date`, so a
+  renewal signed early never shortens the tenant's paid-for period.
+  `tenancy_end_date` moves to `start_date + duration_months`.
 
 ## Payments — `/api/re/payments`
 - `GET /?limit&method&from&to` — most recent first (default 100, max 500)
@@ -189,11 +204,15 @@ document.
 
 ## Documents — `/api/re/documents`
 - `GET /?status&doc_type&reservation_id`
-- `POST /` — `{ reservation_id*, doc_type* }`
+- `POST /` — `{ reservation_id*, doc_type* }` · `doc_type` is one of
+  `allocation_letter`, `deed_of_assignment`, `lease_agreement`, `receipt`, `other`
 - `POST /:id/generate` — renders through Puppeteer, uploads to the private
   bucket, returns the row plus a signed `download_url`. Allocation letters and
-  receipts render; other types 400.
-- `GET /:id/download` — fresh 5-minute signed URL
+  receipts render; `deed_of_assignment` and `lease_agreement` are real,
+  creatable rows with no template yet and 400 with "no template for X yet" —
+  a lease agreement is on the same footing a deed of assignment has held
+  since v1, not a lesser feature.
+- `GET /:id/download` — fresh signed URL, valid for one hour
 - `PATCH /:id/status` — pending/generated/sent/signed
 
 ## Tasks — `/api/re/tasks`
@@ -249,6 +268,13 @@ not a welcome.
   collection rate, sell-through. Scoped to one project when asked, because an
   investor backed one development and has no business seeing the whole book.
 - `GET /collections?months` — month-by-month collections (default 12, max 36)
+- `GET /rental` — `{ occupancy: {occupied, vacant, rate}, monthly_rental_income,
+  current_monthly_rent_roll, upcoming_renewals }`. Occupancy is rented units
+  against **currently vacant** units, not the whole portfolio — a unit
+  mid-sale-process is neither occupied nor vacant for a rental report's
+  purposes. `upcoming_renewals` is the same 90-day window
+  `rentalService.checkTenancyRenewals()` uses at 60 days for its own task, here
+  as a forward-looking list rather than a to-do.
 - `GET /export/:kind` — `customers`, `payments` or `schedule`, as a CSV file
   download. UTF-8 with a BOM and CRLF line endings, because Excel on Windows
   reads a plain UTF-8 CSV as the system codepage and turns every ₦ into
@@ -304,10 +330,13 @@ There is no route that writes, edits or deletes the log. A log the operator can
 alter is not evidence.
 
 ## Dashboard & AI — `/api/re/dashboard`, `/api/re/brief`
-- `GET /dashboard?project_id` — collected this month, outstanding, overdue
-  `{count, amount}`, due-in-7-days, unit mix, open tasks `{total, from_ai}`,
-  the project list, and the latest brief. One request for the whole screen.
-  `project_id` scopes the money to one development.
+- `GET /dashboard?project_id` — collected this month (plus
+  `collected_sales_this_month` and `collected_rental_this_month`, the same
+  total split by `property_type` — a developer running both books cannot tell
+  buyers-paying-installments from tenants-paying-rent from one number),
+  outstanding, overdue `{count, amount}`, due-in-7-days, unit mix, open tasks
+  `{total, from_ai}`, the project list, and the latest brief. One request for
+  the whole screen. `project_id` scopes the money to one development.
 - `GET /dashboard/at-risk?project_id` — customers with ≥2 overdue installments,
   with `days_late`, their escalation stage, and any promise they have made.
   **A broken promise sorts above a bigger number.**
@@ -321,6 +350,12 @@ The brief reads escalation stage and promises, and writes to match: a warm
 nudge at `reminder`, the Contract of Sale at `formal_notice`, allocation at
 risk at `final_notice`, and **no drafted message at all** at `legal` — anything
 written to a buyer whose file is with a lawyer can be read back in court.
+
+**A tenant reads different wording than a buyer.** Every overdue/upcoming row
+carries `property_type`, and a `rental` row is "rent", never "installment";
+"Tenancy Agreement", never "Contract of Sale". Both the rule-based fallback
+(`aiBrief.termsFor()`) and the OpenAI system prompt carry the same rule, so a
+model outage does not change which noun a tenant reads.
 
 ---
 
@@ -336,7 +371,12 @@ takes a customer id from the URL or the body — the moment one does, changing a
 digit in a link shows you someone else's payment history.
 
 - `GET /me` — balance, progress, next payment, every reservation and schedule,
-  generated documents, payment history, and the developer's contact details
+  generated documents, payment history, and the developer's contact details.
+  `summary.tenancy` — `{ tenancy_end_date, unit_number, project_name }` — is
+  present only for a customer holding a live rental (the soonest-ending one,
+  if somehow more than one), and `null` for a buyer who owns rather than
+  rents. `summary.next_due.property_type` lets the page say "Next rent due"
+  instead of "Next payment".
 - `GET /documents/:id/download` — their own documents only; the download is audited
 - `POST /pay/:scheduleId` — a Paystack link for their own installment, amount
   decided server-side from the schedule row

@@ -4,7 +4,12 @@ const { generateDocument, getDownloadUrl } = require('../services/documentServic
 const { audit } = require('../services/auditService');
 const router = express.Router();
 
-const DOC_TYPES = ['allocation_letter', 'deed_of_assignment', 'receipt', 'other'];
+// lease_agreement joins the enum on the same footing deed_of_assignment has
+// held since v1: a real, creatable doc_type with no template yet.
+// documentService.generateDocument returns { unsupported: true } for either
+// today, same as it always has — this is not new behaviour, just a wider set
+// of rows the "not yet" answer applies to.
+const DOC_TYPES = ['allocation_letter', 'deed_of_assignment', 'lease_agreement', 'receipt', 'other'];
 const DOC_STATUSES = ['pending', 'generated', 'sent', 'signed'];
 
 router.get('/', async (req, res, next) => {

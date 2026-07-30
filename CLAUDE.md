@@ -26,7 +26,7 @@ with "Cannot find module" — point it at `server.js` instead.
 
 ```
 server.js                  boot, middleware, mount, listen
-render.yaml                Render blueprint (root dir, Chromium, webhook URL)
+render.yaml                Render blueprint (root dir, PDF engine, webhook URL)
 src/
   config/env.js            all process.env reads; assertRequired() at boot
   middleware/
@@ -43,7 +43,7 @@ src/
   templates/               allocation letter, receipt
   utils/                   escapeHtml, csv, amountInWords
   test/                    syntax + logic + schema (offline), smoke.js (live)
-migrations/                five idempotent SQL files, applied in order
+migrations/                six idempotent SQL files, applied in order
 frontend/
   config.js                sets window.__API_BASE__  ← the one file with a host in it
   index.html               shell: sign-in gate + app
@@ -138,10 +138,17 @@ Three deployment gotchas, all covered in `render.yaml`:
 
 1. **Root directory.** If the repo holds other projects, point the service at
    the folder containing `server.js`.
-2. **Chromium.** Allocation letters and receipts render with headless
-   Puppeteer, absent from Render's default Node runtime. Only PDF generation is
-   affected — a payment is still recorded and the buyer still emailed, the
-   receipt is simply missing. `RE_AUTO_RECEIPTS=false` stops it trying.
+2. **PDF rendering.** Allocation letters and receipts render through
+   `puppeteer-core` + `@sparticuz/chromium` — a Chromium build made for exactly
+   this kind of constrained Linux host, so no cache directory or separate
+   install step is needed. `src/services/pdfAdapter.js` picks this engine by
+   **platform**, not `NODE_ENV`: Linux gets `@sparticuz/chromium`, anything
+   else (local dev) gets full `puppeteer`, which lives in `devDependencies` and
+   is never installed by Render's `npm ci --omit=dev`. `PDF_ENGINE=core|full`
+   forces one path if you ever need to diagnose a deploy. If rendering does
+   fail, PDF generation is the one thing affected — a payment is still
+   recorded and the buyer still emailed, the receipt is simply missing.
+   `RE_AUTO_RECEIPTS=false` stops it trying.
 3. **The webhook URL.** Point Paystack at
    `https://<service>/api/webhooks/paystack`, or online payments never settle
    the schedule.
@@ -158,15 +165,15 @@ a host.
 
 1. Run the migrations in order in the Supabase SQL editor: `001_phase1_schema.sql`,
    `002_ai_briefs.sql`, `003_operations.sql`, `004_hardening.sql`,
-   `005_soft_delete_and_lifecycle.sql`.
+   `005_soft_delete_and_lifecycle.sql`, `006_rentals.sql`.
    `001` is self-contained — it creates the identity tables (`users`, `teams`,
    `team_members`) as well as the domain ones, so an empty project is all it
-   needs. All five are idempotent, so re-running them after a change is safe and
+   needs. All six are idempotent, so re-running them after a change is safe and
    is how you pick up the Grants block.
 
    If the API returns `42501: permission denied for table re_projects`, the
    tables exist but `service_role` holds no privileges on them — re-run all
-   five. See the Grants section in `docs/DATABASE.md`.
+   six. See the Grants section in `docs/DATABASE.md`.
 
 2. Open the app and **create an account**, then click the link in the
    confirmation email. Verification is required only when email is actually
@@ -181,7 +188,7 @@ user created directly in SQL.
 ## Testing
 
 ```bash
-npm test                # syntax (60) + logic (67) + schema (114); no network, no database
+npm test                # syntax (61) + logic (79) + schema (127); no network, no database
 npm run test:schema     # migrations against a real in-process Postgres
 RE_SMOKE_TOKEN=<jwt> npm run smoke                      # defaults to localhost:4000/api
 ```
@@ -293,6 +300,40 @@ and that invariant is worth more than field convenience. The contract survives
 as `original_total_amount = carried_amount_paid + total_amount`. Read contract
 value through `restructureService.contractValue()` so nothing has to know
 whether a plan was ever restructured.
+
+## Rental tenancies
+
+A reservation is `property_type`: `off_plan` (default), `outright` or
+`rental` (migrations/006). Existing reservations were backfilled to
+`off_plan`, so nothing already in the product changed shape.
+
+**A rental's monthly-rent schedule is an installment plan, not a new
+concept.** `total_amount = monthly_rent × duration_months`,
+`number_of_installments = duration_months`, `frequency = 'monthly'` —
+`installmentService` builds it unmodified, which is why rentals needed no
+change to the plan or schedule tables at all, only to the reservation
+(`tenancy_start_date`, nullable `tenancy_end_date` for an open-ended lease).
+
+**Renewal is restructuring's sibling, not its reuse.** Both supersede the
+expiring plan and create a new one (`uniq_re_active_plan_per_reservation`,
+migrations/005, allows exactly one active plan either way), but a renewal
+carries forward **nothing** — no balance, no `original_total_amount` — because
+it is a fresh lease term, not a renegotiation of an existing debt. Paid rows,
+their receipts and the whole prior schedule are left exactly as they were.
+`rentalService.renewTenancy()`; `POST /api/re/reservations/:id/renew-tenancy`.
+
+**60 days before `tenancy_end_date`, the morning job files a task** (`source:
+'ai'`, same as every brief recommendation) asking whether to renew or end the
+tenancy — `rentalService.checkTenancyRenewals()`, run once for every org
+alongside the other 07:00 sweeps. It never renews anything itself: every AI
+output here is a proposal a human acts on, and extending a lease is a
+commercial decision, not a reminder.
+
+The brief tells a tenant 30 days late on rent apart from a buyer who missed an
+off-plan installment — "rent", not "installment"; "Tenancy Agreement", not
+"Contract of Sale" — via `aiBrief.termsFor()`, read from `property_type` on
+each row. Both the rule-based fallback and the OpenAI system prompt carry the
+same distinction, so a model outage does not change which noun a tenant reads.
 
 ## Payments
 
