@@ -1,10 +1,11 @@
 const express = require('express');
-const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
+const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission } = require('../middleware/rbac');
 const router = express.Router();
 
 // A sales rep is a platform user tagged for this product, joined here to their
 // profile so the UI can show a name rather than a UUID.
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission('salesReps.read'), async (req, res, next) => {
   try {
     let query = supabaseAdmin
       .from('re_sales_reps')
@@ -20,7 +21,7 @@ router.get('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.post('/', requirePermission('salesReps.write'), async (req, res, next) => {
   try {
     const { user_id, commission_rate } = req.body || {};
     if (!user_id) return res.status(400).json({ error: 'user_id is required' });
@@ -79,7 +80,7 @@ router.post('/', requireRole(['owner', 'admin']), async (req, res, next) => {
 
 // Deactivate rather than delete: reservations reference the rep, and who sold
 // what stays true after someone leaves.
-router.patch('/:id', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.patch('/:id', requirePermission('salesReps.write'), async (req, res, next) => {
   try {
     const { active, commission_rate } = req.body || {};
     const updates = {};

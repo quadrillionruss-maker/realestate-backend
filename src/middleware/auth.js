@@ -114,27 +114,55 @@ async function authenticate(req, res, next) {
     });
   }
 
+  // ── Which workspace is this request in? ─────────────────────────────────
   // Team membership decides the org scope (team_id ?? user id — see
   // orgContext). Deployments without a team_members table are treated as
   // solo accounts rather than failing: this service must stand on its own.
+  //
+  // A person can now belong to more than one workspace, which changed the
+  // shape of this lookup. It used to be `.maybeSingle()` — which does not
+  // merely pick one of several rows, it ERRORS on more than one, so the first
+  // time anybody was invited to a second team every request they made would
+  // have failed. It is a list now, and the request picks from it.
+  //
+  // THE TOKEN STILL CARRIES NO ORG SCOPE, deliberately (see
+  // authService.issueToken: id, email, tv, and nothing else). Putting a
+  // workspace id in the JWT would mean a stale token keeps resolving to a
+  // workspace somebody has been removed from until it expires, and it would
+  // break the audience boundary the whole auth model rests on. So the choice
+  // travels per request, in a header the browser sends, and is VALIDATED
+  // against live membership here — a header naming a workspace this user is
+  // not an active member of is ignored, not honoured.
   let teamId = null;
   let role = null;
+  let memberships = [];
   try {
-    const { data: member, error } = await supabaseAdmin
+    const { data: rows, error } = await supabaseAdmin
       .from('team_members')
       .select('team_id, role')
       .eq('user_id', userId)
       .eq('status', 'active')
-      .maybeSingle();
+      .order('joined_at', { ascending: true });
 
     if (error) {
       console.warn('[auth] team lookup failed, treating as solo account:', error.message);
-    } else if (member) {
-      teamId = member.team_id;
-      role = member.role;
+    } else {
+      memberships = rows || [];
     }
   } catch (err) {
     console.warn('[auth] team lookup threw, treating as solo account:', err.message);
+  }
+
+  if (memberships.length) {
+    const requested = String(req.headers['x-workspace-id'] || '').trim();
+    // Falls back to the OLDEST active membership rather than erroring. A
+    // missing header is the normal case for any client that predates the
+    // switcher, and a header naming a workspace they have left is the normal
+    // case for a browser holding a stale selection — neither is worth a 400,
+    // and both have an obviously correct answer.
+    const chosen = (requested && memberships.find((m) => m.team_id === requested)) || memberships[0];
+    teamId = chosen.team_id;
+    role = chosen.role;
   }
 
   req.user = {
@@ -142,6 +170,9 @@ async function authenticate(req, res, next) {
     email: decoded.email || null,
     team_id: teamId,
     role,
+    // Every workspace this person can switch into, resolved once here so
+    // /auth/me can render the switcher without a second membership read.
+    memberships,
     // Read by orgContext, which is what actually blocks the API for an
     // unverified address. Set here so there is one users lookup, not two.
     email_verified_at: emailVerifiedAt,

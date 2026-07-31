@@ -118,6 +118,90 @@ Converting a solo workspace to a team (`POST /api/re/settings/team`) rewrites
 `organization_id` on every table, because the id itself changes. Without that
 backfill the data survives and the dashboard goes blank.
 
+## Roles and permissions
+
+Five roles, matching the actual jobs in a Nigerian developer's office —
+`owner`, `sales_director`, `sales_rep`, `collections`, `documentation`
+(`migrations/016_rbac.sql`). This replaced a generic `owner`/`admin`/`member`
+ladder outright: a collections officer is not "an admin who also sells," a
+documentation officer must never see what a buyer paid, and a sales
+executive must never see another executive's book. `owner  → owner`,
+`admin → sales_director`, `member → sales_rep` is the one-time backfill; a
+solo account has no `team_members` row at all and reads as `owner` before
+and after.
+
+**The rules live in one file, `src/services/permissions.js`, and nowhere
+else.** It is pure — no database, no Express — so it is the one thing in
+this codebase's access model that is actually unit-tested
+(`src/test/logic.test.js`'s "RBAC — permission matrix" section asserts
+`canAccess(role, action)` directly, which is equivalent to asserting a route
+403s, since that is literally what the route checks). `src/middleware/rbac.js`
+is the thin Express adapter: `requirePermission('payments.waive')` mounted
+per route, or `assertPermission(req, res, action)` inline where the
+permission depends on the request body rather than the path (`PATCH
+/commissions/status` is `commissions.approve` for a Sales Director and
+`commissions.markPaid` for the owner alone). There is no
+`requireRole(['owner','admin'])` helper any more — a route naming its own
+role list is a second copy of the access model, and the second copy is the
+one that goes stale.
+
+**Row-level filtering is a second, separate question from "can they open
+this screen".** `rbac.js`'s `isOwnRecordsOnly(role)` is true only for
+`sales_rep`; `salesRepIdsFor(req)` resolves which `re_sales_reps` rows are
+this caller, and every "own buyers / own reservations / own commissions"
+filter in `routes/customers.js`, `routes/reservations.js`,
+`routes/commissions.js`, `routes/documents.js`, `routes/search.js` and
+`routes/tasks.js` is built on it. **`re_reservations.sales_rep_id` and
+`re_commissions.sales_rep_id` reference `re_sales_reps(id)`, not
+`users(id)`** — `re_sales_reps` is its own table with its own id and a
+`user_id` pointing at the person. Filtering `sales_rep_id = req.userId`
+directly matches nothing at all; the correct filter is two steps, exactly
+what `salesRepIdsFor` does. Getting this wrong is the single most
+consequential mistake this model can make: a rep either sees the whole
+company's book or sees nothing. `re_customers.created_by_user_id`
+(`migrations/016`) is the one exception — a buyer is owned by the *user* who
+entered them, not by a `re_sales_reps` row, because someone can add a buyer
+before an owner has ever tagged them as a rep.
+
+**Documentation never sees a naira figure.** `financial.view` is not a
+route gate — it's a content gate checked inside a handler that would
+otherwise return money (`routes/customers.js`'s single-customer view strips
+`list_price` / `total_amount` / `amount_due` to `null` rather than omitting
+the reservation tree outright, so the screen still shows which unit and
+which installment is due *when*, just never for how much).
+
+**Invites are a signed link, not a same-request add.**
+`src/services/inviteService.js` issues an opaque 32-byte token
+(`invite_token`/`invite_expires_at`, `migrations/016`) good for seven days,
+emailed via `notificationService.sendEmail`. Someone who already has an
+account joins immediately (`status: 'active'` on the same request); someone
+who doesn't gets a pending row that grants nothing (`middleware/auth.js`
+only ever counts `status: 'active'`) until they register with that address —
+`POST /auth/register` calls `claimPendingInvites` by email in the same
+request — or accept explicitly via `POST /auth/invite/accept` after signing
+in. Only the owner may invite a `sales_director`; a `sales_director` can
+build their own team (`sales_rep`, `collections`, `documentation`) but not
+appoint a second director (`permissions.canInviteRole`). **Ten workspaces
+per person, checked at invite time** (`wouldExceedWorkspaceCap`), because
+telling someone "you've been invited" and then refusing them at the door on
+click is worse than refusing the invite while whoever sent it is still
+looking at the form.
+
+**A person can belong to more than one workspace, and the JWT still carries
+no org scope** — that invariant from the token-audience boundary above did
+not change. `middleware/auth.js` reads every `active` `team_members` row for
+the caller and picks between them using an `X-Workspace-Id` header the
+browser sends on every request (`frontend/realestate.js`'s `request()`),
+falling back to the oldest membership if the header is absent or names a
+workspace they've left — never erroring. `GET /auth/me` returns the full
+`workspaces` list (name, role, which one is current) so the sidebar switcher
+needs no call of its own, plus `permissions` — the exact `actionsFor(role)`
+list `permissions.js` computes server-side — so the browser draws the same
+model the API enforces rather than keeping a second copy of the rules by
+hand in `screens.js`. Every one of those is presentation only: the frontend
+hiding a button does not substitute for the server re-checking the same
+permission on the request, which it always does.
+
 ## Deployment
 
 Required env: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `JWT_SECRET`. The
@@ -163,18 +247,17 @@ a host.
 
 ## Before first use
 
-1. Run the migrations in order in the Supabase SQL editor: `001_phase1_schema.sql`,
-   `002_ai_briefs.sql`, `003_operations.sql`, `004_hardening.sql`,
-   `005_soft_delete_and_lifecycle.sql`, `006_rentals.sql`,
-   `007_payment_reallocation.sql`, `008_payment_void.sql`.
-   `001` is self-contained — it creates the identity tables (`users`, `teams`,
-   `team_members`) as well as the domain ones, so an empty project is all it
-   needs. All eight are idempotent, so re-running them after a change is safe
-   and is how you pick up the Grants block.
+1. Run every file in `migrations/`, in numeric order, in the Supabase SQL
+   editor — `001_phase1_schema.sql` through the highest-numbered file present
+   (`016_rbac.sql` as of this writing). `001` is self-contained — it creates
+   the identity tables (`users`, `teams`, `team_members`) as well as the
+   domain ones, so an empty project is all it needs. Every migration is
+   idempotent, so re-running the whole set after a change is safe and is how
+   you pick up a new Grants block.
 
    If the API returns `42501: permission denied for table re_projects`, the
-   tables exist but `service_role` holds no privileges on them — re-run all
-   eight. See the Grants section in `docs/DATABASE.md`.
+   tables exist but `service_role` holds no privileges on them — re-run the
+   whole set. See the Grants section in `docs/DATABASE.md`.
 
 2. Open the app and **create an account**, then click the link in the
    confirmation email. Verification is required only when email is actually
@@ -189,7 +272,7 @@ user created directly in SQL.
 ## Testing
 
 ```bash
-npm test                # syntax (61) + logic (79) + schema (127); no network, no database
+npm test                # syntax + logic + schema; no network, no database
 npm run test:schema     # migrations against a real in-process Postgres
 RE_SMOKE_TOKEN=<jwt> npm run smoke                      # defaults to localhost:4000/api
 ```
@@ -401,7 +484,7 @@ it. Emailing 400 buyers a receipt for money they transferred last year is the
 worst possible first impression of a product that talks to your buyers for you.
 
 **A payment can be voided, never deleted or edited.** `POST
-/api/re/payments/:paymentId/void` (owner/admin only, `migrations/008`) marks a
+/api/re/payments/:paymentId/void` (owner or sales director only, `migrations/008`) marks a
 wrongly-entered payment `voided_at`/`void_reason` — the row, its amount and its
 timestamp stay exactly as originally entered, because it is still a financial
 fact, just no longer a live one. Voiding recomputes the installment it applied

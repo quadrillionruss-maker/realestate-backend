@@ -11,7 +11,8 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
+const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission } = require('../middleware/rbac');
 const { lagosToday } = require('../services/overdueService');
 const { toCsv } = require('../utils/csv');
 const { audit } = require('../services/auditService');
@@ -36,7 +37,7 @@ const sum = (rows, key) => rows.reduce((total, row) => total + Number(row[key] |
 // Investor / partner summary. Optionally scoped to one project, because an
 // investor almost always backed ONE development and has no business seeing
 // the developer's whole book.
-router.get('/investor', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.get('/investor', requirePermission('reports.investor'), async (req, res, next) => {
   try {
     const projectId = req.query.project_id || null;
     const today = lagosToday();
@@ -185,7 +186,7 @@ router.get('/investor', requireRole(['owner', 'admin']), async (req, res, next) 
 // and "how much sold" are different questions with different answers, and
 // folding rental units into the sales occupancy numbers above would answer
 // neither one correctly.
-router.get('/rental', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.get('/rental', requirePermission('reports.rental'), async (req, res, next) => {
   try {
     const today = lagosToday();
     const monthStart = today.slice(0, 8) + '01';
@@ -288,7 +289,7 @@ router.get('/rental', requireRole(['owner', 'admin']), async (req, res, next) =>
 
 // Month-by-month collections, for the chart on the reports screen and the
 // "are we speeding up or slowing down" question underneath it.
-router.get('/collections', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.get('/collections', requirePermission('reports.collections'), async (req, res, next) => {
   try {
     const months = Math.min(Number(req.query.months) || 12, 36);
     const since = new Date();
@@ -432,7 +433,7 @@ const EXPORTS = {
 const reservationOf = (payment) =>
   payment.re_installment_schedule?.re_installment_plans?.re_reservations;
 
-router.get('/export/:kind', exportLimiter, requireRole(['owner', 'admin']), async (req, res, next) => {
+router.get('/export/:kind', exportLimiter, requirePermission('reports.export'), async (req, res, next) => {
   try {
     const spec = EXPORTS[req.params.kind];
     if (!spec) {

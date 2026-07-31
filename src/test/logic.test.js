@@ -27,6 +27,8 @@ const {
   lagosToday, isPastDue, overdueThroughDate, describeDue,
 } = require('../services/overdueService');
 const { buildReceiptHtml } = require('../services/receiptService');
+const { resolveBranding } = require('../services/brandingService');
+const { supabaseAdmin } = require('../middleware/orgContext');
 const { amountInWords } = require('../utils/amountInWords');
 const { parseCsvToObjects, parseAmount, parseDate, toCsv } = require('../utils/csv');
 const { stageForOverdueCount, describeStage } = require('../services/escalationService');
@@ -40,6 +42,9 @@ const {
 const {
   rentTotalForPeriod, computeNewTenancyEndDate,
 } = require('../services/rentalService');
+const {
+  canAccess, normalizeRole, canInviteRole, wouldExceedWorkspaceCap, actionsFor, ROLES,
+} = require('../services/permissions');
 
 // frontend/realestate.js is a browser script, not a CommonJS module — it
 // assigns onto `window.RE` rather than `module.exports`, and its very last
@@ -86,6 +91,20 @@ function test(name, fn) {
 }
 
 function section(title) { console.log(`\n${title}`); }
+
+// resolveBranding is the one async function in this offline-only suite, so it
+// gets its own runner rather than forcing `test()` to support promises it
+// otherwise never sees.
+async function testAsync(name, fn) {
+  try {
+    await fn();
+    passed += 1;
+    console.log(`  ok   ${name}`);
+  } catch (err) {
+    failures.push({ name, err });
+    console.log(`  FAIL ${name}\n       ${err.message}`);
+  }
+}
 
 const sumOf = (rows) => rows.reduce((total, row) => total + row.amount_due, 0);
 
@@ -1006,10 +1025,216 @@ test('remapCsv drops skipped columns and renames the ones kept', () => {
   );
 });
 
-// ── Report ───────────────────────────────────────────────────────────────
-console.log(`\n${passed} passed, ${failures.length} failed`);
-if (failures.length) {
-  console.error('\nFailures:');
-  for (const f of failures) console.error(`  ${f.name}\n    ${f.err.stack.split('\n').slice(0, 3).join('\n    ')}`);
-  process.exit(1);
+// ── RBAC — the permission matrix (migrations/016) ────────────────────────
+//
+// canAccess(role, action) is what every route's requirePermission() and
+// assertPermission() call actually checks (src/middleware/rbac.js), so
+// asserting against it directly here is equivalent to asserting "this route
+// 403s for this role" — without needing a live server or a database, which
+// this offline suite deliberately has neither of.
+section('RBAC — permission matrix');
+
+test('owner can access every action in the matrix', () => {
+  var { PERMISSIONS } = require('../services/permissions');
+  for (const action of Object.keys(PERMISSIONS)) {
+    assert.ok(canAccess('owner', action), `owner should be allowed: ${action}`);
+  }
+});
+
+test('a solo account (null role) is treated as owner', () => {
+  assert.strictEqual(normalizeRole(null), 'owner');
+  assert.ok(canAccess(null, 'payments.waive'));
+  assert.ok(canAccess(null, 'settings.write'));
+  assert.ok(canAccess(null, 'reports.investor'));
+});
+
+test('an unrecognised role string is treated as the least-privileged role, not trusted', () => {
+  assert.strictEqual(normalizeRole('super-admin'), 'sales_rep');
+  assert.strictEqual(canAccess('super-admin', 'payments.waive'), false);
+});
+
+// Sales Director gets 403 on waive, delete, investor report, paid commission
+// approval — all four are owner-only, exactly the tier a director is not in.
+test('sales_director is refused: waive, delete, investor report, mark commission paid', () => {
+  assert.strictEqual(canAccess('sales_director', 'payments.waive'), false);
+  assert.strictEqual(canAccess('sales_director', 'recycle.delete'), false);
+  assert.strictEqual(canAccess('sales_director', 'reports.investor'), false);
+  assert.strictEqual(canAccess('sales_director', 'commissions.markPaid'), false);
+});
+
+test('sales_director CAN restructure plans, renew tenancies, approve commissions and read the full brief', () => {
+  assert.ok(canAccess('sales_director', 'reservations.restructure'));
+  assert.ok(canAccess('sales_director', 'reservations.renewTenancy'));
+  assert.ok(canAccess('sales_director', 'commissions.approve'));
+  assert.ok(canAccess('sales_director', 'brief.read'));
+});
+
+// Sales Rep gets 403 on record payment, generate document, view other rep's
+// buyers. The third is a row-level filter (customers.js), not a permission
+// gate, so it is asserted at the schema-test level against real rows; here we
+// assert the two route-level gates a rep hits regardless of whose data.
+test('sales_rep is refused: record payment, generate document', () => {
+  assert.strictEqual(canAccess('sales_rep', 'payments.record'), false);
+  assert.strictEqual(canAccess('sales_rep', 'documents.generate'), false);
+});
+
+test('sales_rep CAN create their own buyers and reservations, and request (not generate) a document', () => {
+  assert.ok(canAccess('sales_rep', 'customers.create'));
+  assert.ok(canAccess('sales_rep', 'reservations.create'));
+  assert.ok(canAccess('sales_rep', 'documents.create'));
+  assert.strictEqual(canAccess('sales_rep', 'documents.generate'), false);
+});
+
+// Collections gets 403 on create reservation, generate document, view
+// commissions.
+test('collections is refused: create reservation, generate document, view commissions', () => {
+  assert.strictEqual(canAccess('collections', 'reservations.create'), false);
+  assert.strictEqual(canAccess('collections', 'documents.generate'), false);
+  assert.strictEqual(canAccess('collections', 'commissions.read'), false);
+});
+
+test('collections CAN record payments, log promises, and see every overdue buyer', () => {
+  assert.ok(canAccess('collections', 'payments.record'));
+  assert.ok(canAccess('collections', 'promises.write'));
+  assert.ok(canAccess('collections', 'atRisk.read'));
+});
+
+// Documentation gets 403 on record payment, view commissions, view brief.
+test('documentation is refused: record payment, view commissions, view brief', () => {
+  assert.strictEqual(canAccess('documentation', 'payments.record'), false);
+  assert.strictEqual(canAccess('documentation', 'commissions.read'), false);
+  assert.strictEqual(canAccess('documentation', 'brief.read'), false);
+});
+
+test('documentation CAN generate documents and update their status, but cannot see financial amounts', () => {
+  assert.ok(canAccess('documentation', 'documents.generate'));
+  assert.ok(canAccess('documentation', 'documents.updateStatus'));
+  assert.strictEqual(canAccess('documentation', 'financial.view'), false);
+});
+
+test('every role is refused the actions the spec names as owner-only', () => {
+  for (const role of ROLES.filter((r) => r !== 'owner')) {
+    assert.strictEqual(canAccess(role, 'payments.waive'), false, `${role} must not waive`);
+    assert.strictEqual(canAccess(role, 'settings.transferOwner'), false, `${role} must not transfer ownership`);
+    assert.strictEqual(canAccess(role, 'recycle.delete'), false, `${role} must not delete`);
+  }
+});
+
+// actionsFor is what GET /auth/me sends the browser — it has to be the exact
+// inverse of canAccess, or the frontend draws a different model than the
+// server enforces.
+test('actionsFor(role) agrees with canAccess for every action', () => {
+  var { PERMISSIONS } = require('../services/permissions');
+  for (const role of ROLES) {
+    const actions = actionsFor(role);
+    for (const action of Object.keys(PERMISSIONS)) {
+      assert.strictEqual(
+        actions.includes(action), canAccess(role, action),
+        `actionsFor/canAccess disagree for ${role}/${action}`
+      );
+    }
+  }
+});
+
+// Only the owner may invite a Head of Sales; a Head of Sales may build their
+// own team (reps, collections, documentation) but not appoint a second one.
+test('canInviteRole: only owner invites sales_director; sales_director invites the rest', () => {
+  assert.ok(canInviteRole('owner', 'sales_director'));
+  assert.strictEqual(canInviteRole('sales_director', 'sales_director'), false);
+  assert.ok(canInviteRole('sales_director', 'sales_rep'));
+  assert.ok(canInviteRole('sales_director', 'collections'));
+  assert.ok(canInviteRole('sales_director', 'documentation'));
+  // Nobody outside owner/sales_director may invite at all — team.invite is
+  // DIRECTORS-only, and canInviteRole checks it before anything else.
+  assert.strictEqual(canInviteRole('sales_rep', 'sales_rep'), false);
+  assert.strictEqual(canInviteRole('collections', 'collections'), false);
+});
+
+test('canInviteRole refuses a non-invitable target regardless of who is asking', () => {
+  assert.strictEqual(canInviteRole('owner', 'owner'), false);
+  assert.strictEqual(canInviteRole('owner', 'not-a-real-role'), false);
+});
+
+// 11th workspace invite rejected — the pure half of the check (the counting
+// query itself is asserted against real rows in schema.test.js).
+test('wouldExceedWorkspaceCap: refuses the 11th workspace, allows up to the 10th', () => {
+  assert.strictEqual(wouldExceedWorkspaceCap(9), false);
+  assert.strictEqual(wouldExceedWorkspaceCap(10), true);
+  assert.strictEqual(wouldExceedWorkspaceCap(15), true);
+  assert.strictEqual(wouldExceedWorkspaceCap(0), false);
+});
+
+// ── Branding — logo resolution (migrations/015) ─────────────────────────
+//
+// resolveBranding() otherwise talks to a real Supabase client, but
+// supabaseAdmin.from is a plain reassignable property (middleware/orgContext.js),
+// so it can be swapped for a stub that answers `.select().eq().maybeSingle()`
+// from an in-memory fixture, keyed by the id each query filters on — no
+// network, no PGlite, just the same object reference brandingService.js holds.
+function withFakeBranding(fixturesByTable, fn) {
+  const original = supabaseAdmin.from;
+  supabaseAdmin.from = (table) => {
+    const byId = fixturesByTable[table] || {};
+    let idValue;
+    const builder = {
+      select: () => builder,
+      eq: (_column, value) => { idValue = value; return builder; },
+      maybeSingle: async () => ({ data: byId[idValue] || null }),
+    };
+    return builder;
+  };
+  return fn().finally(() => { supabaseAdmin.from = original; });
 }
+
+async function runBrandingTests() {
+  section('Branding — logo resolution');
+
+  await testAsync('teams.logo_url wins for a team workspace even when re_org_settings has other fields set', async () => {
+    const branding = await withFakeBranding({
+      re_org_settings: { 'team-1': { company_name: 'Acme Estates', logo_url: null, address: null } },
+      teams: { 'team-1': { name: 'Acme Estates', owner_id: 'owner-1', logo_url: 'https://cdn.example.com/team.png' } },
+      users: { 'owner-1': { full_name: 'Owner', brand_logo_url: 'https://cdn.example.com/owner.png' } },
+    }, () => resolveBranding('team-1'));
+    assert.strictEqual(branding.logo_url, 'https://cdn.example.com/team.png');
+    // company_name is untouched by this change — still answered by the settings row.
+    assert.strictEqual(branding.company_name, 'Acme Estates');
+  });
+
+  await testAsync('re_org_settings.logo_url wins over the owner profile when the team has not uploaded one — even with nothing else set on that row', async () => {
+    const branding = await withFakeBranding({
+      re_org_settings: { 'team-2': { logo_url: 'https://cdn.example.com/org.png' } }, // ONLY logo_url set
+      teams: { 'team-2': { name: 'Bravo Homes', owner_id: 'owner-2', logo_url: null } },
+      users: { 'owner-2': { full_name: 'Owner Two', brand_logo_url: 'https://cdn.example.com/owner2.png' } },
+    }, () => resolveBranding('team-2'));
+    assert.strictEqual(branding.logo_url, 'https://cdn.example.com/org.png');
+  });
+
+  await testAsync('falls back to the owner\'s brand_logo_url when neither the team nor org settings has a logo', async () => {
+    const branding = await withFakeBranding({
+      re_org_settings: {},
+      teams: { 'team-3': { name: 'Charlie Realty', owner_id: 'owner-3', logo_url: null } },
+      users: { 'owner-3': { full_name: 'Owner Three', brand_logo_url: 'https://cdn.example.com/owner3.png' } },
+    }, () => resolveBranding('team-3'));
+    assert.strictEqual(branding.logo_url, 'https://cdn.example.com/owner3.png');
+    assert.strictEqual(branding.company_name, 'Charlie Realty'); // unaffected by this change
+  });
+
+  await testAsync('a solo workspace (no teams row) still resolves logo_url as re_org_settings then the user\'s own brand_logo_url', async () => {
+    const branding = await withFakeBranding({
+      re_org_settings: {},
+      teams: {},
+      users: { 'solo-user-1': { full_name: 'Solo Person', brand_logo_url: 'https://cdn.example.com/solo.png' } },
+    }, () => resolveBranding('solo-user-1'));
+    assert.strictEqual(branding.logo_url, 'https://cdn.example.com/solo.png');
+  });
+}
+
+runBrandingTests().then(() => {
+  // ── Report ─────────────────────────────────────────────────────────────
+  console.log(`\n${passed} passed, ${failures.length} failed`);
+  if (failures.length) {
+    console.error('\nFailures:');
+    for (const f of failures) console.error(`  ${f.name}\n    ${f.err.stack.split('\n').slice(0, 3).join('\n    ')}`);
+    process.exit(1);
+  }
+});

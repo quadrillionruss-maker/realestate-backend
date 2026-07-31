@@ -1,6 +1,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission } = require('../middleware/rbac');
 const { uploadMedia, MEDIA_TYPES, MAX_MEDIA_BYTES } = require('../services/documentStorage');
 const { audit } = require('../services/auditService');
 const router = express.Router();
@@ -58,7 +59,7 @@ const assertProjectInOrg = async (projectId, orgId) => {
   return Boolean(data);
 };
 
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission('inventory.read'), async (req, res, next) => {
   try {
     // Unbounded until now. A developer running several projects over several
     // years can have thousands of units, all returned on every load of the
@@ -86,7 +87,7 @@ router.get('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/', async (req, res, next) => {
+router.post('/', requirePermission('inventory.write'), async (req, res, next) => {
   try {
     const { project_id, unit_number, unit_type, size_sqm, list_price, metadata } = req.body || {};
     if (!project_id || !unit_number || list_price == null) {
@@ -121,7 +122,7 @@ router.post('/', async (req, res, next) => {
 
 // Bulk create — how a project's inventory actually gets entered: one paste of
 // 40 units, not 40 form submissions.
-router.post('/bulk', async (req, res, next) => {
+router.post('/bulk', requirePermission('inventory.write'), async (req, res, next) => {
   try {
     const { project_id, units } = req.body || {};
     if (!project_id || !Array.isArray(units) || !units.length) {
@@ -172,7 +173,7 @@ router.post('/bulk', async (req, res, next) => {
 // market. Status is deliberately NOT settable here: a unit's status follows
 // its reservation (see routes/reservations.js), and letting it be set directly
 // is how a sold unit gets marked available and sold a second time.
-router.patch('/:id', async (req, res, next) => {
+router.patch('/:id', requirePermission('inventory.write'), async (req, res, next) => {
   try {
     const { unit_number, unit_type, size_sqm, list_price, metadata } = req.body || {};
     const updates = {};
@@ -235,7 +236,7 @@ router.patch('/:id', async (req, res, next) => {
 // The 33% encoding overhead is irrelevant at 6MB and the simplicity is not:
 // multipart parsing is a dependency, a stream, and a class of bug, in
 // exchange for nothing a developer uploading a floor plan would ever notice.
-router.post('/:id/media', mediaLimiter, async (req, res, next) => {
+router.post('/:id/media', mediaLimiter, requirePermission('inventory.write'), async (req, res, next) => {
   try {
     const { data: unit } = await supabaseAdmin
       .from('re_units').select('id, metadata')

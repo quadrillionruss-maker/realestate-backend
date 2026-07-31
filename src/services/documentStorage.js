@@ -108,7 +108,50 @@ async function uploadMedia(path, buffer, contentType) {
   return { path: fullPath, url: data.publicUrl };
 }
 
+// ── Team logo ──────────────────────────────────────────────────────────────
+// Its own bucket, provisioned directly in Supabase rather than by this app
+// (see env.storage.publicAssetsBucket) — no ensureBucket call here, unlike
+// the two buckets above, because a missing public-assets bucket is a deploy
+// misconfiguration worth a real error, not something to silently create.
+
+const PUBLIC_ASSETS_BUCKET = env.storage.publicAssetsBucket;
+
+// Raster only, same reasoning as unit media: an SVG is a document that can
+// carry script, and this URL ends up in an <img> in the browser.
+const LOGO_TYPES = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+};
+
+const MAX_LOGO_BYTES = 2 * 1024 * 1024;
+
+async function uploadTeamLogo(teamId, buffer, contentType) {
+  const extension = LOGO_TYPES[contentType];
+  if (!extension) {
+    throw Object.assign(
+      new Error(`Unsupported image type "${contentType}". Use JPEG, PNG or WebP.`),
+      { statusCode: 400 }
+    );
+  }
+  if (buffer.length > MAX_LOGO_BYTES) {
+    throw Object.assign(new Error('That image is larger than 2MB.'), { statusCode: 400 });
+  }
+
+  // Timestamped rather than a client-supplied name — a filename off the wire
+  // is untrusted input, and this sidesteps sanitizing it at all.
+  const path = `logos/${teamId}/logo-${Date.now()}.${extension}`;
+  const { error } = await supabaseAdmin.storage
+    .from(PUBLIC_ASSETS_BUCKET)
+    .upload(path, buffer, { contentType, upsert: true });
+  if (error) throw error;
+
+  const { data } = supabaseAdmin.storage.from(PUBLIC_ASSETS_BUCKET).getPublicUrl(path);
+  return { path, url: data.publicUrl };
+}
+
 module.exports = {
   BUCKET, SIGNED_URL_TTL_SECONDS, ensureBucket, uploadPdf, createSignedUrl,
   MEDIA_BUCKET, MEDIA_TYPES, MAX_MEDIA_BYTES, uploadMedia,
+  PUBLIC_ASSETS_BUCKET, LOGO_TYPES, MAX_LOGO_BYTES, uploadTeamLogo,
 };

@@ -1,12 +1,13 @@
 const express = require('express');
 const promises = require('../services/promiseService');
 const { audit } = require('../services/auditService');
+const { requirePermission } = require('../middleware/rbac');
 const router = express.Router();
 
 // Every promise a buyer has made, oldest date first — the order a rep works
 // through them. `?status=open` is the morning list; `?status=broken` is the
 // conversation nobody enjoys but everybody needs to have.
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission('promises.read'), async (req, res, next) => {
   try {
     res.json(await promises.listPromises(req.orgId, {
       status: req.query.status || null,
@@ -18,7 +19,7 @@ router.get('/', async (req, res, next) => {
 
 // Logged from the at-risk list while the rep still has the buyer on the phone.
 // Anything that takes longer than the call itself will not get filled in.
-router.post('/', async (req, res, next) => {
+router.post('/', requirePermission('promises.write'), async (req, res, next) => {
   try {
     const { schedule_id, promised_date, promised_amount, spoke_to, notes } = req.body || {};
 
@@ -45,7 +46,7 @@ router.post('/', async (req, res, next) => {
 
 // Manual resolution, for the cases the sweep cannot see: paid in cash at the
 // office, or a promise withdrawn on a second call.
-router.patch('/:id/status', async (req, res, next) => {
+router.patch('/:id/status', requirePermission('promises.write'), async (req, res, next) => {
   try {
     const promise = await promises.resolvePromise(req.orgId, req.params.id, req.body?.status);
     if (!promise) return res.status(404).json({ error: 'Promise not found' });

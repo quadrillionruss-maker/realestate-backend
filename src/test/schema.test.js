@@ -30,7 +30,7 @@ function check(name, cond, detail) {
 
   // ── Apply migrations, twice, to prove idempotency ───────────────────────
   for (const pass of ['first', 'second']) {
-    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql']) {
+    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -61,7 +61,7 @@ function check(name, cond, detail) {
     end $$;
   `);
 
-  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql']) {
+  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -721,9 +721,9 @@ function check(name, cond, detail) {
   let secondInviteBlocked = false;
   try {
     await q(`insert into team_members (team_id, invited_email, role, status)
-             values ($1,'invitee@example.com','member','invited')`, [teamId]);
+             values ($1,'invitee@example.com','sales_rep','invited')`, [teamId]);
     await q(`insert into team_members (team_id, invited_email, role, status)
-             values ($1,'invitee@example.com','member','invited')`, [teamId]);
+             values ($1,'invitee@example.com','sales_rep','invited')`, [teamId]);
   } catch (err) { secondInviteBlocked = /unique|duplicate/i.test(err.message); }
   check('a pending invite cannot be duplicated for the same team and email', secondInviteBlocked);
 
@@ -752,6 +752,105 @@ function check(name, cond, detail) {
      ('idx_re_promises_status_date','idx_re_commissions_org_created')`)).map((r) => r.indexname);
   check('idx_re_promises_status_date exists', perfIndexes.includes('idx_re_promises_status_date'));
   check('idx_re_commissions_org_created exists', perfIndexes.includes('idx_re_commissions_org_created'));
+
+  // ── 015: team logo ───────────────────────────────────────────────────────
+
+  const teamLogoCols = await colsOf('teams');
+  check('teams has logo_url', teamLogoCols.includes('logo_url'), teamLogoCols.join(', '));
+
+  let logoStored = false;
+  try {
+    const [{ logo_url }] = await q(
+      `update teams set logo_url=$1 where id=$2 returning logo_url`,
+      ['https://example.supabase.co/storage/v1/object/public/public-assets/logos/x/logo-1.png', teamId]);
+    logoStored = logo_url != null;
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('a team logo url can be stored', logoStored);
+
+  // ── 016: RBAC ─────────────────────────────────────────────────────────────
+
+  const roleCols = await colsOf('team_members');
+  check('team_members has invited_role, invite_token, invite_expires_at',
+    ['invited_role', 'invite_token', 'invite_expires_at'].every((c) => roleCols.includes(c)), roleCols.join(', '));
+
+  const customerCols = await colsOf('re_customers');
+  check('re_customers has created_by_user_id', customerCols.includes('created_by_user_id'), customerCols.join(', '));
+
+  let oldRoleBlocked = false;
+  try {
+    await q(`insert into team_members (team_id, user_id, role) values ($1,$2,'admin')`, [teamId, userId]);
+  } catch (err) { oldRoleBlocked = /check/i.test(err.message); }
+  check('the old admin/member roles are refused by the tightened check constraint', oldRoleBlocked);
+
+  let allNewRolesAccepted = true;
+  const newRoleUsers = [];
+  for (const role of ['sales_director', 'sales_rep', 'collections', 'documentation']) {
+    try {
+      const [{ id: newUserId }] = await q(
+        `insert into users (email, full_name) values ($1,'RBAC Test') returning id`, [`${role}@example.com`]);
+      await q(`insert into team_members (team_id, user_id, role) values ($1,$2,$3)`, [teamId, newUserId, role]);
+      newRoleUsers.push({ role, userId: newUserId });
+    } catch (err) { allNewRolesAccepted = false; console.log(`       ${role}: ${err.message}`); }
+  }
+  check('all five new roles are accepted by the check constraint', allNewRolesAccepted);
+
+  // ── Sales Executive row-level filtering ─────────────────────────────────
+  // The exact behaviour "Sales Rep filtered query only returns their own
+  // buyers" — two buyers, created by two different people, and the query
+  // routes/customers.js actually runs for a sales_rep (created_by_user_id =
+  // caller) must return only the one that is theirs.
+  const salesRepUser = newRoleUsers.find((u) => u.role === 'sales_rep');
+  let ownBuyersFilterCorrect = false;
+  if (salesRepUser) {
+    const [{ id: theirBuyer }] = await q(
+      `insert into re_customers (organization_id, full_name, created_by_user_id)
+       values ($1,'Owned By Rep',$2) returning id`, [teamId, salesRepUser.userId]);
+    const [{ id: othersBuyer }] = await q(
+      `insert into re_customers (organization_id, full_name, created_by_user_id)
+       values ($1,'Owned By Someone Else',$2) returning id`, [teamId, userId]);
+
+    const filtered = await q(
+      `select id from re_customers where organization_id=$1 and created_by_user_id=$2 and deleted_at is null`,
+      [teamId, salesRepUser.userId]);
+    const ids = filtered.map((r) => r.id);
+    ownBuyersFilterCorrect = ids.includes(theirBuyer) && !ids.includes(othersBuyer);
+  }
+  check('a sales rep\'s filtered buyer query returns only their own, not a colleague\'s', ownBuyersFilterCorrect);
+
+  // ── Invite with role adds member with correct role ──────────────────────
+  // Mirrors inviteService.createInvite's insert shape for a not-yet-registered
+  // invitee: role and invited_role both carry the offered role, status stays
+  // 'invited' (grants nothing — src/middleware/auth.js only counts 'active'),
+  // and a token with an expiry is attached.
+  let invitedRoleCorrect = false;
+  try {
+    const [row] = await q(
+      `insert into team_members (team_id, invited_email, role, invited_role, status, invite_token, invite_expires_at)
+       values ($1,'newhire@example.com','collections','collections','invited','tok_abc123',now() + interval '7 days')
+       returning role, invited_role, status`,
+      [teamId]);
+    invitedRoleCorrect = row.role === 'collections' && row.invited_role === 'collections' && row.status === 'invited';
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('an invite with a role adds a pending member carrying that role', invitedRoleCorrect);
+
+  // ── 11th workspace invite rejected ───────────────────────────────────────
+  // inviteService.workspaceCountFor counts DISTINCT team_id across
+  // active+invited membership for one person; wouldExceedWorkspaceCap (pure,
+  // asserted in logic.test.js) then refuses a count >= 10. This proves the
+  // counting QUERY itself — ten distinct teams for one user — comes back as
+  // exactly ten, which is the fact that pure check is applied to.
+  const [{ id: capUserId }] = await q(
+    `insert into users (email, full_name) values ('cap-test@example.com','Cap Test') returning id`);
+  for (let i = 0; i < 10; i += 1) {
+    const [{ id: extraTeamId }] = await q(
+      `insert into teams (name, owner_id) values ($1,$2) returning id`, [`Cap Team ${i}`, capUserId]);
+    await q(`insert into team_members (team_id, user_id, role, status) values ($1,$2,'owner','active')`,
+      [extraTeamId, capUserId]);
+  }
+  const [{ workspaceCount }] = await q(
+    `select count(distinct team_id)::int as "workspaceCount" from team_members
+     where user_id=$1 and status in ('active','invited')`, [capUserId]);
+  check('a person already in ten workspaces counts as exactly ten', workspaceCount === 10, `${workspaceCount}`);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

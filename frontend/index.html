@@ -95,7 +95,7 @@
       <!-- Sign in -->
       <form id="form-login" autocomplete="on" novalidate>
         <h1 class="gate-title">Welcome back</h1>
-        <p class="gate-sub">Sign in to your workspace.</p>
+        <p class="gate-sub" id="gate-login-sub">Sign in to your workspace.</p>
 
         <div class="field">
           <label for="login-email">Email</label>
@@ -125,7 +125,7 @@
       <!-- Create account -->
       <form id="form-register" autocomplete="on" novalidate hidden>
         <h1 class="gate-title">Create your workspace</h1>
-        <p class="gate-sub">Your projects, buyers and payments, in one place.</p>
+        <p class="gate-sub" id="gate-register-sub">Your projects, buyers and payments, in one place.</p>
 
         <div class="field">
           <label for="reg-name">Your name</label>
@@ -228,6 +228,10 @@
 
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand"><i>◆</i> ARCHTA</div>
+
+    <!-- Only shown once a person belongs to more than one workspace —
+         see realestate.js's renderWorkspaceSwitcher(). -->
+    <div class="workspace-switcher hidden" id="workspace-switcher"></div>
 
     <nav class="nav" id="nav">
       <div class="nav-group">

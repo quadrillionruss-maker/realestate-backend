@@ -1,10 +1,11 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission } = require('../middleware/rbac');
 const router = express.Router();
 
 const PROJECT_STATUSES = ['planning', 'active', 'sold_out', 'archived'];
 
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission('inventory.read'), async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('re_projects')
@@ -27,7 +28,7 @@ router.get('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/', async (req, res, next) => {
+router.post('/', requirePermission('inventory.write'), async (req, res, next) => {
   try {
     const { name, location, total_units, status } = req.body || {};
     if (!name) return res.status(400).json({ error: 'name is required' });
@@ -51,7 +52,7 @@ router.post('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.patch('/:id', async (req, res, next) => {
+router.patch('/:id', requirePermission('inventory.write'), async (req, res, next) => {
   try {
     const { name, location, total_units, status } = req.body || {};
     if (status && !PROJECT_STATUSES.includes(status)) {

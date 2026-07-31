@@ -24,7 +24,7 @@
 // name — the table is an implementation detail and should not appear in a URL.
 
 const express = require('express');
-const { requireRole } = require('../middleware/orgContext');
+const { requirePermission } = require('../middleware/rbac');
 const { softDelete, restore, listDeleted } = require('../services/softDelete');
 const router = express.Router();
 
@@ -69,7 +69,7 @@ function resolve(req, res) {
 // What would this delete touch? Called before the confirmation is shown, so an
 // operator sees "this removes 1 buyer, 1 reservation, 12 installments and 4
 // payments" rather than a generic warning.
-router.get('/:resource/:id/impact', async (req, res, next) => {
+router.get('/:resource/:id/impact', requirePermission('recycle.read'), async (req, res, next) => {
   try {
     const table = resolve(req, res);
     if (!table) return;
@@ -83,7 +83,7 @@ router.get('/:resource/:id/impact', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.delete('/:resource/:id', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.delete('/:resource/:id', requirePermission('recycle.delete'), async (req, res, next) => {
   try {
     const table = resolve(req, res);
     if (!table) return;
@@ -100,7 +100,7 @@ router.delete('/:resource/:id', requireRole(['owner', 'admin']), async (req, res
   } catch (e) { next(e); }
 });
 
-router.post('/:resource/:id/restore', async (req, res, next) => {
+router.post('/:resource/:id/restore', requirePermission('recycle.restore'), async (req, res, next) => {
   try {
     const table = resolve(req, res);
     if (!table) return;
@@ -116,7 +116,7 @@ router.post('/:resource/:id/restore', async (req, res, next) => {
 
 // The bin. Restore is only a real feature if an operator can find the thing
 // they deleted without opening a support ticket.
-router.get('/:resource', async (req, res, next) => {
+router.get('/:resource', requirePermission('recycle.read'), async (req, res, next) => {
   try {
     const table = resolve(req, res);
     if (!table) return;

@@ -3,10 +3,11 @@
 // can alter is not evidence, and evidence is the point (see auditService).
 
 const express = require('express');
-const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
+const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission } = require('../middleware/rbac');
 const router = express.Router();
 
-router.get('/', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.get('/', requirePermission('audit.read'), async (req, res, next) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 100, 500);
 
@@ -31,8 +32,10 @@ router.get('/', requireRole(['owner', 'admin']), async (req, res, next) => {
 });
 
 // Everything that ever happened to one record — the query an actual dispute
-// starts with: "show me this reservation's history".
-router.get('/entity/:type/:id', async (req, res, next) => {
+// starts with: "show me this reservation's history". Every authenticated role
+// may look up ONE entity's own trail; the bulk log above (GET /) is where the
+// director/owner-only line is drawn.
+router.get('/entity/:type/:id', requirePermission('audit.readEntity'), async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('re_audit_log')
@@ -49,7 +52,7 @@ router.get('/entity/:type/:id', async (req, res, next) => {
 // The notification outbox lives here rather than under its own prefix because
 // it answers the same question in a different register: not "who did this"
 // but "what did we actually send the buyer, and did it arrive".
-router.get('/notifications', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.get('/notifications', requirePermission('audit.read'), async (req, res, next) => {
   try {
     let query = supabaseAdmin
       .from('re_notifications')

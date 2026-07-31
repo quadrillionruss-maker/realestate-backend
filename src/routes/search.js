@@ -12,12 +12,13 @@
 
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { sanitizeSearchTerm } = require('../utils/searchFilter');
 const router = express.Router();
 
 const LIMIT_PER_KIND = 8;
 
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission('search.read'), async (req, res, next) => {
   try {
     const raw = String(req.query.q || '').trim();
     if (raw.length < 2) {
@@ -31,20 +32,40 @@ router.get('/', async (req, res, next) => {
     // "+2348031234567".
     const digits = raw.replace(/\D/g, '');
 
+    // A Sales Executive's search must not be a side door around "sees only
+    // their own buyers" — every other screen filters by this, and a search
+    // box that doesn't would let them find a colleague's buyer by name.
+    const ownOnly = isOwnRecordsOnly(req.orgRole);
+    const repIds = ownOnly ? await salesRepIdsFor(req) : null;
+
+    let customerQuery = supabaseAdmin
+      .from('re_customers')
+      .select('id, full_name, phone, email, source')
+      .eq('organization_id', req.orgId)
+      .or(
+        [
+          `full_name.ilike.${like}`,
+          `email.ilike.${like}`,
+          `phone.ilike.${like}`,
+          digits.length >= 3 ? `phone.ilike.%${digits}%` : null,
+        ].filter(Boolean).join(',')
+      )
+      .limit(LIMIT_PER_KIND);
+    if (ownOnly) customerQuery = customerQuery.eq('created_by_user_id', req.userId);
+
+    let reservationQuery = supabaseAdmin
+      .from('re_reservations')
+      // Reservations are searched THROUGH the buyer's name rather than by any
+      // field of their own — nobody remembers a reservation id, they
+      // remember who bought it.
+      .select('id, status, reserved_at, re_customers!inner(full_name), re_units(unit_number, re_projects(name))')
+      .eq('organization_id', req.orgId)
+      .ilike('re_customers.full_name', like)
+      .limit(LIMIT_PER_KIND);
+    if (ownOnly) reservationQuery = reservationQuery.in('sales_rep_id', repIds.length ? repIds : [MATCHES_NOTHING]);
+
     const [customers, units, projects, reservations] = await Promise.all([
-      supabaseAdmin
-        .from('re_customers')
-        .select('id, full_name, phone, email, source')
-        .eq('organization_id', req.orgId)
-        .or(
-          [
-            `full_name.ilike.${like}`,
-            `email.ilike.${like}`,
-            `phone.ilike.${like}`,
-            digits.length >= 3 ? `phone.ilike.%${digits}%` : null,
-          ].filter(Boolean).join(',')
-        )
-        .limit(LIMIT_PER_KIND),
+      customerQuery,
 
       supabaseAdmin
         .from('re_units')
@@ -60,15 +81,7 @@ router.get('/', async (req, res, next) => {
         .or(`name.ilike.${like},location.ilike.${like}`)
         .limit(LIMIT_PER_KIND),
 
-      // Reservations are searched THROUGH the buyer's name rather than by any
-      // field of their own — nobody remembers a reservation id, they remember
-      // who bought it.
-      supabaseAdmin
-        .from('re_reservations')
-        .select('id, status, reserved_at, re_customers!inner(full_name), re_units(unit_number, re_projects(name))')
-        .eq('organization_id', req.orgId)
-        .ilike('re_customers.full_name', like)
-        .limit(LIMIT_PER_KIND),
+      reservationQuery,
     ]);
 
     for (const result of [customers, units, projects, reservations]) {

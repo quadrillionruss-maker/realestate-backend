@@ -114,6 +114,10 @@ const env = {
   storage: {
     documentsBucket: process.env.RE_DOCUMENTS_BUCKET || 're-documents',
     mediaBucket: process.env.RE_MEDIA_BUCKET || 're-media',
+    // Provisioned directly in Supabase, not created by this app — unlike the
+    // two buckets above, a missing public-assets bucket is a deploy-config
+    // problem to surface, not one to silently paper over by creating it.
+    publicAssetsBucket: process.env.RE_PUBLIC_ASSETS_BUCKET || 'public-assets',
   },
 
   cron: {

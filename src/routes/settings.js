@@ -2,14 +2,30 @@
 // commission default, who gets told what, and who else is in here.
 
 const express = require('express');
-const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
+const rateLimit = require('express-rate-limit');
+const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission } = require('../middleware/rbac');
 const { audit } = require('../services/auditService');
 const auth = require('../services/authService');
+const invites = require('../services/inviteService');
+const { ROLE_LABELS, INVITABLE_ROLES, canInviteRole } = require('../services/permissions');
+const { uploadTeamLogo } = require('../services/documentStorage');
 const router = express.Router();
 
 const SETTINGS_COLUMNS = `organization_id, company_name, logo_url, address, phone, website,
   default_commission_rate, notify_md_email, notify_on_payment, notify_on_overdue,
   notify_payment_reminders, reply_to_email, updated_at`;
+
+// A logo is a handful of uploads a year, not traffic — this just keeps one
+// account from hammering Storage.
+const logoLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: 'Too many uploads. Wait a few minutes and try again.' },
+});
 
 // Every table this service owns carries organization_id. Converting a solo
 // workspace into a team changes what that id IS, so all of them have to move
@@ -21,7 +37,7 @@ const ORG_SCOPED_TABLES = [
   're_audit_log', 're_notifications',
 ];
 
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission('settings.read'), async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('re_org_settings')
@@ -32,7 +48,7 @@ router.get('/', async (req, res, next) => {
 
     // A workspace that has never opened this screen has no row. Return the
     // defaults rather than null, so the form has something to render.
-    res.json(data || {
+    const settings = data || {
       organization_id: req.orgId,
       company_name: null,
       logo_url: null,
@@ -45,11 +61,28 @@ router.get('/', async (req, res, next) => {
       notify_on_overdue: true,
       notify_payment_reminders: false,
       reply_to_email: null,
-    });
+    };
+
+    // A team's logo upload (POST /logo below) writes to teams.logo_url, not
+    // this row, so a team that has only ever used the upload widget would
+    // otherwise read back no logo at all here. Merge for the response only —
+    // never write it back — and this row wins whenever it is actually set,
+    // since it's the field PUT / edits directly and the one brandingService
+    // already treats as authoritative for a workspace's letterhead.
+    if (!settings.logo_url && req.user.team_id) {
+      const { data: team } = await supabaseAdmin
+        .from('teams').select('logo_url').eq('id', req.orgId).maybeSingle();
+      if (team?.logo_url) settings.logo_url = team.logo_url;
+    }
+
+    res.json(settings);
   } catch (e) { next(e); }
 });
 
-router.put('/', requireRole(['owner', 'admin']), async (req, res, next) => {
+// Owner only. The commission default, the letterhead and who gets alerted are
+// the workspace's own identity — a Head of Sales runs the sales book, not the
+// company's name on a buyer's allocation letter.
+router.put('/', requirePermission('settings.write'), async (req, res, next) => {
   try {
     const body = req.body || {};
     const updates = { organization_id: req.orgId };
@@ -95,9 +128,66 @@ router.put('/', requireRole(['owner', 'admin']), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Base64 in a JSON body rather than multipart, same tradeoff as unit media
+// (routes/units.js): no upload middleware, no new dependency, for a file a
+// workspace changes a handful of times a year.
+//
+// Which row this writes to is decided from req.user.team_id alone — present
+// means organization_id is a team's id, absent means it's the caller's own
+// (organization_id = user.team_id ?? user.id, CLAUDE.md) — so a solo
+// workspace needs no team to exist first, unlike everything else under /team.
+// Gated the same as the rest of workspace settings — a logo is the
+// workspace's identity, not a sales action.
+router.post('/logo', requirePermission('settings.write'), logoLimiter, async (req, res, next) => {
+  try {
+    const { content, content_type } = req.body || {};
+    if (!content || !content_type) {
+      return res.status(400).json({ error: 'content (base64) and content_type are required' });
+    }
+
+    const base64 = String(content).replace(/^data:[^;]+;base64,/, '');
+    const buffer = Buffer.from(base64, 'base64');
+    if (!buffer.length) return res.status(400).json({ error: 'content is not valid base64' });
+
+    const stored = await uploadTeamLogo(req.orgId, buffer, content_type);
+
+    let logoUrl;
+    let team = null;
+    if (req.user.team_id) {
+      const { data, error } = await supabaseAdmin
+        .from('teams')
+        .update({ logo_url: stored.url })
+        .eq('id', req.orgId)
+        .select('id, name, owner_id, logo_url, created_at')
+        .single();
+      if (error) throw error;
+      team = data;
+      logoUrl = data.logo_url;
+    } else {
+      const { data, error } = await supabaseAdmin
+        .from('re_org_settings')
+        .upsert({ organization_id: req.orgId, logo_url: stored.url }, { onConflict: 'organization_id' })
+        .select(SETTINGS_COLUMNS)
+        .single();
+      if (error) throw error;
+      logoUrl = data.logo_url;
+    }
+
+    audit(req, {
+      action: 'team.logo_updated',
+      entityType: req.user.team_id ? 'teams' : 're_org_settings',
+      entityId: req.orgId,
+      summary: 'Workspace logo updated',
+      metadata: { path: stored.path },
+    });
+
+    res.json({ logo_url: logoUrl, team });
+  } catch (e) { next(e); }
+});
+
 // ── Team ───────────────────────────────────────────────────────────────────
 
-router.get('/team', async (req, res, next) => {
+router.get('/team', requirePermission('team.read'), async (req, res, next) => {
   try {
     // A solo workspace has organization_id === the user's own id and no team
     // row. Saying so plainly is more useful than an empty list.
@@ -107,6 +197,7 @@ router.get('/team', async (req, res, next) => {
       return res.json({
         is_team: false,
         team: null,
+        invitable_roles: [],
         members: me ? [{
           user_id: me.id, email: me.email, full_name: me.full_name,
           role: 'owner', status: 'active', last_login_at: me.last_login_at,
@@ -115,12 +206,12 @@ router.get('/team', async (req, res, next) => {
     }
 
     const [team, members] = await Promise.all([
-      supabaseAdmin.from('teams').select('id, name, owner_id, created_at').eq('id', req.orgId).maybeSingle(),
+      supabaseAdmin.from('teams').select('id, name, owner_id, logo_url, created_at').eq('id', req.orgId).maybeSingle(),
       // last_login_at answers the question an MD actually has about a team —
       // "is my collections officer working today?" — without any of the
       // keystroke-level monitoring that question usually turns into.
       supabaseAdmin.from('team_members')
-        .select('id, role, status, invited_email, joined_at, users(id, email, full_name, last_login_at)')
+        .select('id, role, invited_role, invite_expires_at, status, invited_email, joined_at, users(id, email, full_name, last_login_at)')
         .eq('team_id', req.orgId),
     ]);
     if (team.error) throw team.error;
@@ -129,12 +220,24 @@ router.get('/team', async (req, res, next) => {
     res.json({
       is_team: true,
       team: team.data,
+      // Which roles THIS caller may hand out, so the invite form draws the
+      // right dropdown rather than offering a Head of Sales to a Head of Sales
+      // and letting the API refuse it after they have typed the address.
+      invitable_roles: INVITABLE_ROLES
+        .filter((role) => canInviteRole(req.orgRole, role))
+        .map((role) => ({ role, label: ROLE_LABELS[role] })),
       members: (members.data || []).map((m) => ({
         id: m.id,
         user_id: m.users?.id || null,
         email: m.users?.email || m.invited_email,
         full_name: m.users?.full_name || null,
         role: m.role,
+        role_label: ROLE_LABELS[m.role] || m.role,
+        // A pending invite's `role` and `invited_role` are the same value; the
+        // pair is carried so the UI can say "invited as Collections Officer"
+        // for a row that grants nothing yet.
+        invited_role: m.invited_role || null,
+        invite_expires_at: m.invite_expires_at || null,
         status: m.status,
         joined_at: m.joined_at,
         last_login_at: m.users?.last_login_at || null,
@@ -164,9 +267,17 @@ router.post('/team', async (req, res, next) => {
     const name = String(req.body?.name || '').trim();
     if (!name) return res.status(400).json({ error: 'name is required' });
 
+    // A solo workspace's logo lives in re_org_settings, keyed by the id that
+    // is about to stop being the org id at all. Carrying it straight onto the
+    // new team's own logo_url means the conversion doesn't read as "the logo
+    // disappeared" — GET / falls back to this column whenever
+    // re_org_settings.logo_url (unset on the fresh row below) is empty.
+    const { data: soloSettings } = await supabaseAdmin
+      .from('re_org_settings').select('logo_url').eq('organization_id', req.orgId).maybeSingle();
+
     const { data: team, error: teamErr } = await supabaseAdmin
       .from('teams')
-      .insert({ name, owner_id: req.userId })
+      .insert({ name, owner_id: req.userId, logo_url: soloSettings?.logo_url || null })
       .select()
       .single();
     if (teamErr) throw teamErr;
@@ -229,54 +340,49 @@ router.post('/team', async (req, res, next) => {
 // Invite by email. The invited row is 'invited', not 'active', so it grants
 // nothing until they accept — src/middleware/auth.js only counts active
 // membership when resolving the org scope.
-router.post('/team/invite', async (req, res, next) => {
+//
+// The rules that make this more than an insert live in
+// src/services/inviteService.js: a seven-day signed link, the role it was
+// issued for, and the ten-workspace cap. Which roles the CALLER may hand out
+// is permissions.canInviteRole — an owner can appoint a Head of Sales, a Head
+// of Sales can build their own team but cannot appoint a second one.
+router.post('/team/invite', requirePermission('team.invite'), async (req, res, next) => {
   try {
     if (!req.user.team_id) {
       return res.status(409).json({ error: 'Create a team first, then invite people to it.' });
     }
-    if (!['owner', 'admin'].includes(req.orgRole)) {
-      return res.status(403).json({ error: 'Only an owner or admin can invite team members.' });
-    }
 
     const email = auth.normalizeEmail(req.body?.email);
-    const role = req.body?.role || 'member';
     if (!email) return res.status(400).json({ error: 'email is required' });
-    if (!['admin', 'member'].includes(role)) {
-      return res.status(400).json({ error: 'role must be admin or member' });
-    }
 
-    // If they already have an account, link it. If not, the invite is held
-    // against the address until they register with it.
-    const existing = await auth.findUserByEmail(email);
+    const { data: team } = await supabaseAdmin
+      .from('teams').select('name').eq('id', req.orgId).maybeSingle();
 
-    // Two different conflict targets because a NULL user_id is never equal
-    // to another NULL under a plain unique constraint — inviting the same
-    // not-yet-registered address twice used to create two 'invited' rows
-    // instead of updating the one already there. migrations/012 adds the
-    // second index this branch targets, scoped to pending (user_id is null)
-    // invites only; an accepted member still upserts on (team_id, user_id).
-    const { data, error } = await supabaseAdmin
-      .from('team_members')
-      .upsert({
-        team_id: req.orgId,
-        user_id: existing?.id || null,
-        invited_email: email,
-        role,
-        status: existing ? 'active' : 'invited',
-      }, { onConflict: existing ? 'team_id,user_id' : 'team_id,invited_email' })
-      .select()
-      .single();
-    if (error) throw error;
+    const result = await invites.createInvite({
+      orgId: req.orgId,
+      inviterRole: req.orgRole,
+      inviterUserId: req.userId,
+      email,
+      role: req.body?.role || 'sales_rep',
+      teamName: team?.name || null,
+    });
 
     audit(req, {
       action: 'team.invited',
       entityType: 'team_members',
-      entityId: data.id,
-      summary: `Invited ${email} as ${role}`,
-      metadata: { email, role, existing_account: Boolean(existing) },
+      entityId: result.member.id,
+      summary: `Invited ${email} as ${ROLE_LABELS[result.invited_role] || result.invited_role}`
+        + (result.joined_immediately ? ' — they already had an account and joined immediately' : ''),
+      metadata: {
+        email,
+        role: result.invited_role,
+        existing_account: result.joined_immediately,
+        emailed: result.emailed,
+        expires_at: result.expires_at,
+      },
     });
 
-    res.status(201).json(data);
+    res.status(201).json(result);
   } catch (e) { next(e); }
 });
 
@@ -285,7 +391,7 @@ router.post('/team/invite', async (req, res, next) => {
 // them to:" instead of removing him and leaving forty buyers with nobody
 // chasing them, no commission accruing, and the morning brief naming a rep who
 // no longer exists.
-router.get('/team/:id/workload', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.get('/team/:id/workload', requirePermission('team.workload'), async (req, res, next) => {
   try {
     const { data: member } = await supabaseAdmin
       .from('team_members')
@@ -301,12 +407,18 @@ router.get('/team/:id/workload', requireRole(['owner', 'admin']), async (req, re
 
     // A person is a sales rep through re_sales_reps; their reservations hang
     // off that, not off the user id directly.
+    //
+    // Matched on user_id, not on the email address this used to compare. An
+    // email is a mutable label: somebody who changes theirs would read as a
+    // different person here, keep their reservations and lose their identity —
+    // and worse, could inherit the rep record of whoever the old address was
+    // later reassigned to.
     const { data: reps } = await supabaseAdmin
       .from('re_sales_reps')
-      .select('id, active, commission_rate, users(full_name, email)')
+      .select('id, user_id, active, commission_rate, users(full_name, email)')
       .eq('organization_id', req.orgId);
 
-    const theirs = (reps || []).filter((r) => r.users && r.id && r.users.email === member.users?.email);
+    const theirs = (reps || []).filter((r) => r.user_id && r.user_id === member.user_id);
     const repIds = theirs.map((r) => r.id);
 
     let openReservations = 0;
@@ -361,9 +473,9 @@ router.get('/team/:id/workload', requireRole(['owner', 'admin']), async (req, re
 // it. This is the one sanctioned way ownership actually moves: it promotes a
 // target member and demotes the caller in the same request, rather than
 // leaving "the owner left the company" with no route through the product at
-// all. Owner-only — an admin can manage members, but handing off the
+// all. Owner-only — a Head of Sales can manage members, but handing off the
 // workspace itself is the current owner's call alone.
-router.post('/team/transfer-owner', requireRole(['owner']), async (req, res, next) => {
+router.post('/team/transfer-owner', requirePermission('settings.transferOwner'), async (req, res, next) => {
   try {
     const { member_id } = req.body || {};
     if (!member_id) return res.status(400).json({ error: 'member_id is required' });
@@ -401,9 +513,12 @@ router.post('/team/transfer-owner', requireRole(['owner']), async (req, res, nex
       .eq('team_id', req.orgId);
     if (promoteErr) throw promoteErr;
 
+    // The outgoing owner becomes Head of Sales — the closest thing to what
+    // 'admin' meant before this role model existed, and the only role that
+    // still sees the whole sales book.
     const { error: demoteErr } = await supabaseAdmin
       .from('team_members')
-      .update({ role: 'admin' })
+      .update({ role: 'sales_director' })
       .eq('id', caller.id)
       .eq('team_id', req.orgId);
     if (demoteErr) throw demoteErr;
@@ -420,18 +535,28 @@ router.post('/team/transfer-owner', requireRole(['owner']), async (req, res, nex
   } catch (e) { next(e); }
 });
 
-router.patch('/team/:id', async (req, res, next) => {
+// Changing somebody's role after they have joined, or removing them. The same
+// tier that can invite can re-role, and the same restriction applies: only the
+// owner can make somebody a Head of Sales, because that is the role that then
+// sees the entire book.
+router.patch('/team/:id', requirePermission('team.manageMembers'), async (req, res, next) => {
   try {
-    if (!['owner', 'admin'].includes(req.orgRole)) {
-      return res.status(403).json({ error: 'Only an owner or admin can change team membership.' });
-    }
-
     const updates = {};
     if (req.body?.role) {
-      if (!['admin', 'member'].includes(req.body.role)) {
-        return res.status(400).json({ error: 'role must be admin or member' });
+      if (!INVITABLE_ROLES.includes(req.body.role)) {
+        return res.status(400).json({ error: `role must be one of: ${INVITABLE_ROLES.join(', ')}` });
+      }
+      if (!canInviteRole(req.orgRole, req.body.role)) {
+        return res.status(403).json({
+          error: req.body.role === 'sales_director'
+            ? 'Only the workspace owner can make somebody a Head of Sales.'
+            : `${ROLE_LABELS[req.orgRole] || 'This role'} cannot assign that role.`,
+        });
       }
       updates.role = req.body.role;
+      // A pending invite that is re-roled before it is accepted has to carry
+      // the new role, or accepting it would quietly restore the old one.
+      updates.invited_role = req.body.role;
     }
     if (req.body?.status) {
       if (!['active', 'removed'].includes(req.body.status)) {
@@ -510,13 +635,16 @@ router.patch('/team/:id', async (req, res, next) => {
 async function reassignWork(req, member, targetRepId) {
   const summary = { moved: 0, deactivated: 0, target: targetRepId || null, orphaned: 0 };
 
+  // By user_id, for the same reason the workload endpoint above is: an email
+  // is a label somebody can change, and a departing rep's forty buyers must
+  // not hinge on whether they ever updated their address.
   const { data: reps } = await supabaseAdmin
     .from('re_sales_reps')
-    .select('id, users(email)')
+    .select('id, user_id')
     .eq('organization_id', req.orgId);
 
   const theirRepIds = (reps || [])
-    .filter((r) => r.users?.email && r.users.email === member.users?.email)
+    .filter((r) => r.user_id && r.user_id === member.user_id)
     .map((r) => r.id);
 
   if (!theirRepIds.length) return summary;

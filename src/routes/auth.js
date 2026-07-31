@@ -17,6 +17,8 @@ const { authenticate } = require('../middleware/auth');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const auth = require('../services/authService');
 const notify = require('../services/notificationService');
+const invites = require('../services/inviteService');
+const { ROLE_LABELS, actionsFor, normalizeRole } = require('../services/permissions');
 
 const router = express.Router();
 
@@ -87,6 +89,17 @@ router.post('/register', credentialLimiter, async (req, res, next) => {
       .upsert({ organization_id: result.user.id, company_name: company_name || null },
               { onConflict: 'organization_id' });
 
+    // Somebody invited before they had an account registers with that
+    // address: any pending invites waiting on it become real membership in
+    // this same request, so they land in the workspace(s) they were invited
+    // to rather than an empty solo one. Never throws — see
+    // inviteService.claimPendingInvites for why a failure here must not lose
+    // the account.
+    const joinedWorkspaces = await invites.claimPendingInvites({
+      userId: result.user.id,
+      email: result.user.email,
+    });
+
     // The account exists either way. If the email fails to send they can ask
     // for another from the verify screen — failing the registration over an
     // unreachable mail provider would lose the account entirely.
@@ -98,7 +111,7 @@ router.post('/register', credentialLimiter, async (req, res, next) => {
       });
     }
 
-    res.status(201).json({ ...result, verification });
+    res.status(201).json({ ...result, verification, joined_workspaces: joinedWorkspaces });
   } catch (e) { next(e); }
 });
 
@@ -208,6 +221,18 @@ router.post('/reset-password', credentialLimiter, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// ── Invites ──────────────────────────────────────────────────────────────
+// Preview is unauthenticated on purpose: somebody who clicks a link while
+// signed out needs to see "Adron Homes invited you as a Sales Executive"
+// BEFORE being asked to sign in or register — that is the one sentence that
+// makes the next step make sense.
+router.get('/invite/:token', credentialLimiter, async (req, res, next) => {
+  try {
+    const row = await invites.findByToken(req.params.token);
+    res.json(invites.describeInvite(row));
+  } catch (e) { next(e); }
+});
+
 // ── Authenticated ──────────────────────────────────────────────────────────
 // `authenticate` is applied per-route rather than to the router, because
 // everything above must remain reachable without a token.
@@ -222,13 +247,41 @@ router.get('/me', authenticate, async (req, res, next) => {
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'User not found' });
 
+    const role = normalizeRole(req.user.role);
+
+    // Every workspace this person can switch into — the sidebar switcher's
+    // whole data source, so it needs no call of its own. req.user.memberships
+    // (set by middleware/auth.js) is empty for a solo account, in which case
+    // there is nothing to switch between and the UI simply does not draw one.
+    let workspaces = [];
+    if (req.user.memberships?.length) {
+      const teamIds = req.user.memberships.map((m) => m.team_id);
+      const { data: teams } = await supabaseAdmin
+        .from('teams').select('id, name').in('id', teamIds);
+      const nameById = new Map((teams || []).map((t) => [t.id, t.name]));
+
+      workspaces = req.user.memberships.map((m) => ({
+        team_id: m.team_id,
+        name: nameById.get(m.team_id) || 'Workspace',
+        role: m.role,
+        role_label: ROLE_LABELS[m.role] || m.role,
+        is_current: m.team_id === req.user.team_id,
+      }));
+    }
+
     res.json({
       ...data,
       // The org scope the token resolves to, so the UI can label a team
       // workspace differently from a solo one without a second call.
       organization_id: req.user.team_id || req.user.id,
       is_team: Boolean(req.user.team_id),
-      role: req.user.role || 'owner',
+      role,
+      role_label: ROLE_LABELS[role] || role,
+      // What THIS role may do, resolved once here so the browser draws the
+      // same model the server enforces rather than a second copy of the
+      // rules maintained by hand in screens.js.
+      permissions: actionsFor(role),
+      workspaces,
       // /auth/me deliberately works for an UNVERIFIED user — it is the endpoint
       // the app calls to discover that it should show the verify screen.
       email_verified: Boolean(req.user.email_verified_at),
@@ -237,6 +290,23 @@ router.get('/me', authenticate, async (req, res, next) => {
       // "change"; the Settings screen shows "Set a password" instead.
       has_password: Boolean((await auth.findUserByEmail(data.email))?.password_hash),
     });
+  } catch (e) { next(e); }
+});
+
+// Accepting an invite requires an account — a not-yet-registered invitee is
+// routed to register first (frontend), and registration itself claims any
+// pending invite for that address (see POST /register above). This route
+// covers the rest: somebody who already has an account, signed in, clicking
+// the link. The invite's own email is deliberately NOT required to match the
+// signed-in account — see inviteService.acceptInvite for why.
+router.post('/invite/accept', authenticate, async (req, res, next) => {
+  try {
+    const result = await invites.acceptInvite({
+      token: req.body?.token,
+      userId: req.user.id,
+      userEmail: req.user.email,
+    });
+    res.json(result);
   } catch (e) { next(e); }
 });
 

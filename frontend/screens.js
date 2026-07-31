@@ -373,22 +373,40 @@
      behind, what to say to them, and what is on the list. */
   R.screens.dashboard = {
     render: async function (view, params, query) {
+      // Documentation's dashboard is a different question entirely — what
+      // still needs doing on paper, none of it financial — and the backend
+      // answers it with a different shape (routes/dashboard.js's
+      // documentationDashboard), not a stripped-down copy of the KPI one
+      // below. Same reason it gets its own render path here.
+      if (R.state.user.role === 'documentation') {
+        return renderDocumentationDashboard(view);
+      }
+
       if (query.project) projectFilter = query.project;
       var scope = projectFilter ? '?project_id=' + encodeURIComponent(projectFilter) : '';
 
+      var canSeeAtRisk = R.can('atRisk.read');
+      var canSeeBrief = R.can('brief.read');
+
       var results = await Promise.all([
         api('/dashboard' + scope),
-        api('/dashboard/at-risk' + scope),
+        // A Sales Executive and Documentation never reach GET /at-risk — the
+        // server would 403 it, so this simply isn't asked for them.
+        canSeeAtRisk ? api('/dashboard/at-risk' + scope) : Promise.resolve([]),
         api('/tasks?status=open'),
       ]);
 
       var d = results[0], atRisk = results[1], tasks = results[2];
-      var brief = d.latest_brief;
+      // Collections and a Sales Executive never get a brief back at all
+      // (routes/dashboard.js only fetches one for Owner/Sales Director) —
+      // d.latest_brief is already null for them, same as canSeeBrief being
+      // false; both checks below agree.
+      var brief = canSeeBrief ? d.latest_brief : null;
       var drafts = (brief && brief.payload && brief.payload.follow_ups) || [];
       var risks = (brief && brief.payload && brief.payload.risks) || [];
 
       var lines = [];
-      if (atRisk.length) lines.push('<span class="greeting-line clay"><b>' + atRisk.length + '</b> ' + (atRisk.length === 1 ? 'buyer needs' : 'buyers need') + ' chasing</span>');
+      if (canSeeAtRisk && atRisk.length) lines.push('<span class="greeting-line clay"><b>' + atRisk.length + '</b> ' + (atRisk.length === 1 ? 'buyer needs' : 'buyers need') + ' chasing</span>');
       if (d.overdue.count) lines.push('<span class="greeting-line clay"><b>' + nairaShort(d.overdue.amount) + '</b> overdue</span>');
       if (d.due_next_7_days) lines.push('<span class="greeting-line"><b>' + nairaShort(d.due_next_7_days) + '</b> due this week</span>');
       if (d.open_tasks.total) lines.push('<span class="greeting-line gold"><b>' + d.open_tasks.total + '</b> open ' + (d.open_tasks.total === 1 ? 'task' : 'tasks') + '</span>');
@@ -409,44 +427,49 @@
 
         projectPills +
 
-        // The brief
-        '<div class="brief">' +
-          '<div class="brief-head">' +
-            '<span class="eyebrow">Morning Brief</span>' +
-            // "Today at 07:14" rather than a bare date. Checking the dashboard
-            // at 8pm, the only thing worth knowing about the brief is whether
-            // it is this morning's — and a date cannot answer that.
-            '<span class="brief-meta">' + esc(brief
-              ? [R.fmtRelative(brief.created_at) || brief.brief_date,
-                 brief.generated_by === 'fallback' ? 'rule-based' : ''].filter(Boolean).join(' · ')
-              : '') + '</span>' +
-          '</div>' +
-          '<p class="brief-body' + (brief ? '' : ' is-muted') + '" id="brief-summary">' +
-            esc(brief ? brief.summary : 'No brief yet. The first one is written automatically at 7:00 AM Lagos time, or you can generate it now.') +
-          '</p>' +
+        // The brief — Owner and Sales Director only. Collections and a Sales
+        // Executive see their own KPIs below instead; there is nothing
+        // strategic here for either of them to read, and no button that
+        // would only 403 if pressed.
+        (canSeeBrief
+          ? '<div class="brief">' +
+              '<div class="brief-head">' +
+                '<span class="eyebrow">Morning Brief</span>' +
+                // "Today at 07:14" rather than a bare date. Checking the dashboard
+                // at 8pm, the only thing worth knowing about the brief is whether
+                // it is this morning's — and a date cannot answer that.
+                '<span class="brief-meta">' + esc(brief
+                  ? [R.fmtRelative(brief.created_at) || brief.brief_date,
+                     brief.generated_by === 'fallback' ? 'rule-based' : ''].filter(Boolean).join(' · ')
+                  : '') + '</span>' +
+              '</div>' +
+              '<p class="brief-body' + (brief ? '' : ' is-muted') + '" id="brief-summary">' +
+                esc(brief ? brief.summary : 'No brief yet. The first one is written automatically at 7:00 AM Lagos time, or you can generate it now.') +
+              '</p>' +
 
-          // A degraded morning is stated, not disguised. Without this a
-          // rule-based brief reads as the AI's work, and nobody knows to look
-          // at it more carefully or to try again.
-          (brief && brief.payload && brief.payload.model_error
-            ? '<div class="notice info mt-1" style="margin-bottom:0">' +
-                'The AI was unavailable this morning, so this brief was built from the rules. ' +
-                'The figures are correct; only the wording is plainer.' +
-              '</div>'
-            : '') +
-          (risks.length
-            ? '<div class="risk-row">' + risks.slice(0, 6).map(function (r) {
-                return '<div class="risk-chip ' + esc(r.severity) + '"><b>' + esc(r.customer_name) + '</b><span>' + esc(r.reason) + '</span></div>';
-              }).join('') + '</div>'
-            : '') +
-          '<div class="brief-actions">' +
-            '<button class="btn brass" id="btn-brief">Regenerate brief</button>' +
-            // Every click is a paid model call. Saying so is cheaper than
-            // discovering someone clicked it forty times because the wording
-            // looked off.
-            '<span class="brief-meta" id="brief-status">Writes a new brief — one AI call</span>' +
-          '</div>' +
-        '</div>' +
+              // A degraded morning is stated, not disguised. Without this a
+              // rule-based brief reads as the AI's work, and nobody knows to look
+              // at it more carefully or to try again.
+              (brief && brief.payload && brief.payload.model_error
+                ? '<div class="notice info mt-1" style="margin-bottom:0">' +
+                    'The AI was unavailable this morning, so this brief was built from the rules. ' +
+                    'The figures are correct; only the wording is plainer.' +
+                  '</div>'
+                : '') +
+              (risks.length
+                ? '<div class="risk-row">' + risks.slice(0, 6).map(function (r) {
+                    return '<div class="risk-chip ' + esc(r.severity) + '"><b>' + esc(r.customer_name) + '</b><span>' + esc(r.reason) + '</span></div>';
+                  }).join('') + '</div>'
+                : '') +
+              '<div class="brief-actions">' +
+                '<button class="btn brass" id="btn-brief">Regenerate brief</button>' +
+                // Every click is a paid model call. Saying so is cheaper than
+                // discovering someone clicked it forty times because the wording
+                // looked off.
+                '<span class="brief-meta" id="brief-status">Writes a new brief — one AI call</span>' +
+              '</div>' +
+            '</div>'
+          : '') +
 
         '<div class="grid cols-4 mt-2">' +
           stat('Collected this month', naira(d.collected_this_month), { tone: 'moss', accent: 'moss' }) +
@@ -470,19 +493,23 @@
 
         '<div class="grid split mt-2">' +
           '<div>' +
-            card('At risk', atRisk.length
-              ? atRisk.slice(0, 6).map(riskRow).join('')
-              : R.emptyState('Nobody is two or more installments behind', 'Good morning.'),
-              { flush: true, actions: atRisk.length > 6 ? '<a class="btn-quiet" href="#/at-risk">See all ' + atRisk.length + '</a>' : '' }) +
+            (canSeeAtRisk
+              ? card('At risk', atRisk.length
+                  ? atRisk.slice(0, 6).map(riskRow).join('')
+                  : R.emptyState('Nobody is two or more installments behind', 'Good morning.'),
+                  { flush: true, actions: atRisk.length > 6 ? '<a class="btn-quiet" href="#/at-risk">See all ' + atRisk.length + '</a>' : '' })
+              : '') +
 
             card('Inventory', inventoryHtml(d.units), { actions: '<a class="btn-quiet" href="#/units">Manage</a>' }) +
           '</div>' +
 
           '<div>' +
-            card('Drafted follow-ups', drafts.length
-              ? drafts.slice(0, 5).map(draftRow).join('')
-              : R.emptyState('Nothing to chase today'),
-              { flush: true }) +
+            (canSeeBrief
+              ? card('Drafted follow-ups', drafts.length
+                  ? drafts.slice(0, 5).map(draftRow).join('')
+                  : R.emptyState('Nothing to chase today'),
+                  { flush: true })
+              : '') +
 
             card('Tasks', tasks.length
               ? tasks.slice(0, 7).map(taskRow).join('')
@@ -520,6 +547,40 @@
       wireRiskRows(view);
     },
   };
+
+  // Documentation's whole dashboard: what still needs doing on paper, and
+  // nothing else — matches routes/dashboard.js's documentationDashboard,
+  // which is the only thing GET /dashboard returns for this role.
+  async function renderDocumentationDashboard(view) {
+    var d = await api('/dashboard');
+
+    view.innerHTML =
+      '<div class="greeting"><h1>' + esc(greeting()) + '</h1>' +
+        '<div class="greeting-lines">' +
+          (d.pending_letters
+            ? '<span class="greeting-line gold"><b>' + d.pending_letters + '</b> ' + (d.pending_letters === 1 ? 'letter' : 'letters') + ' to generate</span>'
+            : '') +
+          (d.unsigned_deeds
+            ? '<span class="greeting-line clay"><b>' + d.unsigned_deeds + '</b> unsigned ' + (d.unsigned_deeds === 1 ? 'deed' : 'deeds') + '</span>'
+            : '') +
+          (!d.pending_letters && !d.unsigned_deeds
+            ? '<span class="greeting-line">Nothing pending.</span>'
+            : '') +
+        '</div></div>' +
+
+      '<div class="grid cols-4 mt-2">' +
+        stat('Pending', String(d.by_status.pending)) +
+        stat('Generated', String(d.by_status.generated)) +
+        stat('Sent', String(d.by_status.sent)) +
+        stat('Signed', String(d.by_status.signed), { tone: 'moss' }) +
+      '</div>' +
+
+      '<div class="mt-2">' +
+        card(null, '<div style="padding:20px;text-align:center">' +
+          '<a class="btn brass" href="#/documents">Go to Documents</a>' +
+        '</div>') +
+      '</div>';
+  }
 
   function inventoryHtml(units) {
     var total = units.available + units.reserved + units.sold;
@@ -913,7 +974,7 @@
                 (u.status === 'available'
                   ? '<button class="btn-quiet" data-reserve="' + esc(u.id) + '">Reserve</button> '
                   : '') +
-                (u.status === 'available'
+                (u.status === 'available' && R.can('recycle.delete')
                   ? '<button class="btn-quiet" data-delete-unit="' + esc(u.id) +
                     '" data-label="Unit ' + esc(u.unit_number) + '">Delete</button>'
                   : '') +
@@ -1313,8 +1374,10 @@
                 '<td class="muted">' + esc(fmtDate(c.created_at)) + '</td>' +
                 // data-stop keeps the row's own click handler from firing and
                 // opening the drawer behind the confirmation.
-                '<td class="right"><button class="btn-quiet" data-stop data-delete-customer="' + esc(c.id) +
-                  '" data-label="' + esc(c.full_name) + '">Delete</button></td>' +
+                '<td class="right">' + (R.can('recycle.delete')
+                  ? '<button class="btn-quiet" data-stop data-delete-customer="' + esc(c.id) +
+                    '" data-label="' + esc(c.full_name) + '">Delete</button>'
+                  : '') + '</td>' +
               '</tr>';
             },
             {
@@ -1648,13 +1711,13 @@
   function scheduleRow(s) {
     // Waiving only ever applies to money still owed — a paid row has nothing
     // left to write off, and an already-waived one has been through this once.
-    var waivable = s.status === 'pending' || s.status === 'overdue';
+    var waivable = (s.status === 'pending' || s.status === 'overdue') && R.can('payments.waive');
     return '<div class="sched ' + esc(s.status) + '">' +
       '<span class="sched-n">' + s.installment_number + '</span>' +
       '<span class="sched-main"><span class="mono">' + naira(s.amount_due) + '</span>' +
         '<span class="page-sub">due ' + esc(fmtDate(s.due_date)) + (s.paid_at ? ' · paid ' + esc(fmtDate(s.paid_at)) : '') + '</span></span>' +
       badge(s.status) +
-      (s.status !== 'paid'
+      (s.status !== 'paid' && R.can('payments.record')
         ? '<button class="btn-quiet" data-pay="' + esc(s.id) + '" data-outstanding="' + esc(s.amount_due) + '">Record</button>'
         : '') +
       (waivable
@@ -2261,8 +2324,10 @@
                   '<td class="right nowrap">' + (row.voided_at
                     ? '<span class="muted">Voided</span>'
                     : '<button class="btn-quiet" data-receipt="' + esc(row.id) + '">Receipt</button> ' +
-                      '<button class="btn-quiet" data-void="' + esc(row.id) + '" data-amount="' + esc(row.amount) +
-                        '" data-name="' + esc(buyerName) + '">Void</button>') + '</td>' +
+                      (R.can('payments.void')
+                        ? '<button class="btn-quiet" data-void="' + esc(row.id) + '" data-amount="' + esc(row.amount) +
+                          '" data-name="' + esc(buyerName) + '">Void</button>'
+                        : '')) + '</td>' +
                 '</tr>';
               },
               {
@@ -2826,7 +2891,7 @@
               '<td class="num gold">' + naira(r.earned) + '</td>' +
               '<td class="num">' + naira(r.outstanding) + '</td>' +
               '<td class="num moss">' + naira(r.paid) + '</td>' +
-              '<td class="right">' + (r.outstanding > 0
+              '<td class="right">' + (r.outstanding > 0 && R.can('commissions.markPaid')
                 ? '<button class="btn-quiet" data-payout="' + esc(r.sales_rep_id) + '" data-name="' + esc(r.name) + '">Mark paid</button>'
                 : '') + '</td>' +
             '</tr>';
@@ -3122,30 +3187,69 @@
   }
 
   async function teamTab(view, tabs) {
-    var results = await Promise.all([api('/settings/team'), api('/sales-reps?include_inactive=true')]);
-    var team = results[0], reps = results[1];
+    var results = await Promise.all([
+      api('/settings/team'), api('/sales-reps?include_inactive=true'), api('/settings'),
+    ]);
+    var team = results[0], reps = results[1], settings = results[2];
+
+    // The effective logo, from wherever it actually lives — GET /settings
+    // already merges teams.logo_url for the response, so this widget works
+    // identically for a solo workspace (re_org_settings.logo_url) and a team
+    // (teams.logo_url), without needing to know which.
+    var logoUrl = settings.logo_url;
+    // Branding is workspace settings — "Cannot change workspace settings
+    // (commission default, notifications, branding)" applies to a Sales
+    // Director exactly as it does to PUT /settings, and POST /settings/logo
+    // is gated the same way (owner only). A director can still reach this
+    // screen (team management is theirs), so the upload widget itself is
+    // what has to stay out of their way rather than 403 on click.
+    var canEditLogo = R.can('settings.write');
+    var logoBlock = canEditLogo
+      ? '<div class="card mb-2"><div class="card-body" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">' +
+          '<div class="logo-upload" id="logo-upload" tabindex="0" role="button" ' +
+              'aria-label="' + (logoUrl ? 'Change workspace logo' : 'Add workspace logo') + '">' +
+            (logoUrl
+              ? '<img src="' + esc(logoUrl) + '" alt="Workspace logo">'
+              : '<div class="logo-upload-empty">Add logo</div>') +
+            '<div class="logo-upload-overlay">' + (logoUrl ? 'Change' : 'Add logo') + '</div>' +
+          '</div>' +
+          '<input type="file" id="logo-file" accept="image/jpeg,image/png,image/webp" style="display:none">' +
+          '<div><div class="cell-primary" style="margin-bottom:3px">Workspace logo</div>' +
+            '<p class="page-sub" style="margin-top:0">JPEG, PNG or WebP, up to 2MB. Shown here and on allocation letters and receipts.</p></div>' +
+        '</div></div>'
+      : '';
 
     view.innerHTML = head('Team & sales reps', team.is_team ? 'A shared workspace.' : 'A solo workspace.') + tabs +
+      logoBlock +
 
       card('People', table(
         [{ label: 'Name' }, { label: 'Email' }, { label: 'Role' }, { label: 'Last active' },
           { label: 'Status' }, { label: '' }],
         team.members,
         function (m) {
+          var canManage = m.role !== 'owner' && m.id && R.can('team.manageMembers');
           return '<tr>' +
             '<td class="cell-primary">' + esc(m.full_name || '—') + '</td>' +
             '<td class="muted">' + esc(m.email || '') + '</td>' +
-            '<td class="muted">' + esc(m.role) + '</td>' +
+            '<td class="muted">' + esc(m.role_label || m.role) +
+              (m.status === 'invited' && m.invited_role && m.invited_role !== m.role
+                ? '<div class="cell-meta">invited as ' + esc(m.invited_role) + '</div>' : '') + '</td>' +
             '<td class="muted">' + esc(m.last_login_at ? R.fmtRelative(m.last_login_at) : 'never signed in') + '</td>' +
             '<td>' + badge(m.status) + '</td>' +
-            // The owner cannot be removed — the API refuses it, and offering the
-            // button anyway is just a dead end with a confirmation on it.
+            // The owner cannot be removed or re-roled — the API refuses it,
+            // and offering the buttons anyway is just a dead end with a
+            // confirmation on it.
             '<td class="right nowrap">' + (
+              canManage
+                ? '<button class="btn-quiet" data-change-role="' + esc(m.id) + '" data-current="' + esc(m.role) + '" data-name="' +
+                  esc(m.full_name || m.email || 'this person') + '">Change role</button> '
+                : ''
+            ) + (
               m.role !== 'owner' && m.status === 'active' && m.id && R.state.user.role === 'owner'
                 ? '<button class="btn-quiet" data-make-owner="' + esc(m.id) + '" data-name="' +
                   esc(m.full_name || m.email || 'this person') + '">Make owner</button> '
                 : ''
-            ) + (m.role !== 'owner' && m.status !== 'removed' && m.id
+            ) + (m.role !== 'owner' && m.status !== 'removed' && m.id && R.can('team.manageMembers')
               ? '<button class="btn-quiet" data-remove="' + esc(m.id) + '" data-name="' +
                 esc(m.full_name || m.email || 'this person') + '">Remove</button>'
               : '') + '</td>' +
@@ -3155,7 +3259,7 @@
       ), {
         flush: true,
         actions: team.is_team
-          ? '<button class="btn-quiet" id="btn-invite">Invite someone</button>'
+          ? (R.can('team.invite') ? '<button class="btn-quiet" id="btn-invite">Invite someone</button>' : '')
           : '<button class="btn-quiet" id="btn-make-team">Turn this into a team</button>',
       }) +
 
@@ -3177,27 +3281,107 @@
         }
       ), { flush: true, actions: '<button class="btn-quiet" id="btn-add-rep">Add a rep</button>' });
 
+    var logoUpload = R.qs('#logo-upload', view);
+    if (logoUpload) {
+      var logoFile = R.qs('#logo-file', view);
+      var openLogoPicker = function () { logoFile.click(); };
+      logoUpload.addEventListener('click', openLogoPicker);
+      logoUpload.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openLogoPicker(); }
+      });
+
+      logoFile.addEventListener('change', async function () {
+        var file = logoFile.files && logoFile.files[0];
+        if (!file) return;
+
+        // Checked here too, not just via the file input's accept/the server's
+        // own validation — an early, specific message beats waiting on a
+        // round trip to be told the same thing.
+        if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+          toast('Use a JPEG, PNG or WebP image.', 'err');
+          logoFile.value = '';
+          return;
+        }
+        if (file.size > 2 * 1024 * 1024) {
+          toast('That image is larger than 2MB.', 'err');
+          logoFile.value = '';
+          return;
+        }
+
+        logoUpload.classList.add('is-working');
+        try {
+          var base64 = await new Promise(function (resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function () { resolve(String(reader.result).split(',')[1]); };
+            reader.onerror = function () { reject(new Error('could not be read')); };
+            reader.readAsDataURL(file);
+          });
+
+          await api.post('/settings/logo', { content: base64, content_type: file.type });
+          toast('Logo updated.', 'ok');
+          R.reload();
+        } catch (err) {
+          toast(err.message, 'err');
+        } finally {
+          logoUpload.classList.remove('is-working');
+          logoFile.value = '';
+        }
+      });
+    }
+
     var invite = R.qs('#btn-invite', view);
     if (invite) {
       invite.addEventListener('click', function () {
+        // Only the roles THIS caller may hand out — team.invitable_roles,
+        // from GET /settings/team — so an owner sees all four and a Sales
+        // Director never sees "Head of Sales" offered only to be refused
+        // after they have already typed the address (only the owner may
+        // appoint a second one).
         R.modal({
           title: 'Invite someone',
           body:
             '<div class="field"><label for="inv-email">Email</label>' +
               '<input class="input" id="inv-email" name="email" type="email" required></div>' +
             '<div class="field"><label for="inv-role">Role</label>' +
-              '<select class="select" id="inv-role" name="role"><option value="member">Member</option><option value="admin">Admin</option></select></div>' +
-            '<p class="field-hint">If they already have an account they join immediately. If not, the invite waits for them to register with that address.</p>',
+              '<select class="select" id="inv-role" name="role">' +
+                team.invitable_roles.map(function (r) {
+                  return '<option value="' + esc(r.role) + '">' + esc(r.label) + '</option>';
+                }).join('') +
+              '</select></div>' +
+            '<p class="field-hint">If they already have an account they join immediately. If not, we email a link that expires in 7 days.</p>',
           submitLabel: 'Send invite',
           onSubmit: async function (form, close) {
-            await api.post('/settings/team/invite', R.values(form));
+            var result = await api.post('/settings/team/invite', R.values(form));
             close();
-            toast('Invited.', 'ok');
+            toast(result.joined_immediately ? 'Added to the workspace.' : 'Invite sent.', 'ok');
             R.reload();
           },
         });
       });
     }
+
+    R.qsa('[data-change-role]', view).forEach(function (button) {
+      button.addEventListener('click', function () {
+        R.modal({
+          title: 'Change role — ' + button.dataset.name,
+          body:
+            '<div class="field"><label for="role-select">New role</label>' +
+              '<select class="select" id="role-select" name="role">' +
+                team.invitable_roles.map(function (r) {
+                  return '<option value="' + esc(r.role) + '"' +
+                    (r.role === button.dataset.current ? ' selected' : '') + '>' + esc(r.label) + '</option>';
+                }).join('') +
+              '</select></div>',
+          submitLabel: 'Save',
+          onSubmit: async function (form, close) {
+            await api.patch('/settings/team/' + button.dataset.changeRole, R.values(form));
+            close();
+            toast('Role updated.', 'ok');
+            R.reload();
+          },
+        });
+      });
+    });
 
     var makeTeam = R.qs('#btn-make-team', view);
     if (makeTeam) {

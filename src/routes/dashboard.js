@@ -1,8 +1,36 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { lagosToday } = require('../services/overdueService');
 const { describeStage } = require('../services/escalationService');
 const router = express.Router();
+
+// Documentation's dashboard answers one question — what still needs doing on
+// paper — and none of the financial ones the other roles' KPIs are built
+// from, so it is its own small query rather than a stripped-down copy of the
+// full one below.
+async function documentationDashboard(req) {
+  const { data, error } = await supabaseAdmin
+    .from('re_documents')
+    .select('doc_type, status')
+    .eq('organization_id', req.orgId);
+  if (error) throw error;
+
+  const rows = data || [];
+  const count = (pred) => rows.filter(pred).length;
+
+  return {
+    role: 'documentation',
+    pending_letters: count((r) => r.doc_type === 'allocation_letter' && r.status === 'pending'),
+    unsigned_deeds: count((r) => r.doc_type === 'deed_of_assignment' && r.status !== 'signed'),
+    by_status: {
+      pending: count((r) => r.status === 'pending'),
+      generated: count((r) => r.status === 'generated'),
+      sent: count((r) => r.status === 'sent'),
+      signed: count((r) => r.status === 'signed'),
+    },
+  };
+}
 
 // One endpoint, one fetch, the whole dashboard. The CEO screen is the product's
 // daily habit — it should never be five spinners.
@@ -12,13 +40,27 @@ const router = express.Router();
 // combined "collected this month" without it, and cannot tell which of the
 // three has the problem — which is the only thing they wanted to know when
 // they opened the page.
-router.get('/', async (req, res, next) => {
+//
+// CONTENT, NOT THE ROUTE, IS WHAT CHANGES BY ROLE — every authenticated role
+// may open this endpoint (requirePermission('dashboard.read') is ALL), and
+// what comes back is what the role definitions actually describe: Owner and
+// Sales Director get the full executive picture; Collections gets the
+// overdue-focused numbers and no brief; a Sales Executive gets those same
+// numbers narrowed to their own book; Documentation gets none of it and a
+// document-status summary instead (see documentationDashboard above).
+router.get('/', requirePermission('dashboard.read'), async (req, res, next) => {
   try {
+    if (req.orgRole === 'documentation') {
+      return res.json(await documentationDashboard(req));
+    }
+
     const orgId = req.orgId;
     const projectId = req.query.project_id || null;
     const today = lagosToday();
     const monthStart = today.slice(0, 8) + '01';
     const in7 = new Date(Date.parse(today) + 7 * 86_400_000).toISOString().slice(0, 10);
+    const ownOnly = isOwnRecordsOnly(req.orgRole);
+    const repIds = ownOnly ? await salesRepIdsFor(req) : null;
 
     // Scoping money to a project, and splitting it into sales vs rental
     // income, both mean walking payment → schedule → plan → reservation →
@@ -26,14 +68,14 @@ router.get('/', async (req, res, next) => {
     // actually selected; property_type now needs it every time, so the
     // unscoped path pays that one join cost unconditionally.
     let paymentsQuery = supabaseAdmin.from('re_payments')
-      .select('amount, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(property_type, re_units!inner(project_id))))')
+      .select('amount, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(property_type, sales_rep_id, re_units!inner(project_id))))')
       .eq('organization_id', orgId)
       .gte('paid_at', monthStart)
       .is('voided_at', null);
 
     let scheduleQuery = supabaseAdmin.from('re_installment_schedule')
-      .select(projectId
-        ? 'amount_due, due_date, status, re_installment_plans!inner(re_reservations!inner(re_units!inner(project_id)))'
+      .select((projectId || ownOnly)
+        ? 'amount_due, due_date, status, re_installment_plans!inner(re_reservations!inner(sales_rep_id, re_units!inner(project_id)))'
         : 'amount_due, due_date, status')
       .eq('organization_id', orgId)
       .in('status', ['pending', 'overdue']);
@@ -49,15 +91,31 @@ router.get('/', async (req, res, next) => {
       unitsQuery = unitsQuery.eq('project_id', projectId);
     }
 
+    // A Sales Executive's dashboard is their own book, not the company's —
+    // same sales_rep_id join every other own-records filter in this product
+    // uses, applied at the query level rather than filtered out in JS.
+    if (ownOnly) {
+      const ids = repIds.length ? repIds : [MATCHES_NOTHING];
+      paymentsQuery = paymentsQuery.in(
+        're_installment_schedule.re_installment_plans.re_reservations.sales_rep_id', ids);
+      scheduleQuery = scheduleQuery.in(
+        're_installment_plans.re_reservations.sales_rep_id', ids);
+    }
+
     const [payments, schedule, units, tasks, brief, projects] = await Promise.all([
       paymentsQuery,
       scheduleQuery,
       unitsQuery,
       supabaseAdmin.from('re_tasks')
         .select('id, source').eq('organization_id', orgId).eq('status', 'open'),
-      supabaseAdmin.from('re_ai_briefs')
-        .select('summary, payload, brief_date, generated_by').eq('organization_id', orgId)
-        .order('brief_date', { ascending: false }).limit(1).maybeSingle(),
+      // The brief is Owner/Sales Director only — Collections and a Sales
+      // Executive get no strategic brief at all (their own narrower reasons
+      // are handled below), so there is nothing to fetch for them.
+      (req.orgRole === 'owner' || req.orgRole === 'sales_director')
+        ? supabaseAdmin.from('re_ai_briefs')
+            .select('summary, payload, brief_date, generated_by').eq('organization_id', orgId)
+            .order('brief_date', { ascending: false }).limit(1).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
       // The project list travels with the dashboard so the filter control has
       // something to render without a second request on first paint.
       supabaseAdmin.from('re_projects')
@@ -71,8 +129,28 @@ router.get('/', async (req, res, next) => {
     const scheduleRows = schedule.data || [];
     const overdueRows = scheduleRows.filter((s) => s.status === 'overdue');
     const unitRows = units.data || [];
-    const taskRows = tasks.data || [];
     const sum = (rows, key) => rows.reduce((total, row) => total + Number(row[key] || 0), 0);
+
+    // A Sales Executive's tasks are their own — same test tasks.js's own list
+    // applies: assigned to them directly, or tied to one of their reservations.
+    let taskRows = tasks.data || [];
+    if (ownOnly) {
+      let ownReservationIds = [];
+      if (repIds.length) {
+        const { data: owned } = await supabaseAdmin
+          .from('re_reservations').select('id')
+          .eq('organization_id', orgId).in('sales_rep_id', repIds);
+        ownReservationIds = (owned || []).map((r) => r.id);
+      }
+      const { data: mine } = await supabaseAdmin
+        .from('re_tasks').select('id, source')
+        .eq('organization_id', orgId).eq('status', 'open')
+        .or([
+          `assigned_to.eq.${req.userId}`,
+          ownReservationIds.length ? `related_reservation_id.in.(${ownReservationIds.join(',')})` : null,
+        ].filter(Boolean).join(','));
+      taskRows = mine || [];
+    }
 
     // Two revenue streams under one roof read as one number without this —
     // a developer running both a sales book and a rental portfolio cannot
@@ -111,6 +189,8 @@ router.get('/', async (req, res, next) => {
       // The brief stays workspace-wide even with a project filter on: it is
       // written once a morning against the whole book, and quietly showing a
       // filtered version of it would misrepresent what the AI actually read.
+      // null outright for anyone but Owner/Sales Director — see the query
+      // above, which never fetches one for them.
       latest_brief: brief.data || null,
     });
   } catch (e) { next(e); }
@@ -118,7 +198,10 @@ router.get('/', async (req, res, next) => {
 
 // At-risk customers: 2+ overdue installments, worst first.
 // This is the list a sales manager actually works through in the morning.
-router.get('/at-risk', async (req, res, next) => {
+// Owner, Sales Director and Collections only — a Sales Executive sees their
+// own buyers' status on the buyer screen instead, and Documentation has no
+// reason to see arrears at all.
+router.get('/at-risk', requirePermission('atRisk.read'), async (req, res, next) => {
   try {
     const today = lagosToday();
 

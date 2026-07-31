@@ -29,6 +29,7 @@
 
   var API_BASE = window.__API_BASE__ || 'http://localhost:4000/api';
   var TOKEN_KEY = 'archta.token';
+  var WORKSPACE_KEY = 'archta.workspace';
 
   // ── Session ───────────────────────────────────────────────────────────
   var token = null;
@@ -39,6 +40,23 @@
     try {
       if (value) window.localStorage.setItem(TOKEN_KEY, value);
       else window.localStorage.removeItem(TOKEN_KEY);
+    } catch (e) { /* private browsing: the session lasts this tab, which is fine */ }
+  }
+
+  // Which of a person's workspaces this browser is currently in — sent as
+  // X-Workspace-Id on every request (see request() below). The JWT itself
+  // carries no org scope (src/middleware/auth.js), so this is the only place
+  // "which workspace" lives on the client, same reasoning as the token
+  // itself: kept per-tab-durable in localStorage, validated fresh against
+  // live membership by the server on every request, never trusted blindly.
+  var workspaceId = null;
+  try { workspaceId = window.localStorage.getItem(WORKSPACE_KEY); } catch (e) { workspaceId = null; }
+
+  function setWorkspace(value) {
+    workspaceId = value || null;
+    try {
+      if (value) window.localStorage.setItem(WORKSPACE_KEY, value);
+      else window.localStorage.removeItem(WORKSPACE_KEY);
     } catch (e) { /* private browsing: the session lasts this tab, which is fine */ }
   }
 
@@ -214,6 +232,7 @@
     var headers = { Accept: 'application/json' };
     if (opts.body && !(opts.body instanceof FormData)) headers['Content-Type'] = 'application/json';
     if (token) headers.Authorization = 'Bearer ' + token;
+    if (workspaceId) headers['X-Workspace-Id'] = workspaceId;
 
     var res;
     try {
@@ -877,6 +896,22 @@
         });
         setToken(result.token);
         el('login-password').value = '';
+
+        // Signing in to accept a workspace invite — set by consumeInviteLink
+        // when the link named an address that already has an account.
+        // Registering with an invited address already joins server-side
+        // (POST /register), so this is the one path that still needs it.
+        if (pendingInviteToken) {
+          try {
+            var accepted = await authApi.post('/invite/accept', { token: pendingInviteToken });
+            setWorkspace(accepted.team_id);
+            window.location.hash = '#/dashboard';
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+          pendingInviteToken = null;
+        }
+
         await enterApp();
       } catch (err) {
         gateError('login-error', err.message);
@@ -1030,6 +1065,78 @@
     document.head.appendChild(script);
   }
 
+  // ── Role ──────────────────────────────────────────────────────────────
+  // /auth/me returns `permissions` — the same list src/services/permissions.js
+  // computes server-side (actionsFor) — so the browser draws the same model
+  // the API enforces rather than keeping a second copy of the rules by hand.
+  // This is presentation only: every one of these actions is re-checked on
+  // the server regardless of what the browser shows or hides.
+  function can(action) {
+    var perms = RE.state.user && RE.state.user.permissions;
+    return Array.isArray(perms) && perms.indexOf(action) !== -1;
+  }
+
+  // Which top-level nav items each role sees, straight out of the product
+  // spec's own "X sees / No: Y" lists. This is deliberately NOT derived
+  // purely from `can()` — e.g. a Sales Executive's own tasks already surface
+  // on their Dashboard, so the standalone Tasks screen stays off their nav
+  // even though GET /tasks itself is open to every role. Absent from this
+  // map (owner, sales_director, and no role at all — a solo account) means
+  // "everything", since neither role has a restricted list in the spec.
+  var NAV_BY_ROLE = {
+    sales_rep: ['dashboard', 'customers', 'reservations', 'commissions', 'projects', 'units'],
+    collections: ['dashboard', 'at-risk', 'payments', 'customers', 'tasks'],
+    documentation: ['dashboard', 'documents', 'customers', 'reservations'],
+  };
+
+  function applyNavForRole(role) {
+    var visible = NAV_BY_ROLE[role] || null; // null = everything
+    qsa('[data-nav]').forEach(function (link) {
+      var show = !visible || visible.indexOf(link.dataset.nav) !== -1;
+      link.classList.toggle('hidden', !show);
+    });
+    // A nav-group whose every item just hid should not leave its label
+    // floating above an empty space.
+    qsa('.nav-group').forEach(function (group) {
+      var anyVisible = qsa('[data-nav]', group).some(function (link) {
+        return !link.classList.contains('hidden');
+      });
+      group.classList.toggle('hidden', !anyVisible);
+    });
+  }
+
+  // The sidebar switcher — only drawn once there is something to switch
+  // between. Reloads the whole app into the new workspace's context rather
+  // than trying to patch the current screen's state in place: role, org id
+  // and every permission the sidebar itself depends on all change at once.
+  function renderWorkspaceSwitcher(me) {
+    var container = el('workspace-switcher');
+    if (!container) return;
+
+    if (!me.workspaces || me.workspaces.length < 2) {
+      container.classList.add('hidden');
+      container.innerHTML = '';
+      return;
+    }
+
+    container.classList.remove('hidden');
+    container.innerHTML =
+      '<div class="workspace-switcher-label">Workspace</div>' +
+      '<select id="workspace-select">' +
+        me.workspaces.map(function (w) {
+          return '<option value="' + esc(w.team_id) + '"' + (w.is_current ? ' selected' : '') + '>' +
+            esc(w.name) + ' — ' + esc(w.role_label) + '</option>';
+        }).join('') +
+      '</select>';
+
+    el('workspace-select').addEventListener('change', async function (e) {
+      setWorkspace(e.target.value);
+      currentScreen = null; // force a full render — everything below depends on the new org
+      await enterApp();
+      toast('Switched workspace.', 'ok');
+    });
+  }
+
   // ── Enter / leave ─────────────────────────────────────────────────────
   // A stored token is a claim, not proof. /auth/me is what turns it into a
   // session: until the server confirms who this is, the app is not shown at
@@ -1056,9 +1163,12 @@
     }
 
     RE.state.user = me;
+    applyNavForRole(me.role);
+    renderWorkspaceSwitcher(me);
 
     el('who-name').textContent = me.full_name || me.email;
-    el('who-org').textContent = me.company_name || (me.is_team ? 'Team workspace' : 'Solo workspace');
+    el('who-org').textContent = (me.company_name || (me.is_team ? 'Team workspace' : 'Solo workspace'))
+      + (me.role_label ? ' · ' + me.role_label : '');
     el('who-initials').textContent = initials(me.full_name, me.email);
     el('dateline').textContent = new Date().toLocaleDateString('en-NG', {
       weekday: 'long', day: 'numeric', month: 'long',
@@ -1179,8 +1289,85 @@
       return;
     }
 
+    // #/accept-invite?token=… is the emailed team-invite link.
+    if (window.location.hash.indexOf('#/accept-invite') === 0) {
+      await consumeInviteLink();
+      return;
+    }
+
     if (token) await enterApp();
     else showGate();
+  }
+
+  // Not consumed inline here for a signed-out visitor — registering with the
+  // invited address already joins them server-side (POST /register calls
+  // inviteService.claimPendingInvites by email), so the only case this
+  // variable is actually used for is somebody who already has an account and
+  // needs to sign in before POST /invite/accept can attach it to them.
+  var pendingInviteToken = null;
+
+  async function consumeInviteLink() {
+    el('gate').hidden = false;
+
+    var inviteToken = (/[?&#]token=([^&]+)/.exec(window.location.hash) || [])[1];
+    if (!inviteToken) {
+      showGateForm('form-login');
+      gateError('login-error', 'This invitation link is incomplete. Ask whoever invited you to send it again.');
+      return;
+    }
+    inviteToken = decodeURIComponent(inviteToken);
+
+    // Already signed in — the common case for somebody invited to a SECOND
+    // workspace they already use Archta with. Nothing to show; just attach it
+    // and go straight to the workspace it invited them into.
+    if (token) {
+      try {
+        var accepted = await authApi.post('/invite/accept', { token: inviteToken });
+        setWorkspace(accepted.team_id);
+        window.location.hash = '#/dashboard';
+        await enterApp();
+        toast(accepted.already_member ? 'You are already in that workspace.' : 'Joined the workspace.', 'ok');
+      } catch (err) {
+        await enterApp();
+        toast(err.message, 'err');
+      }
+      return;
+    }
+
+    // Not signed in: preview the invite (unauthenticated — GET /auth/invite/:token)
+    // so the sign-in/register screen can say whose workspace this is and as
+    // what, before asking for a password.
+    var preview;
+    try {
+      preview = await authApi('/invite/' + encodeURIComponent(inviteToken));
+    } catch (err) {
+      preview = { valid: false };
+    }
+
+    if (!preview.valid) {
+      showGateForm('form-login');
+      gateError('login-error', preview.reason === 'expired'
+        ? 'That invitation has expired. Ask whoever invited you to send a new one.'
+        : 'That invitation link is not valid.');
+      return;
+    }
+
+    pendingInviteToken = inviteToken;
+    var invitedAs = preview.team_name
+      ? 'Invited to ' + preview.team_name + ' as ' + preview.role_label + '.'
+      : 'You have been invited as ' + preview.role_label + '.';
+
+    if (preview.already_active) {
+      // Already a member — this link is just a way back in, not an invite
+      // waiting to be accepted.
+      showGateForm('form-login');
+      el('login-email').value = preview.email || '';
+      el('gate-login-sub').textContent = invitedAs + ' Sign in to continue.';
+    } else {
+      showGateForm('form-register');
+      el('reg-email').value = preview.email || '';
+      el('gate-register-sub').textContent = invitedAs + ' Create your account to join.';
+    }
   }
 
   async function consumeVerificationLink() {
@@ -1220,6 +1407,7 @@
     request: request,
     screens: {},
     state: { user: null, config: {} },
+    can: can,
 
     go: go,
     reload: reload,

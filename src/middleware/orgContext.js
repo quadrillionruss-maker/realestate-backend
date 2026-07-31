@@ -9,6 +9,7 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const env = require('../config/env'); // also loads .env for everything downstream
+const { normalizeRole } = require('../services/permissions');
 
 // Service-role client: bypasses RLS, so EVERY query in this service filters
 // organization_id explicitly. RLS stays enabled as the second lock (see
@@ -115,22 +116,17 @@ function orgContext(req, res, next) {
   req.orgId = orgId;
   req.userId = req.user.id;
   // Solo accounts own their workspace outright; team accounts carry the role
-  // read from team_members during authentication.
-  req.orgRole = req.user.role || 'owner';
+  // read from team_members during authentication. normalizeRole is what keeps
+  // that honest — a null (solo) reads as 'owner', and anything unrecognised
+  // reads as the least-privileged role rather than being trusted.
+  req.orgRole = normalizeRole(req.user.role);
   next();
 }
 
-// A gate for the handful of actions any team member could otherwise reach:
-// waiving debt, deleting cascading records, changing commission payouts,
-// editing workspace settings. Mounted per-route, after orgContext, wherever
-// the action is meant to be owner/admin-only rather than any-member-only.
-function requireRole(roles) {
-  return function (req, res, next) {
-    if (!roles.includes(req.orgRole)) {
-      return res.status(403).json({ error: `Only ${roles.join(' or ')} can do this.` });
-    }
-    next();
-  };
-}
+// Role gating lives in src/middleware/rbac.js (requirePermission) and the
+// rules it reads live in src/services/permissions.js. There is deliberately no
+// requireRole(['owner','admin']) helper any more: a route naming its own role
+// list is a second copy of the access model, and the second copy is the one
+// that goes stale.
 
-module.exports = { orgContext, resolveOrgId, requireRole, supabaseAdmin, supabaseRaw, SOFT_DELETABLE };
+module.exports = { orgContext, resolveOrgId, supabaseAdmin, supabaseRaw, SOFT_DELETABLE };

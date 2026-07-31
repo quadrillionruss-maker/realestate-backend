@@ -23,7 +23,8 @@
 // needs before trusting a spreadsheet they last edited in 2024.
 
 const express = require('express');
-const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
+const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission } = require('../middleware/rbac');
 const { parseCsvToObjects, parseAmount, parseDate } = require('../utils/csv');
 const { createPlanWithSchedule } = require('../services/installmentService');
 const { audit } = require('../services/auditService');
@@ -62,7 +63,7 @@ router.get('/template/:kind', (req, res) => {
 const quote = (value) => /[",\n]/.test(String(value)) ? `"${String(value).replace(/"/g, '""')}"` : String(value);
 
 // ── Units into one project ────────────────────────────────────────────────
-router.post('/units', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.post('/units', requirePermission('imports.write'), async (req, res, next) => {
   try {
     const { project_id, csv, dry_run } = req.body || {};
     if (!project_id) return res.status(400).json({ error: 'project_id is required' });
@@ -124,7 +125,7 @@ router.post('/units', requireRole(['owner', 'admin']), async (req, res, next) =>
 });
 
 // ── Buyers, with their unit, plan and payment history ─────────────────────
-router.post('/customers', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.post('/customers', requirePermission('imports.write'), async (req, res, next) => {
   try {
     const { csv, project_id, dry_run } = req.body || {};
     if (!csv) return res.status(400).json({ error: 'csv is required' });

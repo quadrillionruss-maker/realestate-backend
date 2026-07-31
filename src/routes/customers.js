@@ -1,12 +1,14 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission, isOwnRecordsOnly } = require('../middleware/rbac');
+const { canAccess } = require('../services/permissions');
 const { issuePortalToken, portalUrl } = require('../services/portalService');
 const notify = require('../services/notificationService');
 const { audit } = require('../services/auditService');
 const { sanitizeSearchTerm } = require('../utils/searchFilter');
 const router = express.Router();
 
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission('customers.read'), async (req, res, next) => {
   try {
     // Unbounded until now — a developer several years in has thousands of
     // buyers, and every one of them came back on every load of this screen.
@@ -20,6 +22,14 @@ router.get('/', async (req, res, next) => {
       .eq('organization_id', req.orgId)
       .order('created_at', { ascending: false })
       .limit(limit);
+
+    // A Sales Executive sees only the buyers THEY added. Everyone else who
+    // can open this screen at all (owner, sales director, collections,
+    // documentation) sees every buyer — created_by_user_id is provenance for
+    // them, not an access filter.
+    if (isOwnRecordsOnly(req.orgRole)) {
+      query = query.eq('created_by_user_id', req.userId);
+    }
 
     if (req.query.search) {
       // Sales staff search by whatever they have to hand — a name, the phone
@@ -36,7 +46,7 @@ router.get('/', async (req, res, next) => {
 
 // Full buyer history: every reservation, its plan, and every installment.
 // This is the screen a rep opens with the customer on the phone.
-router.get('/:id', async (req, res, next) => {
+router.get('/:id', requirePermission('customers.read'), async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('re_customers')
@@ -56,10 +66,44 @@ router.get('/:id', async (req, res, next) => {
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Customer not found' });
 
-    data.unallocated_credit = await findUnallocatedCredit(req.orgId, data);
+    // Same boundary as the list above: a Sales Executive who is not this
+    // buyer's own rep gets the same 404 a stranger would, not a 403 that
+    // confirms the buyer exists.
+    if (isOwnRecordsOnly(req.orgRole) && data.created_by_user_id !== req.userId) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    if (canAccess(req.orgRole, 'financial.view')) {
+      data.unallocated_credit = await findUnallocatedCredit(req.orgId, data);
+    } else {
+      // Documentation: "Reservations (read only — status only)". Every
+      // amount is stripped rather than the nested plan/schedule being
+      // omitted outright, so the screen still shows which unit and which
+      // installment is due WHEN without saying how much it is due for.
+      stripFinancials(data);
+    }
+
     res.json(data);
   } catch (e) { next(e); }
 });
+
+// Documentation sees a buyer's reservation shape (which unit, which
+// installment, its status and date) without a single naira figure — see
+// permissions.js's financial.view. Mutates in place; called only on the
+// single-customer response, never the list (re_customers itself carries no
+// amount of its own).
+function stripFinancials(customer) {
+  for (const reservation of customer.re_reservations || []) {
+    if (reservation.re_units) reservation.re_units.list_price = null;
+    const plans = Array.isArray(reservation.re_installment_plans)
+      ? reservation.re_installment_plans
+      : [reservation.re_installment_plans].filter(Boolean);
+    for (const plan of plans) {
+      plan.total_amount = null;
+      for (const row of plan.re_installment_schedule || []) row.amount_due = null;
+    }
+  }
+}
 
 // A payment that overpaid its installment leaves a real credit. This reads
 // it from the database rather than the per-device reminder the UI used to
@@ -105,7 +149,7 @@ async function findUnallocatedCredit(orgId, customer) {
   return { payment_id: live.id, amount: Number(live.overpayment) };
 }
 
-router.post('/', async (req, res, next) => {
+router.post('/', requirePermission('customers.create'), async (req, res, next) => {
   try {
     const { full_name, email, phone, source } = req.body || {};
     if (!full_name) return res.status(400).json({ error: 'full_name is required' });
@@ -118,6 +162,12 @@ router.post('/', async (req, res, next) => {
         email: email || null,
         phone: phone || null,
         source: source || null,
+        // Who added this buyer — the fact "a Sales Executive sees only their
+        // own buyers" is built on (migrations/016). Recorded for every role,
+        // not only sales_rep: it is provenance either way, and an owner or
+        // director who adds a buyer today should not read as "nobody" if a
+        // rep is added to the workspace tomorrow.
+        created_by_user_id: req.userId,
       })
       .select()
       .single();
@@ -135,7 +185,7 @@ router.post('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.patch('/:id', async (req, res, next) => {
+router.patch('/:id', requirePermission('customers.update'), async (req, res, next) => {
   try {
     const { full_name, email, phone, source } = req.body || {};
     const updates = {};
@@ -147,13 +197,18 @@ router.patch('/:id', async (req, res, next) => {
       return res.status(400).json({ error: 'No updatable fields provided' });
     }
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('re_customers')
       .update(updates)
       .eq('id', req.params.id)
-      .eq('organization_id', req.orgId)
-      .select()
-      .maybeSingle();
+      .eq('organization_id', req.orgId);
+
+    // A Sales Executive can only edit their own buyers — enforced as part of
+    // the update's own WHERE clause, so someone else's row simply doesn't
+    // match rather than needing a separate read-then-check.
+    if (isOwnRecordsOnly(req.orgRole)) query = query.eq('created_by_user_id', req.userId);
+
+    const { data, error } = await query.select().maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Customer not found' });
     res.json(data);
@@ -165,14 +220,16 @@ router.patch('/:id', async (req, res, next) => {
 // have I paid", "when is the next one" and "can I have my allocation letter"
 // without anyone picking up a phone — see src/services/portalService.js for
 // why it is a link rather than an account.
-router.post('/:id/portal-link', async (req, res, next) => {
+router.post('/:id/portal-link', requirePermission('customers.portalAccess'), async (req, res, next) => {
   try {
-    const { data: customer, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('re_customers')
-      .select('id, organization_id, full_name, email, phone, portal_token_version')
+      .select('id, organization_id, full_name, email, phone, portal_token_version, created_by_user_id')
       .eq('id', req.params.id)
-      .eq('organization_id', req.orgId)
-      .maybeSingle();
+      .eq('organization_id', req.orgId);
+    if (isOwnRecordsOnly(req.orgRole)) query = query.eq('created_by_user_id', req.userId);
+
+    const { data: customer, error } = await query.maybeSingle();
     if (error) throw error;
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
@@ -219,11 +276,14 @@ router.post('/:id/portal-link', async (req, res, next) => {
 
 // The revoke button. Bumping the version invalidates every link ever issued to
 // this buyer — which matters, because links get forwarded.
-router.post('/:id/portal-revoke', async (req, res, next) => {
+router.post('/:id/portal-revoke', requirePermission('customers.portalAccess'), async (req, res, next) => {
   try {
-    const { data: customer } = await supabaseAdmin
-      .from('re_customers').select('id, full_name, portal_token_version')
-      .eq('id', req.params.id).eq('organization_id', req.orgId).maybeSingle();
+    let query = supabaseAdmin
+      .from('re_customers').select('id, full_name, portal_token_version, created_by_user_id')
+      .eq('id', req.params.id).eq('organization_id', req.orgId);
+    if (isOwnRecordsOnly(req.orgRole)) query = query.eq('created_by_user_id', req.userId);
+
+    const { data: customer } = await query.maybeSingle();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
     const { data, error } = await supabaseAdmin

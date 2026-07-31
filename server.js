@@ -105,7 +105,11 @@ const corsOptions = {
   // (/reservations/:id/status, /tasks/:id/status, /documents/:id/status) uses
   // it, and the browser preflight fails without it.
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  // X-Workspace-Id names WHICH of a person's workspaces this request is in.
+  // It is not optional for anyone who belongs to more than one: the browser
+  // sends it on every call, and a preflight that rejects it would leave a
+  // multi-workspace user permanently in whichever one the server picked.
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Workspace-Id'],
   credentials: true,
 };
 

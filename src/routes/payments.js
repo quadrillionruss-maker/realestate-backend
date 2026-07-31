@@ -1,5 +1,6 @@
 const express = require('express');
-const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
+const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission } = require('../middleware/rbac');
 const { initInstallmentPayment, recordManualPayment, reallocateOverpayment, voidPayment } = require('../services/paystackService');
 const { onPaymentRecorded } = require('../services/paymentEvents');
 const { generateReceipt } = require('../services/receiptService');
@@ -12,7 +13,7 @@ const SCHEDULE_STATUSES = ['pending', 'paid', 'overdue', 'waived'];
 
 // Most recent first. Capped rather than paginated for v1 — a developer with
 // 500 buyers reviews this month's money, not three years of it.
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission('payments.read'), async (req, res, next) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 100, 500);
 
@@ -37,7 +38,7 @@ router.get('/', async (req, res, next) => {
 // actually browsing. Before this existed, the only way to find the schedule id
 // you needed was to open a customer and read it out of their nested history,
 // which is why recording a payment required Postman.
-router.get('/schedule', async (req, res, next) => {
+router.get('/schedule', requirePermission('payments.schedule'), async (req, res, next) => {
   try {
     let query = supabaseAdmin
       .from('re_installment_schedule')
@@ -100,7 +101,7 @@ router.get('/schedule', async (req, res, next) => {
 });
 
 // Paystack link for one installment, charging whatever is still outstanding.
-router.post('/:scheduleId/init', async (req, res, next) => {
+router.post('/:scheduleId/init', requirePermission('payments.init'), async (req, res, next) => {
   try {
     const { customer_email } = req.body || {};
     if (!customer_email) return res.status(400).json({ error: 'customer_email is required' });
@@ -122,7 +123,7 @@ router.post('/:scheduleId/init', async (req, res, next) => {
 // Offline payment: bank transfer, cash or POS. Bank transfer is how most
 // Nigerian off-plan installments actually arrive, so this is not a fallback
 // path — it is the common one.
-router.post('/:scheduleId/record', async (req, res, next) => {
+router.post('/:scheduleId/record', requirePermission('payments.record'), async (req, res, next) => {
   try {
     const { amount, method, reference, payer_name } = req.body || {};
     if (amount == null) return res.status(400).json({ error: 'amount is required' });
@@ -155,7 +156,7 @@ router.post('/:scheduleId/record', async (req, res, next) => {
 // treating the credit as a second real-world transfer — see
 // paystackService.reallocateOverpayment for why this is not just another
 // call to /record.
-router.post('/:paymentId/reallocate', async (req, res, next) => {
+router.post('/:paymentId/reallocate', requirePermission('payments.reallocate'), async (req, res, next) => {
   try {
     const { to_schedule_id } = req.body || {};
     if (!to_schedule_id) return res.status(400).json({ error: 'to_schedule_id is required' });
@@ -180,10 +181,10 @@ router.post('/:paymentId/reallocate', async (req, res, next) => {
 
 // Correcting a payment entered with the wrong amount — not a delete, and not
 // an edit of the original row (see paystackService.voidPayment for why): the
-// mistake stays visible, it just stops counting. Owner/admin-gated for the
-// same reason waiving debt is: this is a direct, unilateral change to what a
-// buyer is recorded as owing.
-router.post('/:paymentId/void', requireRole(['owner', 'admin']), async (req, res, next) => {
+// mistake stays visible, it just stops counting. Owner/Sales Director-gated
+// for the same reason voiding stays at that tier and not collections': this
+// is a direct, unilateral change to what a buyer is recorded as owing.
+router.post('/:paymentId/void', requirePermission('payments.void'), async (req, res, next) => {
   try {
     const reason = String(req.body?.reason || '').trim();
     if (!reason) return res.status(400).json({ error: 'A reason is required.' });
@@ -221,8 +222,9 @@ router.post('/:paymentId/void', requireRole(['owner', 'admin']), async (req, res
 // Writing off an installment the developer has decided not to collect — a
 // goodwill gesture, a dispute settled another way, a bad debt finally
 // accepted. Requires a reason: unlike a payment, there is no receipt behind
-// this to explain later why the money stopped being owed.
-router.patch('/:scheduleId/waive', requireRole(['owner', 'admin']), async (req, res, next) => {
+// this to explain later why the money stopped being owed. Owner only — even
+// a Sales Director cannot write off debt.
+router.patch('/:scheduleId/waive', requirePermission('payments.waive'), async (req, res, next) => {
   try {
     const reason = String(req.body?.reason || '').trim();
     if (!reason) return res.status(400).json({ error: 'A reason is required.' });
@@ -264,7 +266,7 @@ router.patch('/:scheduleId/waive', requireRole(['owner', 'admin']), async (req, 
 // each render at its own versioned storage path — so this doubles as "the
 // buyer lost it, send it again" without producing a second receipt for one
 // payment, and without the earlier render's exact bytes being lost.
-router.post('/:id/receipt', async (req, res, next) => {
+router.post('/:id/receipt', requirePermission('payments.receipt'), async (req, res, next) => {
   try {
     const result = await generateReceipt(req.orgId, req.params.id);
     if (result.notFound) return res.status(404).json({ error: 'Payment not found' });
@@ -288,7 +290,7 @@ router.post('/:id/receipt', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.get('/:id/receipt', async (req, res, next) => {
+router.get('/:id/receipt', requirePermission('payments.receipt'), async (req, res, next) => {
   try {
     const { data: doc } = await supabaseAdmin
       .from('re_documents')

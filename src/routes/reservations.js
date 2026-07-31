@@ -1,5 +1,6 @@
 const express = require('express');
-const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
+const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { createPlanWithSchedule } = require('../services/installmentService');
 const { assess, preview, restructure } = require('../services/restructureService');
 const { assessTenancy, renewTenancy } = require('../services/rentalService');
@@ -14,7 +15,7 @@ const RESERVATION_STATUSES = ['reserved', 'confirmed', 'cancelled', 'completed']
 // other two.
 const PROPERTY_TYPES = ['off_plan', 'outright', 'rental'];
 
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission('reservations.read'), async (req, res, next) => {
   try {
     // Unbounded until now — every reservation ever made, on every load of
     // this screen, for a developer years into selling several projects.
@@ -29,6 +30,14 @@ router.get('/', async (req, res, next) => {
 
     if (req.query.status) query = query.eq('status', req.query.status);
     if (req.query.property_type) query = query.eq('property_type', req.query.property_type);
+
+    // A Sales Executive sees only their own book — everyone else who can
+    // open this screen at all (owner, sales director, documentation) sees
+    // every reservation.
+    if (isOwnRecordsOnly(req.orgRole)) {
+      const repIds = await salesRepIdsFor(req);
+      query = query.in('sales_rep_id', repIds.length ? repIds : [MATCHES_NOTHING]);
+    }
 
     const { data, error } = await query;
     if (error) throw error;
@@ -55,12 +64,30 @@ router.get('/', async (req, res, next) => {
 // frequency = 'monthly'. The frontend does that multiplication before it
 // calls here (screens.js), so this handler never needs to know "rent" as a
 // concept distinct from "plan".
-router.post('/', async (req, res, next) => {
+router.post('/', requirePermission('reservations.create'), async (req, res, next) => {
   try {
-    const { unit_id, customer_id, sales_rep_id, plan } = req.body || {};
+    const { unit_id, customer_id, plan } = req.body || {};
+    let { sales_rep_id } = req.body || {};
     const property_type = req.body?.property_type || 'off_plan';
     const tenancy_start_date = req.body?.tenancy_start_date || null;
     const tenancy_end_date = req.body?.tenancy_end_date || null;
+
+    // A Sales Executive's own reservations are what makes them theirs — the
+    // filter above reads sales_rep_id, so a rep who could set it to anything
+    // (a colleague's id, or leave it blank) could hand their own sale away or
+    // vanish it from their own book. Their identity wins over whatever the
+    // request sent, and if they have no re_sales_reps row yet — invited but
+    // not yet tagged as a rep by an owner or director — there is nothing to
+    // attach the sale to.
+    if (isOwnRecordsOnly(req.orgRole)) {
+      const repIds = await salesRepIdsFor(req);
+      if (!repIds.length) {
+        return res.status(403).json({
+          error: 'You have not been set up as a sales rep yet — ask an owner or the Head of Sales to add you.',
+        });
+      }
+      [sales_rep_id] = repIds;
+    }
 
     if (!unit_id || !customer_id) {
       return res.status(400).json({ error: 'unit_id and customer_id are required' });
@@ -210,7 +237,7 @@ router.post('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.patch('/:id/status', async (req, res, next) => {
+router.patch('/:id/status', requirePermission('reservations.updateStatus'), async (req, res, next) => {
   try {
     const { status } = req.body || {};
     if (!RESERVATION_STATUSES.includes(status)) {
@@ -219,11 +246,20 @@ router.patch('/:id/status', async (req, res, next) => {
 
     const { data: existing } = await supabaseAdmin
       .from('re_reservations')
-      .select('id, unit_id, status, property_type')
+      .select('id, unit_id, status, property_type, sales_rep_id')
       .eq('id', req.params.id)
       .eq('organization_id', req.orgId)
       .maybeSingle();
     if (!existing) return res.status(404).json({ error: 'Reservation not found' });
+
+    // Same boundary as the list above: a Sales Executive may change the
+    // status of their own sale, never a colleague's.
+    if (isOwnRecordsOnly(req.orgRole)) {
+      const repIds = await salesRepIdsFor(req);
+      if (!existing.sales_rep_id || !repIds.includes(existing.sales_rep_id)) {
+        return res.status(404).json({ error: 'Reservation not found' });
+      }
+    }
 
     const { data: reservation, error } = await supabaseAdmin
       .from('re_reservations')
@@ -282,7 +318,7 @@ router.patch('/:id/status', async (req, res, next) => {
 
 // What would a restructure look like? Nothing is written, so this is safe to
 // call while the rep is still on the phone agreeing the terms.
-router.get('/:id/restructure', async (req, res, next) => {
+router.get('/:id/restructure', requirePermission('reservations.restructure'), async (req, res, next) => {
   try {
     const state = await assess(req.orgId, req.params.id);
     if (state.notFound) return res.status(404).json({ error: 'Reservation not found' });
@@ -323,7 +359,7 @@ router.get('/:id/restructure', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/:id/restructure', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.post('/:id/restructure', requirePermission('reservations.restructure'), async (req, res, next) => {
   try {
     const { number_of_installments, frequency, start_date, reason } = req.body || {};
     if (!number_of_installments || !start_date) {
@@ -350,7 +386,7 @@ router.post('/:id/restructure', requireRole(['owner', 'admin']), async (req, res
 // whether to renew or end it. This is the "renew" side of that decision —
 // "end" is just the existing status transition above (cancelled/completed).
 
-router.get('/:id/renew-tenancy', async (req, res, next) => {
+router.get('/:id/renew-tenancy', requirePermission('reservations.renewTenancy'), async (req, res, next) => {
   try {
     const state = await assessTenancy(req.orgId, req.params.id);
     if (state.notFound) return res.status(404).json({ error: 'Reservation not found' });
@@ -366,7 +402,7 @@ router.get('/:id/renew-tenancy', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/:id/renew-tenancy', requireRole(['owner', 'admin']), async (req, res, next) => {
+router.post('/:id/renew-tenancy', requirePermission('reservations.renewTenancy'), async (req, res, next) => {
   try {
     const { monthly_rent, duration_months, start_date, reason } = req.body || {};
     if (!monthly_rent || !duration_months) {

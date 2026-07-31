@@ -1,5 +1,6 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { generateDocument, getDownloadUrl } = require('../services/documentService');
 const { audit } = require('../services/auditService');
 const router = express.Router();
@@ -12,13 +13,32 @@ const router = express.Router();
 const DOC_TYPES = ['allocation_letter', 'deed_of_assignment', 'lease_agreement', 'receipt', 'other'];
 const DOC_STATUSES = ['pending', 'generated', 'sent', 'signed'];
 
-router.get('/', async (req, res, next) => {
+// A Sales Executive's own reservation ids — documents are scoped to them
+// through reservation_id, not a column of their own, so this is one extra
+// read rather than a filterable column. Returns null for every other role,
+// meaning "don't filter" to the two call sites below.
+async function ownReservationIdsFor(req) {
+  if (!isOwnRecordsOnly(req.orgRole)) return null;
+  const repIds = await salesRepIdsFor(req);
+  if (!repIds.length) return [];
+  const { data } = await supabaseAdmin
+    .from('re_reservations').select('id')
+    .eq('organization_id', req.orgId).in('sales_rep_id', repIds);
+  return (data || []).map((r) => r.id);
+}
+
+router.get('/', requirePermission('documents.read'), async (req, res, next) => {
   try {
     let query = supabaseAdmin
       .from('re_documents')
       .select('*, re_reservations(re_customers(full_name), re_units(unit_number, re_projects(name)))')
       .eq('organization_id', req.orgId)
       .order('created_at', { ascending: false });
+
+    const ownReservationIds = await ownReservationIdsFor(req);
+    if (ownReservationIds !== null) {
+      query = query.in('reservation_id', ownReservationIds.length ? ownReservationIds : [MATCHES_NOTHING]);
+    }
 
     if (req.query.status) query = query.eq('status', req.query.status);
     if (req.query.doc_type) query = query.eq('doc_type', req.query.doc_type);
@@ -30,7 +50,12 @@ router.get('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/', async (req, res, next) => {
+// "Request a document" (Sales Executive) and "raise the row I'm about to
+// generate" (Documentation) are the same insert — status stays 'pending'
+// either way, and POST /:id/generate below is the separate, PAPERWORK-tier
+// step that actually renders it. A rep may only request one against their
+// own reservation.
+router.post('/', requirePermission('documents.create'), async (req, res, next) => {
   try {
     const { reservation_id, doc_type } = req.body || {};
     if (!reservation_id || !doc_type) {
@@ -40,9 +65,14 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ error: `doc_type must be one of: ${DOC_TYPES.join(', ')}` });
     }
 
-    const { data: reservation } = await supabaseAdmin
+    let reservationQuery = supabaseAdmin
       .from('re_reservations').select('id')
-      .eq('id', reservation_id).eq('organization_id', req.orgId).maybeSingle();
+      .eq('id', reservation_id).eq('organization_id', req.orgId);
+    if (isOwnRecordsOnly(req.orgRole)) {
+      const repIds = await salesRepIdsFor(req);
+      reservationQuery = reservationQuery.in('sales_rep_id', repIds.length ? repIds : [MATCHES_NOTHING]);
+    }
+    const { data: reservation } = await reservationQuery.maybeSingle();
     if (!reservation) return res.status(404).json({ error: 'Reservation not found' });
 
     const { data, error } = await supabaseAdmin
@@ -73,8 +103,10 @@ router.post('/', async (req, res, next) => {
 });
 
 // Render the allocation letter to PDF, store it in a private Storage bucket,
-// and return a short-lived signed URL.
-router.post('/:id/generate', async (req, res, next) => {
+// and return a short-lived signed URL. Owner, Sales Director or
+// Documentation only — a Sales Executive can request a document above but
+// never issues one themselves.
+router.post('/:id/generate', requirePermission('documents.generate'), async (req, res, next) => {
   try {
     const result = await generateDocument(req.orgId, req.params.id);
 
@@ -102,7 +134,7 @@ router.post('/:id/generate', async (req, res, next) => {
 });
 
 // Signed links expire, so the link is minted on request rather than stored.
-router.get('/:id/download', async (req, res, next) => {
+router.get('/:id/download', requirePermission('documents.download'), async (req, res, next) => {
   try {
     const result = await getDownloadUrl(req.orgId, req.params.id);
     if (result.notFound) return res.status(404).json({ error: 'Document not found' });
@@ -113,7 +145,7 @@ router.get('/:id/download', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.patch('/:id/status', async (req, res, next) => {
+router.patch('/:id/status', requirePermission('documents.updateStatus'), async (req, res, next) => {
   try {
     const { status } = req.body || {};
     if (!DOC_STATUSES.includes(status)) {

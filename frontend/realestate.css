@@ -424,6 +424,30 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   flex-shrink: 0;
 }
 
+/* Only rendered when a person belongs to more than one workspace — a plain
+   select, not a custom dropdown, so it inherits the OS's own accessibility
+   for free rather than reimplementing a listbox for something opened rarely. */
+.workspace-switcher { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+
+.workspace-switcher-label {
+  font-size: 9.5px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 6px;
+}
+
+.workspace-switcher select {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  padding: 7px 9px;
+}
+
 .nav { padding: 14px 10px; flex: 1; }
 
 .nav-group + .nav-group { margin-top: 18px; }
@@ -1389,6 +1413,66 @@ table.data td.num, table.data th.num {
 .bars .bar { width: 100%; background: var(--gold-deep); border-radius: 3px 3px 0 0; min-height: 2px; transition: height .5s var(--ease), background .15s; }
 .bars > div:hover .bar { background: var(--gold); }
 .bars .bar-label { font-family: var(--mono); font-size: 9px; color: var(--text-faint); white-space: nowrap; }
+
+/* Team logo — a square preview with a "Change" overlay that only appears on
+   hover, so the logo itself is what a workspace sees day to day rather than
+   a permanently-visible upload control. */
+.logo-upload {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.logo-upload img { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+.logo-upload-empty {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: center;
+  padding: 6px;
+}
+
+.logo-upload-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(9, 9, 9, 0.72);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  opacity: 0;
+  transition: opacity .15s var(--ease);
+}
+
+.logo-upload:hover .logo-upload-overlay,
+.logo-upload:focus-visible .logo-upload-overlay { opacity: 1; }
+
+.logo-upload.is-working .logo-upload-overlay { opacity: 1; }
+.logo-upload.is-working .logo-upload-overlay::after {
+  content: '';
+  position: absolute;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--text-faint);
+  border-top-color: var(--gold);
+  animation: spin .6s linear infinite;
+}
+.logo-upload.is-working .logo-upload-overlay { font-size: 0; }
 
 /* ── 14. Utilities, empty states, motion, responsive ───────────────────── */
 .empty { padding: 34px 20px; text-align: center; color: var(--text-faint); font-size: 13px; }
