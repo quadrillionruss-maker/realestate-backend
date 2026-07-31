@@ -16,6 +16,9 @@
 
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { auditSystem } = require('./auditService');
+const { mapWithConcurrency } = require('../utils/concurrency');
+
+const ESCALATION_CONCURRENCY = 8;
 
 // Thresholds are counts of overdue installments. They are deliberately
 // conservative: escalating too fast costs a developer a buyer who was simply
@@ -108,23 +111,37 @@ async function sweepEscalations(orgId = null) {
   let raised = 0;
   const now = new Date().toISOString();
 
-  for (const reservation of reservations || []) {
+  // Each reservation moves to its own target stage, so this isn't one bulk
+  // UPDATE the way the promise sweep's is — but the update and its audit
+  // entry for one buyer have nothing to do with the next buyer's, and this
+  // sweep runs across every organization in one call, so hundreds of these
+  // used to go out strictly one at a time.
+  await mapWithConcurrency(reservations || [], ESCALATION_CONCURRENCY, async (reservation) => {
     // A cancelled reservation has no arrears worth escalating.
-    if (reservation.status === 'cancelled' || reservation.status === 'completed') continue;
+    if (reservation.status === 'cancelled' || reservation.status === 'completed') return;
 
-    const { count } = overdueByReservation.get(reservation.id);
+    const overdue = overdueByReservation.get(reservation.id);
+    // Defense in depth: this id list came from an org-scoped query already
+    // (UUID primary keys aren't guessable, so this isn't exploitable today),
+    // but nothing otherwise re-confirms that the row this update is about to
+    // touch belongs to the org its own count was computed against — cheap
+    // to assert explicitly rather than trust two queries to agree forever.
+    if (!overdue || overdue.orgId !== reservation.organization_id) return;
+
+    const { count } = overdue;
     const target = stageForOverdueCount(count);
     const current = describeStage(reservation.escalation_stage);
 
-    if (STAGES.indexOf(target) <= STAGES.indexOf(current)) continue;
+    if (STAGES.indexOf(target) <= STAGES.indexOf(current)) return;
 
     const { error: updateErr } = await supabaseAdmin
       .from('re_reservations')
       .update({ escalation_stage: target.key, escalated_at: now })
-      .eq('id', reservation.id);
+      .eq('id', reservation.id)
+      .eq('organization_id', reservation.organization_id);
     if (updateErr) {
       console.warn('[escalation] could not raise stage:', updateErr.message);
-      continue;
+      return;
     }
 
     raised += 1;
@@ -137,7 +154,7 @@ async function sweepEscalations(orgId = null) {
       summary: `Escalated from ${current.label} to ${target.label} — ${count} overdue installments`,
       metadata: { from: current.key, to: target.key, overdue_count: count },
     });
-  }
+  });
 
   return { evaluated: overdueByReservation.size, raised };
 }

@@ -23,10 +23,9 @@
 // needs before trusting a spreadsheet they last edited in 2024.
 
 const express = require('express');
-const { supabaseAdmin } = require('../middleware/orgContext');
+const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
 const { parseCsvToObjects, parseAmount, parseDate } = require('../utils/csv');
 const { createPlanWithSchedule } = require('../services/installmentService');
-const { applyPaymentsToSchedule } = require('../services/paystackService');
 const { audit } = require('../services/auditService');
 const router = express.Router();
 
@@ -63,7 +62,7 @@ router.get('/template/:kind', (req, res) => {
 const quote = (value) => /[",\n]/.test(String(value)) ? `"${String(value).replace(/"/g, '""')}"` : String(value);
 
 // ── Units into one project ────────────────────────────────────────────────
-router.post('/units', async (req, res, next) => {
+router.post('/units', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const { project_id, csv, dry_run } = req.body || {};
     if (!project_id) return res.status(400).json({ error: 'project_id is required' });
@@ -125,7 +124,7 @@ router.post('/units', async (req, res, next) => {
 });
 
 // ── Buyers, with their unit, plan and payment history ─────────────────────
-router.post('/customers', async (req, res, next) => {
+router.post('/customers', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const { csv, project_id, dry_run } = req.body || {};
     if (!csv) return res.status(400).json({ error: 'csv is required' });
@@ -136,11 +135,12 @@ router.post('/customers', async (req, res, next) => {
       return res.status(400).json({ error: `Too many rows (${records.length}). Split the file into batches of ${MAX_ROWS}.` });
     }
 
-    // Existing projects and customers, read once. Matching row by row would be
-    // 150 round trips for a 150-row file.
-    const [{ data: projects }, { data: existingCustomers }] = await Promise.all([
+    // Existing projects, customers and units, read once. Matching row by row
+    // would be 150 round trips for a 150-row file.
+    const [{ data: projects }, { data: existingCustomers }, { data: existingUnits }] = await Promise.all([
       supabaseAdmin.from('re_projects').select('id, name').eq('organization_id', req.orgId),
       supabaseAdmin.from('re_customers').select('id, full_name, phone, email').eq('organization_id', req.orgId),
+      supabaseAdmin.from('re_units').select('id, project_id, unit_number, status').eq('organization_id', req.orgId),
     ]);
 
     const projectByName = new Map((projects || []).map((p) => [p.name.trim().toLowerCase(), p]));
@@ -151,6 +151,27 @@ router.post('/customers', async (req, res, next) => {
     for (const customer of existingCustomers || []) {
       if (customer.phone) customerByPhone.set(digits(customer.phone), customer);
       if (customer.email) customerByEmail.set(customer.email.toLowerCase(), customer);
+    }
+
+    // So a dry run can flag "B12 is already reserved by Chidi Okafor" up front,
+    // rather than the developer only discovering the conflict once the real
+    // import runs and half the file has already been written.
+    const unitByKey = new Map(
+      (existingUnits || []).map((u) => [`${u.project_id}|${u.unit_number.trim().toLowerCase()}`, u])
+    );
+    const takenUnitIds = (existingUnits || []).filter((u) => u.status !== 'available').map((u) => u.id);
+    const holderByUnitId = new Map();
+    if (takenUnitIds.length) {
+      const { data: holders } = await supabaseAdmin
+        .from('re_reservations')
+        .select('unit_id, created_at, re_customers(full_name)')
+        .eq('organization_id', req.orgId)
+        .in('unit_id', takenUnitIds)
+        .neq('status', 'cancelled')
+        .order('created_at', { ascending: false });
+      for (const h of holders || []) {
+        if (!holderByUnitId.has(h.unit_id)) holderByUnitId.set(h.unit_id, h.re_customers?.full_name || null);
+      }
     }
 
     const plan = [];
@@ -172,6 +193,11 @@ router.post('/customers', async (req, res, next) => {
         plan: null,
         amount_paid: parseAmount(record.amount_paid_to_date) || 0,
         actions: [],
+        conflict: null,
+        // buyer_only | buyer_and_reservation | buyer_and_plan — what this row
+        // actually creates, so a dry-run preview can say so plainly instead of
+        // making someone read the action list to work it out.
+        outcome: 'buyer_only',
       };
 
       const match = (entry.phone && customerByPhone.get(digits(entry.phone)))
@@ -199,7 +225,17 @@ router.post('/customers', async (req, res, next) => {
           continue;
         }
         entry.project = { id: resolved.id, name: resolved.name };
-        entry.actions.push(`reserve unit ${entry.unit_number} in ${resolved.name}`);
+
+        const existingUnit = unitByKey.get(`${resolved.id}|${entry.unit_number.toLowerCase()}`);
+        if (existingUnit && existingUnit.status !== 'available') {
+          const holder = holderByUnitId.get(existingUnit.id);
+          entry.conflict = `unit ${entry.unit_number} in ${resolved.name} is already ${existingUnit.status}` +
+            (holder ? ` (held by ${holder})` : '');
+          errors.push({ row: record.__row, error: entry.conflict });
+        } else {
+          entry.actions.push(`reserve unit ${entry.unit_number} in ${resolved.name}`);
+          entry.outcome = 'buyer_and_reservation';
+        }
       }
 
       const total = parseAmount(record.total_amount);
@@ -219,16 +255,21 @@ router.post('/customers', async (req, res, next) => {
           errors.push({ row: record.__row, error: 'a payment plan needs a unit_number to attach to' });
           continue;
         }
-        entry.plan = {
-          total_amount: total,
-          number_of_installments: count,
-          frequency: ['monthly', 'quarterly'].includes((record.frequency || '').toLowerCase())
-            ? record.frequency.toLowerCase() : 'monthly',
-          start_date: startDate,
-        };
-        entry.actions.push(`${count} ${entry.plan.frequency} installments totalling ₦${total.toLocaleString('en-NG')}`);
-        if (entry.amount_paid > 0) {
-          entry.actions.push(`apply ₦${entry.amount_paid.toLocaleString('en-NG')} already paid`);
+        if (entry.conflict) {
+          errors.push({ row: record.__row, error: `unit ${entry.unit_number} conflict — payment plan not created for this row` });
+        } else {
+          entry.plan = {
+            total_amount: total,
+            number_of_installments: count,
+            frequency: ['monthly', 'quarterly'].includes((record.frequency || '').toLowerCase())
+              ? record.frequency.toLowerCase() : 'monthly',
+            start_date: startDate,
+          };
+          entry.actions.push(`${count} ${entry.plan.frequency} installments totalling ₦${total.toLocaleString('en-NG')}`);
+          entry.outcome = 'buyer_and_plan';
+          if (entry.amount_paid > 0) {
+            entry.actions.push(`apply ₦${entry.amount_paid.toLocaleString('en-NG')} already paid`);
+          }
         }
       }
 
@@ -249,6 +290,11 @@ router.post('/customers', async (req, res, next) => {
     if (!plan.length) return res.status(400).json({ error: 'Nothing valid to import.', errors });
 
     const result = { customers_created: 0, customers_reused: 0, reservations: 0, plans: 0, payments: 0, errors: [...errors] };
+    // Every historical payment this run creates, so the batch-level audit
+    // entry below can answer "which rows" and not just "how many" — the
+    // import itself is one event, but a dispute over one buyer's history
+    // needs the id of their specific backfilled row, not just a count.
+    const importedPaymentIds = [];
 
     // Row by row rather than in bulk: a reservation needs the customer's id,
     // and a plan needs the reservation's. One bad row is skipped with its
@@ -305,7 +351,23 @@ router.post('/customers', async (req, res, next) => {
         }
 
         if (unit.status !== 'available') {
-          result.errors.push({ row: entry.row, error: `unit ${entry.unit_number} is already ${unit.status}` });
+          // Fetched fresh rather than from the dry-run prefetch: a unit can be
+          // claimed by an earlier row in this very file between the preview
+          // and the real run.
+          const { data: holderRow } = await supabaseAdmin
+            .from('re_reservations')
+            .select('re_customers(full_name)')
+            .eq('organization_id', req.orgId)
+            .eq('unit_id', unit.id)
+            .neq('status', 'cancelled')
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          const holder = holderRow?.re_customers?.full_name;
+          result.errors.push({
+            row: entry.row,
+            error: `unit ${entry.unit_number} is already ${unit.status}` + (holder ? ` (held by ${holder})` : ''),
+          });
           continue;
         }
 
@@ -345,24 +407,51 @@ router.post('/customers', async (req, res, next) => {
 
         // Historical money, applied oldest installment first — which is how it
         // was actually paid, and the only ordering that leaves the right rows
-        // outstanding at the end.
+        // outstanding at the end. Batched rather than one insert plus one
+        // status re-check per installment: these are brand-new schedule rows
+        // with nothing else recorded against them yet, so "is this one fully
+        // paid" is exactly "did today's backfill cover its amount_due" —
+        // arithmetic this loop already has, not something worth a round trip
+        // to ask the database. For an importer's stated case (150 buyers,
+        // each with several months already paid) this turns what was
+        // hundreds of sequential queries into two.
         let remaining = entry.amount_paid;
+        const paymentRows = [];
+        const fullyPaidScheduleIds = [];
         for (const row of schedule) {
           if (remaining <= 0) break;
           const applied = Math.min(remaining, Number(row.amount_due));
 
-          const { error: payErr } = await supabaseAdmin.from('re_payments').insert({
+          paymentRows.push({
             organization_id: req.orgId,
             schedule_id: row.id,
             amount: applied,
             method: 'bank_transfer',
             paid_at: row.due_date,
           });
-          if (payErr) throw payErr;
-
-          await applyPaymentsToSchedule(row.id);
-          result.payments += 1;
+          // Kobo comparison, like everywhere else money is compared here —
+          // floating point equality would leave a fully-paid row stuck
+          // 'pending' by a fraction of a kobo.
+          if (Math.round(applied * 100) >= Math.round(Number(row.amount_due) * 100)) {
+            fullyPaidScheduleIds.push(row.id);
+          }
           remaining -= applied;
+        }
+
+        if (paymentRows.length) {
+          const { data: insertedPayments, error: payErr } = await supabaseAdmin
+            .from('re_payments').insert(paymentRows).select('id');
+          if (payErr) throw payErr;
+          result.payments += paymentRows.length;
+          importedPaymentIds.push(...(insertedPayments || []).map((row) => row.id));
+
+          if (fullyPaidScheduleIds.length) {
+            const { error: statusErr } = await supabaseAdmin
+              .from('re_installment_schedule')
+              .update({ status: 'paid', paid_at: new Date().toISOString() })
+              .in('id', fullyPaidScheduleIds);
+            if (statusErr) throw statusErr;
+          }
         }
       } catch (err) {
         result.errors.push({ row: entry.row, error: err.message });
@@ -373,7 +462,7 @@ router.post('/customers', async (req, res, next) => {
       action: 'import.customers',
       entityType: 're_customers',
       summary: `Imported ${result.customers_created} buyers, ${result.reservations} reservations, ${result.payments} historical payments`,
-      metadata: result,
+      metadata: { ...result, imported_payment_ids: importedPaymentIds },
     });
 
     res.status(201).json(result);

@@ -32,6 +32,9 @@ const { createPlanWithSchedule, addMonthsUTC, parseDateUTC } = require('./instal
 const { lagosToday } = require('./overdueService');
 const { auditSystem } = require('./auditService');
 const { audit } = require('./auditService');
+const { mapWithConcurrency } = require('../utils/concurrency');
+
+const RENEWAL_CHECK_CONCURRENCY = 8;
 
 const RENEWAL_WINDOW_DAYS = 60;
 const toISODate = (date) => date.toISOString().slice(0, 10);
@@ -100,6 +103,12 @@ async function renewTenancy(req, reservationId, { monthlyRent, durationMonths, s
   }
   if (state.reservation.status === 'cancelled') {
     throw Object.assign(new Error('This reservation is cancelled.'), { statusCode: 409 });
+  }
+  if (state.reservation.status === 'completed') {
+    throw Object.assign(
+      new Error('This tenancy has already ended. Create a new reservation for a fresh lease instead.'),
+      { statusCode: 409 }
+    );
   }
   if (!Number(monthlyRent) || monthlyRent <= 0) {
     throw Object.assign(new Error('monthly_rent must be a positive number'), { statusCode: 400 });
@@ -240,7 +249,12 @@ async function checkTenancyRenewals(orgId = null) {
 
   let filed = 0;
 
-  for (const reservation of data || []) {
+  // One portfolio can carry hundreds of tenancies inside the 60-day window,
+  // each of these a check-then-insert plus an audit write done one at a time.
+  // uniq_re_tasks_open_ai_title (migrations/013) is what makes running them
+  // concurrently safe — two lanes racing the same title now collide on the
+  // index instead of on this check.
+  await mapWithConcurrency(data || [], RENEWAL_CHECK_CONCURRENCY, async (reservation) => {
     const title = renewalTaskTitle(reservation);
 
     const { data: existing } = await supabaseAdmin
@@ -252,7 +266,7 @@ async function checkTenancyRenewals(orgId = null) {
       .eq('source', 'ai')
       .limit(1)
       .maybeSingle();
-    if (existing) continue;
+    if (existing) return;
 
     const { error: insertError } = await supabaseAdmin.from('re_tasks').insert({
       organization_id: reservation.organization_id,
@@ -264,8 +278,8 @@ async function checkTenancyRenewals(orgId = null) {
       source: 'ai',
     });
     if (insertError) {
-      console.warn('[rental] could not file renewal task:', insertError.message);
-      continue;
+      if (insertError.code !== '23505') console.warn('[rental] could not file renewal task:', insertError.message);
+      return;
     }
     filed += 1;
 
@@ -279,7 +293,7 @@ async function checkTenancyRenewals(orgId = null) {
         + `${reservation.tenancy_end_date} — flagged for renewal decision`,
       metadata: { tenancy_end_date: reservation.tenancy_end_date },
     });
-  }
+  });
 
   return { evaluated: (data || []).length, filed };
 }

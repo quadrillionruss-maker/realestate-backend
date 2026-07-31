@@ -20,8 +20,10 @@ const { amountInWords } = require('../utils/amountInWords');
 
 const TEMPLATE_PATH = path.join(__dirname, '../templates/receipt.html');
 
-const naira = (amount) =>
-  '₦' + Number(amount || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+const naira = (amount) => {
+  const n = Number(amount || 0);
+  return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+};
 
 const formatDate = (value) =>
   new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -39,7 +41,7 @@ async function loadPaymentContext(orgId, paymentId) {
   const { data, error } = await supabaseAdmin
     .from('re_payments')
     .select(`
-      id, amount, method, paystack_reference, paid_at,
+      id, amount, method, paystack_reference, paid_at, overpayment, reallocated_from_payment_id,
       re_installment_schedule(
         id, installment_number, due_date, amount_due, status,
         re_installment_plans(
@@ -69,11 +71,17 @@ async function loadPaymentContext(orgId, paymentId) {
   // which is the call this product exists to prevent.
   const { data: planPayments } = await supabaseAdmin
     .from('re_payments')
-    .select('amount, re_installment_schedule!inner(plan_id)')
+    .select('amount, reallocated_from_payment_id, voided_at, re_installment_schedule!inner(plan_id)')
     .eq('organization_id', orgId)
     .eq('re_installment_schedule.plan_id', plan.id);
 
-  const totalPaid = (planPayments || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  // A reallocation row moves credit that was already counted once, on the
+  // payment it came from — summing it again here would show the buyer they
+  // paid more than they actually transferred. A voided row is a payment that
+  // turned out not to be real.
+  const totalPaid = (planPayments || [])
+    .filter((row) => !row.reallocated_from_payment_id && !row.voided_at)
+    .reduce((sum, row) => sum + Number(row.amount || 0), 0);
 
   return {
     payment: data,
@@ -152,11 +160,12 @@ async function generateReceipt(orgId, paymentId) {
 
   const { data: existing } = await supabaseAdmin
     .from('re_documents')
-    .select('id, storage_path')
+    .select('id, storage_path, status')
     .eq('organization_id', orgId)
     .eq('payment_id', paymentId)
     .eq('doc_type', 'receipt')
     .maybeSingle();
+  const wasRegeneration = existing?.status === 'generated';
 
   let documentId = existing?.id;
 
@@ -193,7 +202,12 @@ async function generateReceipt(orgId, paymentId) {
   const branding = await resolveBranding(orgId);
   const pdf = await renderHtmlToPdf(buildReceiptHtml(context, branding, receiptNumber));
 
-  const storagePath = `${orgId}/receipts/${documentId}.pdf`;
+  // Timestamped rather than a deterministic {documentId}.pdf — see
+  // documentService.generateDocument for why: the DB row is correctly
+  // reused (one receipt per payment still enforced there), but the OLD
+  // PDF's exact bytes used to be silently overwritten in storage on every
+  // regenerate. storage_path always points at the latest.
+  const storagePath = `${orgId}/receipts/${documentId}/${Date.now()}.pdf`;
   await uploadPdf(storagePath, pdf);
 
   const { data: updated, error: updateError } = await supabaseAdmin
@@ -210,6 +224,8 @@ async function generateReceipt(orgId, paymentId) {
     download_url: await createSignedUrl(storagePath),
     pdf,
     receipt_number: receiptNumber,
+    was_regeneration: wasRegeneration,
+    previous_storage_path: wasRegeneration ? existing.storage_path : null,
     context,
   };
 }

@@ -107,11 +107,23 @@ function parseDate(value) {
 // it their buyer list is locked inside somebody else's Supabase project, which
 // is a reason not to adopt the product in the first place.
 
+// A value beginning with = + - @ (or a tab/CR) is read by Excel/Sheets as the
+// start of a formula, not as text — a free-text field like a buyer's name is
+// exactly where a hostile or accidentally-pasted "=HYPERLINK(...)" ends up,
+// and it exports byte-for-byte without this. RFC 4180 quoting below does not
+// protect against it on its own: spreadsheet software applies formula
+// detection to a cell's content AFTER unquoting it, not before. Prefixing
+// with an apostrophe is the standard mitigation (CWE-1236) — it forces the
+// cell to render as literal text.
+function neutralizeFormula(s) {
+  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+}
+
 // Quote only when needed, and double any embedded quote — the same RFC 4180
 // rules the parser above reads.
 function quoteField(value) {
   if (value == null) return '';
-  const s = String(value);
+  const s = neutralizeFormula(String(value));
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 

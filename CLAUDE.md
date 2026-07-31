@@ -43,7 +43,7 @@ src/
   templates/               allocation letter, receipt
   utils/                   escapeHtml, csv, amountInWords
   test/                    syntax + logic + schema (offline), smoke.js (live)
-migrations/                six idempotent SQL files, applied in order
+migrations/                eight idempotent SQL files, applied in order
 frontend/
   config.js                sets window.__API_BASE__  ← the one file with a host in it
   index.html               shell: sign-in gate + app
@@ -165,15 +165,16 @@ a host.
 
 1. Run the migrations in order in the Supabase SQL editor: `001_phase1_schema.sql`,
    `002_ai_briefs.sql`, `003_operations.sql`, `004_hardening.sql`,
-   `005_soft_delete_and_lifecycle.sql`, `006_rentals.sql`.
+   `005_soft_delete_and_lifecycle.sql`, `006_rentals.sql`,
+   `007_payment_reallocation.sql`, `008_payment_void.sql`.
    `001` is self-contained — it creates the identity tables (`users`, `teams`,
    `team_members`) as well as the domain ones, so an empty project is all it
-   needs. All six are idempotent, so re-running them after a change is safe and
-   is how you pick up the Grants block.
+   needs. All eight are idempotent, so re-running them after a change is safe
+   and is how you pick up the Grants block.
 
    If the API returns `42501: permission denied for table re_projects`, the
    tables exist but `service_role` holds no privileges on them — re-run all
-   six. See the Grants section in `docs/DATABASE.md`.
+   eight. See the Grants section in `docs/DATABASE.md`.
 
 2. Open the app and **create an account**, then click the link in the
    confirmation email. Verification is required only when email is actually
@@ -193,12 +194,14 @@ npm run test:schema     # migrations against a real in-process Postgres
 RE_SMOKE_TOKEN=<jwt> npm run smoke                      # defaults to localhost:4000/api
 ```
 
-`npm run smoke` **refuses to run against a non-localhost URL** unless you name
-the host in `RE_SMOKE_CONFIRM`. It writes real rows — a project, five units, two
-buyers, a reservation and a ₦3.75m payment — and pointed at production those
-land in a developer's actual inventory and their actual collected-this-month
-figure. Naming the host means the confirmation cannot be left exported in a
-shell and forgotten.
+`npm run smoke` **refuses to run against a non-localhost URL** unless
+`RE_SMOKE_CONFIRM` names the host *and* today's date, as `<host>:<YYYY-MM-DD>`.
+It writes real rows — a project, five units, two buyers, a reservation and a
+₦3.75m payment — and pointed at production those land in a developer's actual
+inventory and their actual collected-this-month figure. The date is part of
+the value, not just the host, so a confirmation left exported in a shell
+profile goes stale on its own instead of silently authorizing every run from
+then on.
 
 `test:schema` runs the migrations against PGlite — Postgres compiled to WASM,
 so constraints, triggers and RLS are real — applies them twice to prove
@@ -246,6 +249,36 @@ that: deleting a buyer deletes their reservations, so a live parent with a
 deleted child is not a reachable state. A future table that breaks that
 assumption needs an explicit filter.
 
+## Data retention, and what that means for a buyer's own data
+
+"Nothing is ever deleted" (above) is a data-integrity guarantee — a receipt or
+an allocation letter must survive to settle a dispute years later — and it has
+a direct consequence: `re_customers` rows, once created, are retained
+indefinitely. A "delete" from the product's own UI is a soft delete; the row,
+its name, phone and email stay in the database and in every backup, restorable
+by design.
+
+**There is currently no automated path that honours a buyer's request to be
+forgotten.** A developer operating in Nigeria is subject to the NDPA (Nigeria
+Data Protection Act) the same way a GDPR-covered business is subject to the
+right to erasure — and today, satisfying that request means someone with
+direct database access running a deliberate hard delete against `supabaseRaw`,
+outside the application entirely. That is a manual, one-off operation, not a
+feature — treat it as an open gap, not a solved problem, until an actual
+erasure path is built.
+
+**Logs are a second place PII can end up, separately from the database.**
+`re_notifications` intentionally records every email/SMS attempt including its
+recipient (see "Nothing is ever deleted" above — it has no `deleted_at`), which
+is the audit trail doing its job. Application logs (`console.error` and
+friends, which end up in Render's log retention) are a different matter: a raw
+driver error's `.detail`/`.hint` can quote an offending row's actual column
+values verbatim, so error-logging call sites should log `err.message` (written
+for a human, never carries row data), not the raw error object. This is why
+`routes/webhooks.js`'s catch blocks do that rather than `console.error(...,
+err)` — the pattern is deliberate, not incidental, and worth matching in new
+code that logs a caught driver error.
+
 ## Due dates are 18:00 Africa/Lagos
 
 An installment due on a date is due by **6pm on that date**, close of business.
@@ -263,9 +296,9 @@ looking at the screen at 7pm is told the money is still coming.
 Buyer-facing wording comes from `describeDue()` ("30 Jul 2026 by 6pm"), so
 nobody is held to a cutoff they were never told.
 
-## Six rules the database enforces, not the code
+## Seven rules the database enforces, not the code
 
-Unique partial indexes in `migrations/001`, `003` and `004`, because the
+Unique partial indexes in `migrations/001`, `003`, `004` and `007`, because the
 application must not be the only thing standing between a developer and these:
 
 - one live reservation per unit (double allocation)
@@ -275,6 +308,16 @@ application must not be the only thing standing between a developer and these:
 - one receipt per payment (two receipts for one ₦5m transfer)
 - one allocation letter per reservation (three letters for one unit, disagreeing)
 - one **active** plan per reservation (two schedules counting the same debt)
+- one reallocation per overpaid payment (`migrations/007`) — the same credit
+  spent onto two different installments by two concurrent clicks
+
+An overpayment (`re_payments.overpayment`, `migrations/004`) is real money
+already recorded, not yet assigned. Moving it onto a different installment
+(`POST /payments/:paymentId/reallocate`) writes a **new** payment row rather
+than editing the old one — the paid history stays exactly as it happened —
+but marks it `reallocated_from_payment_id` so `commissionService` does not
+pay the rep twice on the same transfer, and so every "total paid" sum
+excludes it rather than counting that money a second time.
 
 Regenerating any document is still fine — it rewrites the same row and the same
 storage path. What that rule forbids is a second row, i.e. a second letter with
@@ -356,6 +399,23 @@ retried double payment.
 Imports are the exception — `routes/imports.js` deliberately does **not** call
 it. Emailing 400 buyers a receipt for money they transferred last year is the
 worst possible first impression of a product that talks to your buyers for you.
+
+**A payment can be voided, never deleted or edited.** `POST
+/api/re/payments/:paymentId/void` (owner/admin only, `migrations/008`) marks a
+wrongly-entered payment `voided_at`/`void_reason` — the row, its amount and its
+timestamp stay exactly as originally entered, because it is still a financial
+fact, just no longer a live one. Voiding recomputes the installment it applied
+to (`paystackService.applyPaymentsToSchedule` is bidirectional for exactly
+this: a schedule row can drop back out of `paid` to `pending`/`overdue`, the
+one case where a payment's effect is ever removed) and voids the commission it
+earned, if any. Every place "how much has this buyer paid" gets computed —
+`applyPaymentsToSchedule`, `initInstallmentPayment`'s outstanding-balance
+check, `recordManualPayment`/`reallocateOverpayment`'s overpayment math,
+`receiptService`/`portalService`'s totals, `restructureService`'s carried
+balance, the dashboard and reports — filters `voided_at is null`. The
+`GET /payments` ledger and the CSV export deliberately do not: a voided entry
+stays visible there, dimmed, next to the correction, because a complete record
+is the point.
 
 ## Deliberately NOT in v1 (do not add)
 

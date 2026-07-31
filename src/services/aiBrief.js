@@ -38,9 +38,9 @@ const BRIEF_SCHEMA = {
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['customer_name', 'reason', 'severity'],
+          required: ['customer_ref', 'reason', 'severity'],
           properties: {
-            customer_name: { type: 'string' },
+            customer_ref: { type: 'string', description: 'The exact customer_ref token from the data, e.g. BUYER_3. Never a name.' },
             reason: { type: 'string' },
             severity: { type: 'string', enum: ['low', 'medium', 'high'] },
           },
@@ -51,11 +51,11 @@ const BRIEF_SCHEMA = {
         items: {
           type: 'object',
           additionalProperties: false,
-          required: ['customer_name', 'reservation_id', 'whatsapp_draft', 'email_subject', 'email_draft'],
+          required: ['customer_ref', 'reservation_id', 'whatsapp_draft', 'email_subject', 'email_draft'],
           properties: {
-            customer_name: { type: 'string' },
+            customer_ref: { type: 'string', description: 'The exact customer_ref token from the data, e.g. BUYER_3. Never a name.' },
             reservation_id: { type: ['string', 'null'] },
-            whatsapp_draft: { type: 'string', description: 'Short, warm, Nigerian business tone. Naira amounts formatted with ₦ and commas.' },
+            whatsapp_draft: { type: 'string', description: 'Short, warm, Nigerian business tone. Naira amounts formatted with ₦ and commas. Address the buyer by writing their customer_ref token exactly where their name would go — it is replaced with their real name automatically before anyone reads it.' },
             email_subject: { type: 'string' },
             email_draft: { type: 'string' },
           },
@@ -77,8 +77,10 @@ const BRIEF_SCHEMA = {
   },
 };
 
-const naira = (amount) =>
-  '₦' + Number(amount || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+const naira = (amount) => {
+  const n = Number(amount || 0);
+  return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+};
 
 const daysBetween = (fromISO, toISO) =>
   Math.max(0, Math.round((Date.parse(toISO) - Date.parse(fromISO)) / 86_400_000));
@@ -119,7 +121,7 @@ async function gatherOrgState(orgId) {
       .order('due_date', { ascending: true }),
     supabaseAdmin
       .from('re_documents')
-      .select('id, doc_type, status, reservation_id, re_reservations(re_customers(full_name), re_units(unit_number))')
+      .select('id, doc_type, status, reservation_id, re_reservations(re_customers(id, full_name), re_units(unit_number))')
       .eq('organization_id', orgId)
       .eq('status', 'pending'),
     // What buyers said they would do. "Promised the 15th, still nothing" is a
@@ -131,6 +133,27 @@ async function gatherOrgState(orgId) {
     }),
   ]);
 
+  // A stable, opaque token per buyer — BUYER_1, BUYER_2… — assigned once
+  // across the whole state so the same buyer gets the same ref whether they
+  // show up in overdue, upcoming, or pending documents. Used ONLY to build
+  // the payload requestBriefFromModel actually sends to OpenAI; every row
+  // below still carries the real customer_name too, because
+  // buildFallbackBrief and the rest of this file need it and never talk to
+  // a third party. refByCustomerId resolves the model's response back to a
+  // real name afterwards — see requestBriefFromModel.
+  const refByCustomerId = new Map();
+  const nameByRef = new Map();
+  function refFor(customer) {
+    if (!customer?.id) return null;
+    let ref = refByCustomerId.get(customer.id);
+    if (!ref) {
+      ref = `BUYER_${refByCustomerId.size + 1}`;
+      refByCustomerId.set(customer.id, ref);
+      nameByRef.set(ref, customer.full_name || 'Unknown buyer');
+    }
+    return ref;
+  }
+
   // Flatten the join shape into something compact enough to put in a prompt
   // without spending tokens on Supabase's nesting.
   const flatten = (rows) => (rows || []).map((row) => {
@@ -140,6 +163,7 @@ async function gatherOrgState(orgId) {
     return {
       schedule_id: row.id,
       reservation_id: reservation.id || null,
+      customer_ref: refFor(customer),
       customer_name: customer.full_name || 'Unknown buyer',
       customer_phone: customer.phone || null,
       customer_email: customer.email || null,
@@ -159,18 +183,42 @@ async function gatherOrgState(orgId) {
     };
   });
 
+  const flatOverdue = flatten(overdue.data);
+  const flatUpcoming = flatten(upcoming.data);
+
+  // Promises carry no customer_id (promiseService.js is shared and has its
+  // own reasons not to), so matching to a ref is by name — the same
+  // assumption buildFallbackBrief already makes to line up a promise with
+  // its buyer, not a new fragility this introduces.
+  const refByName = new Map();
+  for (const [, ref] of refByCustomerId) {
+    const name = nameByRef.get(ref);
+    if (name) refByName.set(name.toLowerCase(), ref);
+  }
+
   return {
     today,
-    overdue: flatten(overdue.data),
-    upcomingWeek: flatten(upcoming.data),
-    promises: promises || [],
-    pendingDocuments: (documents.data || []).map((d) => ({
-      id: d.id,
-      doc_type: d.doc_type,
-      reservation_id: d.reservation_id,
-      customer_name: d.re_reservations?.re_customers?.full_name || null,
-      unit_number: d.re_reservations?.re_units?.unit_number || null,
+    overdue: flatOverdue,
+    upcomingWeek: flatUpcoming,
+    promises: (promises || []).map((p) => ({
+      ...p,
+      customer_ref: refByName.get(String(p.customer_name || '').toLowerCase()) || null,
     })),
+    pendingDocuments: (documents.data || []).map((d) => {
+      const customer = d.re_reservations?.re_customers || null;
+      return {
+        id: d.id,
+        doc_type: d.doc_type,
+        reservation_id: d.reservation_id,
+        customer_ref: refFor(customer),
+        customer_name: customer?.full_name || null,
+        unit_number: d.re_reservations?.re_units?.unit_number || null,
+      };
+    }),
+    // Not sent to OpenAI (see requestBriefFromModel) — kept on the state
+    // object so the model's ref-only response can be resolved back to a
+    // real name before anyone reads the brief.
+    nameByRef,
   };
 }
 
@@ -392,9 +440,11 @@ function emailFor(c) {
 // ── Model call ─────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Worth trying again: a timeout, a dropped connection, a rate limit, or any 5xx.
-// Not worth trying again: a malformed request or a rejected key.
+// Worth trying again: a timeout, a dropped connection, a rate limit, a
+// garbled completion, or any 5xx. Not worth trying again: a malformed
+// request or a rejected key.
 function isRetryable(err) {
+  if (err.malformedResponse) return true;
   if (err.name === 'AbortError' || err.name === 'TimeoutError') return true;
   const status = Number((/OpenAI (\d{3})/.exec(err.message) || [])[1] || 0);
   if (!status) return true;          // network-level failure, no status to read
@@ -402,11 +452,70 @@ function isRetryable(err) {
   return status >= 500;
 }
 
+// Everywhere a buyer's real name would have gone in the payload, the data
+// instead carries a customer_ref token (BUYER_1, BUYER_2…) — see
+// gatherOrgState. Buyer names, phone numbers and emails never leave this
+// server: OpenAI never receives them, only opaque per-buyer tokens, and
+// resolveRefs() maps the model's response back to real names once it
+// returns. This is why the schema asks for customer_ref rather than
+// customer_name, and why the system prompt tells the model to write that
+// same token directly into a drafted message where a name would go.
+function sanitizeStateForModel(state) {
+  const stripPII = (row) => {
+    const { customer_name, customer_phone, customer_email, ...rest } = row;
+    return rest;
+  };
+  return {
+    today: state.today,
+    overdue: state.overdue.map(stripPII),
+    upcomingWeek: state.upcomingWeek.map(stripPII),
+    pendingDocuments: state.pendingDocuments.map(stripPII),
+    promises: state.promises.map(stripPII),
+  };
+}
+
+// The other half of the boundary above: the model only ever knows a buyer as
+// BUYER_3, so it can only ever hand back BUYER_3 — in the structured
+// customer_ref fields, and (per the system prompt) written directly into
+// whatsapp_draft/email_draft/email_subject/recommendation titles where a
+// name belongs. This resolves every one of those back to the real name
+// before the brief is stored or shown to anyone.
+function resolveRefs(brief, nameByRef) {
+  const nameFor = (ref) => nameByRef.get(ref) || 'this buyer';
+  const replaceRefs = (text) => {
+    if (typeof text !== 'string') return text;
+    let out = text;
+    for (const [ref, name] of nameByRef) out = out.replace(new RegExp(`\\b${ref}\\b`, 'g'), name);
+    return out;
+  };
+
+  const risks = (brief.risks || []).map(({ customer_ref, ...rest }) => ({
+    customer_name: nameFor(customer_ref),
+    ...rest,
+  }));
+
+  const follow_ups = (brief.follow_ups || []).map(({ customer_ref, ...rest }) => ({
+    customer_name: nameFor(customer_ref),
+    ...rest,
+    whatsapp_draft: replaceRefs(rest.whatsapp_draft),
+    email_subject: replaceRefs(rest.email_subject),
+    email_draft: replaceRefs(rest.email_draft),
+  }));
+
+  const recommendations = (brief.recommendations || []).map((rec) => ({
+    ...rec,
+    title: replaceRefs(rec.title),
+  }));
+
+  return { ...brief, summary: replaceRefs(brief.summary), risks, follow_ups, recommendations };
+}
+
 async function requestBriefFromModel(state) {
+  const promptState = sanitizeStateForModel(state);
   const response = await fetch(OPENAI_URL, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      Authorization: `Bearer ${env.openai.apiKey}`,
       'Content-Type': 'application/json',
     },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -421,6 +530,18 @@ async function requestBriefFromModel(state) {
             'You write a concise morning brief for the MD/CEO. Currency is Naira (₦). ' +
             'Only reference customers present in the data, never invent names, amounts or dates. ' +
             'Use reservation_id values exactly as given.\n\n' +
+            // Buyer names never reach this prompt (see sanitizeStateForModel) —
+            // each row carries customer_ref instead (e.g. BUYER_3). Without this
+            // paragraph the model either invents a name to fill the gap or
+            // leaves drafts addressed to nobody; told what the token is FOR, it
+            // uses it exactly like a name and the real one is substituted back
+            // in afterwards.
+            'Every buyer in this data is identified by customer_ref (e.g. "BUYER_3") instead of a name — ' +
+            'you are not given real names, phone numbers or email addresses. Use the customer_ref value exactly ' +
+            'as given in the customer_ref field of your output. Where a buyer\'s name would naturally appear inside ' +
+            'a drafted message (a greeting, a recommendation title), write their customer_ref token there instead, ' +
+            'exactly as given — e.g. "Dear BUYER_3," — it will be replaced with their real name automatically ' +
+            'before anyone reads it. Never invent a name, and never leave a customer_ref field blank.\n\n' +
             // Without this the model writes one tone for everybody: the same
             // warm nudge to a buyer one week late and to one eight months in
             // arrears. Both are wrong, and expensively so.
@@ -448,7 +569,7 @@ async function requestBriefFromModel(state) {
         },
         {
           role: 'user',
-          content: `Today is ${state.today} (Africa/Lagos). Current state:\n${JSON.stringify(state, null, 2)}`,
+          content: `Today is ${state.today} (Africa/Lagos). Current state:\n${JSON.stringify(promptState, null, 2)}`,
         },
       ],
     }),
@@ -461,8 +582,24 @@ async function requestBriefFromModel(state) {
 
   const json = await response.json();
   const content = json.choices?.[0]?.message?.content;
-  if (!content) throw new Error('OpenAI returned an empty brief');
-  return JSON.parse(content);
+  if (!content) throw Object.assign(new Error('OpenAI returned an empty brief'), { malformedResponse: true });
+
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch (err) {
+    // A garbled or truncated completion — the request itself succeeded, so
+    // this is nothing like a bad API key or a malformed request (the cases
+    // isRetryable says to give up on). It is usually a one-off from the
+    // model, and worth exactly the same second attempt as a dropped
+    // connection.
+    throw Object.assign(new Error(`OpenAI returned unparsable JSON: ${err.message}`), { malformedResponse: true });
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw Object.assign(new Error('OpenAI returned JSON that was not a brief object'), { malformedResponse: true });
+  }
+
+  return resolveRefs(parsed, state.nameByRef);
 }
 
 // ── Orchestration ──────────────────────────────────────────────────────────
@@ -486,7 +623,7 @@ async function generateDailyBrief(orgId) {
   let brief;
   let generatedBy = 'ai';
 
-  if (!process.env.OPENAI_API_KEY) {
+  if (!env.openai.apiKey) {
     brief = buildFallbackBrief(state);
     generatedBy = 'fallback';
   } else {
@@ -574,8 +711,14 @@ async function fileRecommendationsAsTasks(orgId, recommendations = []) {
       related_reservation_id: rec.reservation_id || null,
       source: 'ai',
     });
-    if (error) console.error('[re-brief] could not file task:', error.message);
+    // 23505 = uniq_re_tasks_open_ai_title (migrations/013) — the check above
+    // lost a race with another run filing the same recommendation. Same
+    // outcome as finding the duplicate up front: skip it.
+    if (error && error.code !== '23505') console.error('[re-brief] could not file task:', error.message);
   }
 }
 
-module.exports = { generateDailyBrief, gatherOrgState, buildFallbackBrief };
+module.exports = {
+  generateDailyBrief, gatherOrgState, buildFallbackBrief,
+  sanitizeStateForModel, resolveRefs,
+};

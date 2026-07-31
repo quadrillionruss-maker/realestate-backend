@@ -29,8 +29,10 @@ const notify = require('./notificationService');
 const { auditSystem } = require('./auditService');
 const { escapeHtml } = require('../utils/escapeHtml');
 
-const naira = (amount) =>
-  '₦' + Number(amount || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+const naira = (amount) => {
+  const n = Number(amount || 0);
+  return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+};
 
 const formatDate = (value) =>
   new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });

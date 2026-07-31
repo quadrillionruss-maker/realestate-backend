@@ -1,4 +1,5 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { uploadMedia, MEDIA_TYPES, MAX_MEDIA_BYTES } = require('../services/documentStorage');
 const { audit } = require('../services/auditService');
@@ -6,6 +7,18 @@ const router = express.Router();
 
 const UNIT_STATUSES = ['available', 'reserved', 'sold'];
 const MAX_BULK_UNITS = 500;
+
+// Up to 6MB per call and only the generic global limiter otherwise — that
+// budget alone allows gigabytes of upload traffic from one account in 15
+// minutes. Keyed per user, not per IP.
+const mediaLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: 'Too many uploads. Wait a few minutes and try again.' },
+});
 
 // metadata holds floor plans, photo URLs, a brochure link — whatever a
 // developer wants to hang off a unit. jsonb rather than columns because every
@@ -47,11 +60,17 @@ const assertProjectInOrg = async (projectId, orgId) => {
 
 router.get('/', async (req, res, next) => {
   try {
+    // Unbounded until now. A developer running several projects over several
+    // years can have thousands of units, all returned on every load of the
+    // inventory screen.
+    const limit = Math.min(Number(req.query.limit) || 1000, 5000);
+
     let query = supabaseAdmin
       .from('re_units')
       .select('*, re_projects(name)')
       .eq('organization_id', req.orgId)
-      .order('unit_number');
+      .order('unit_number')
+      .limit(limit);
 
     if (req.query.project_id) query = query.eq('project_id', req.query.project_id);
     if (req.query.status) {
@@ -170,6 +189,17 @@ router.patch('/:id', async (req, res, next) => {
       return res.status(400).json({ error: 'No updatable fields provided' });
     }
 
+    // list_price drives contract value, allocation-letter wording and every
+    // downstream receipt/commission calculation for future reservations on
+    // this unit — read before the write so a change has a from/to on record,
+    // not just a new value with no history of what it replaced.
+    let priorPrice;
+    if (updates.list_price !== undefined) {
+      const { data: before } = await supabaseAdmin
+        .from('re_units').select('list_price').eq('id', req.params.id).eq('organization_id', req.orgId).maybeSingle();
+      priorPrice = before?.list_price;
+    }
+
     const { data, error } = await supabaseAdmin
       .from('re_units')
       .update(updates)
@@ -183,6 +213,17 @@ router.patch('/:id', async (req, res, next) => {
     }
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Unit not found' });
+
+    if (updates.list_price !== undefined && Number(priorPrice) !== Number(updates.list_price)) {
+      audit(req, {
+        action: 'unit.price_changed',
+        entityType: 're_units',
+        entityId: data.id,
+        summary: `Unit ${data.unit_number} price changed from ₦${Number(priorPrice || 0).toLocaleString('en-NG')} to ₦${Number(updates.list_price).toLocaleString('en-NG')}`,
+        metadata: { from: priorPrice, to: updates.list_price },
+      });
+    }
+
     res.json(data);
   } catch (e) { next(e); }
 });
@@ -194,7 +235,7 @@ router.patch('/:id', async (req, res, next) => {
 // The 33% encoding overhead is irrelevant at 6MB and the simplicity is not:
 // multipart parsing is a dependency, a stream, and a class of bug, in
 // exchange for nothing a developer uploading a floor plan would ever notice.
-router.post('/:id/media', async (req, res, next) => {
+router.post('/:id/media', mediaLimiter, async (req, res, next) => {
   try {
     const { data: unit } = await supabaseAdmin
       .from('re_units').select('id, metadata')

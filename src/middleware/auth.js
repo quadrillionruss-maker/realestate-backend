@@ -77,10 +77,20 @@ async function authenticate(req, res, next) {
       .maybeSingle();
 
     if (error) {
-      // Column or table missing (a database that has not run 004): fail OPEN,
-      // because the alternative is a deploy that locks every user out. Loud in
-      // the log so it is fixed rather than lived with.
-      console.warn('[auth] token_version unavailable, skipping session check:', error.message);
+      // 42703/42P01 = undefined column/table: a database that has not run
+      // 004 yet. Fail OPEN only for that specific, known-safe case, because
+      // the alternative is a deploy that locks every user out before anyone
+      // can apply the migration that would fix it. Anything else — a
+      // timeout, a dropped connection, an exhausted pool — is transient, not
+      // a schema gap, and must fail CLOSED: this check exists to guarantee a
+      // revoked session dies immediately, and failing open here defeats that
+      // guarantee under exactly the load conditions it matters most.
+      if (error.code === '42703' || error.code === '42P01') {
+        console.warn('[auth] token_version unavailable, skipping session check:', error.message);
+      } else {
+        console.error('[auth] session check failed, refusing the request:', error.message);
+        return res.status(503).json({ success: false, error: 'Could not verify this session. Try again shortly.' });
+      }
     } else if (!account) {
       // The user was deleted. A signature from a deleted account is not a
       // session.
@@ -92,7 +102,9 @@ async function authenticate(req, res, next) {
       }
     }
   } catch (err) {
-    console.warn('[auth] session check threw, allowing request:', err.message);
+    // Same transient category as a non-schema query error above — fail closed.
+    console.error('[auth] session check threw, refusing the request:', err.message);
+    return res.status(503).json({ success: false, error: 'Could not verify this session. Try again shortly.' });
   }
 
   if (!tokenVersionOk) {

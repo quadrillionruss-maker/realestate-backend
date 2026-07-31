@@ -76,7 +76,8 @@
   }
 
   function naira(amount) {
-    return '₦' + Number(amount || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+    var n = Number(amount || 0);
+    return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
   }
 
   function fmtDate(value) {
@@ -106,17 +107,35 @@
     setTimeout(function () { if (node.parentNode) node.parentNode.removeChild(node); }, 5000);
   }
 
+  // A buyer on patchy mobile data deserves an actual answer, not a spinner
+  // that sits forever because the request never resolved either way.
+  var FETCH_TIMEOUT_MS = 20000;
+
   async function api(path, options) {
     var opts = options || {};
-    var res = await fetch(API_BASE + '/portal' + path, {
-      method: opts.method || 'GET',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer ' + token,
-      },
-      body: opts.body,
-    });
+    var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timer = controller ? setTimeout(function () { controller.abort(); }, FETCH_TIMEOUT_MS) : null;
+
+    var res;
+    try {
+      res = await fetch(API_BASE + '/portal' + path, {
+        method: opts.method || 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + token,
+        },
+        body: opts.body,
+        signal: controller ? controller.signal : undefined,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw Object.assign(new Error('That took too long to respond. Check your connection and try again.'), { status: 0 });
+      }
+      throw Object.assign(new Error('Could not reach the server. Check your connection and try again.'), { status: 0 });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
 
     var body = null;
     var text = await res.text().catch(function () { return ''; });
@@ -246,7 +265,13 @@
           '</div></div>'
         : '') +
 
-      account.reservations.map(reservationBlock).join('') +
+      (account.reservations.length
+        ? account.reservations.map(reservationBlock).join('')
+        : '<div class="card mt-2"><div class="card-body" style="text-align:center;padding:30px 20px">' +
+            '<p class="muted" style="font-size:13.5px;line-height:1.6">' +
+              'Nothing is on your account yet. Once your sales office records a reservation, it will show up here.' +
+            '</p>' +
+          '</div></div>') +
 
       (account.documents.length
         ? '<div class="card mt-2">' +
@@ -371,6 +396,26 @@
     '</div>';
   }
 
+  // The API requires an email for Paystack's receipt (see routes/portal.js)
+  // and falls back to req.body.email when the buyer's own record has none —
+  // this is the frontend half of that fallback. Without it, a buyer with no
+  // email on file saw the "needs an email address" toast and no way to
+  // actually supply one.
+  async function initiatePay(scheduleId, email) {
+    try {
+      return await api('/pay/' + scheduleId, {
+        method: 'POST',
+        body: JSON.stringify(email ? { email: email } : {}),
+      });
+    } catch (err) {
+      if (err.status === 400 && /email/i.test(err.message) && !email) {
+        var entered = window.prompt('Enter an email address for your payment receipt:');
+        if (entered && entered.trim()) return initiatePay(scheduleId, entered.trim());
+      }
+      throw err;
+    }
+  }
+
   function wire() {
     Array.prototype.forEach.call(document.querySelectorAll('[data-schedule]'), function (button) {
       button.addEventListener('click', async function () {
@@ -378,7 +423,7 @@
         button.classList.add('is-working');
         try {
           var scheduleId = button.dataset.schedule;
-          var result = await api('/pay/' + scheduleId, { method: 'POST', body: '{}' });
+          var result = await initiatePay(scheduleId);
 
           // Remembered before leaving, so the "confirming" state survives even
           // if Paystack drops the ?paid= parameter on the way back.

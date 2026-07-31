@@ -20,6 +20,9 @@
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { overdueThroughDate } = require('./overdueService');
 const { auditSystem } = require('./auditService');
+const { mapWithConcurrency } = require('../utils/concurrency');
+
+const AUDIT_CONCURRENCY = 8;
 
 const SELECT = `
   id, promised_date, promised_amount, spoke_to, notes, status, resolved_at, created_at,
@@ -157,17 +160,19 @@ async function sweepBrokenPromises(orgId = null) {
       .update({ status: 'broken', resolved_at: now })
       .in('id', broken.map((row) => row.id));
 
-    for (const row of broken) {
-      await auditSystem({
-        orgId: row.organization_id,
-        actorKind: 'system',
-        action: 'promise.broken',
-        entityType: 're_payment_promises',
-        entityId: row.id,
-        summary: `Promise to pay by ${row.promised_date} was not kept`,
-        metadata: { schedule_id: row.schedule_id, promised_date: row.promised_date },
-      });
-    }
+    // The status update above is already one bulk write for every broken
+    // promise; these audit entries are still one row each, so they at least
+    // don't wait on one another — a portfolio with a bad week for collections
+    // can break dozens of promises in one sweep.
+    await mapWithConcurrency(broken, AUDIT_CONCURRENCY, (row) => auditSystem({
+      orgId: row.organization_id,
+      actorKind: 'system',
+      action: 'promise.broken',
+      entityType: 're_payment_promises',
+      entityId: row.id,
+      summary: `Promise to pay by ${row.promised_date} was not kept`,
+      metadata: { schedule_id: row.schedule_id, promised_date: row.promised_date },
+    }));
   }
 
   return { broken: broken.length, kept: kept.length };

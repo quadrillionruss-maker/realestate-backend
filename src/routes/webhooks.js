@@ -76,26 +76,51 @@ router.post('/paystack', async (req, res) => {
     return res.status(400).json({ error: 'Body is not valid JSON.' });
   }
 
-  // Acknowledge now. Everything below is our problem, not Paystack's.
+  if (event.event !== 'charge.success') {
+    // Nothing durable to write for any other event type — safe to acknowledge
+    // immediately, same as before.
+    return res.status(200).json({ received: true });
+  }
+
+  const reference = event.data?.reference;
+  let owned;
+  try {
+    // handleRealEstateCharge returns false for references this product does
+    // not own (shared endpoint) and true once the payment row is durably
+    // written — or throws on a genuine, transient write failure. The ack
+    // below happens only after this settles, on purpose: acking first and
+    // writing after (the previous design) meant a transient DB error here
+    // permanently lost a real payment, because Paystack never retries an
+    // event it already got a 200 for. Duplicate deliveries are already
+    // handled inside handleRealEstateCharge (23505 / existing-reference
+    // checks both resolve to `true`, not a throw), so retrying a slow-but-
+    // eventually-successful write is safe, not wasteful.
+    owned = await handleRealEstateCharge(event);
+  } catch (err) {
+    // err.message only — a raw Postgres error's .detail/.hint frequently
+    // quotes the offending row's actual values (a buyer's email, a phone
+    // number) back verbatim, and this log line has no business carrying that
+    // into wherever these logs end up retained.
+    console.error('[webhook] failed to record charge.success, asking Paystack to retry:', err.message);
+    if (env.isDev) console.error(err.stack);
+    return res.status(500).json({ error: 'Could not record this payment yet.' });
+  }
+
+  // The payment is durably in the database (or this reference genuinely is
+  // not ours) — safe to acknowledge now. Everything from here is best-effort
+  // side-effects around money that is already safely recorded: a failure in
+  // the receipt, the commission accrual or the buyer notification must never
+  // turn an already-recorded payment into a Paystack retry.
   res.status(200).json({ received: true });
+  if (!owned) return;
 
   try {
-    if (event.event !== 'charge.success') return;
-
-    const reference = event.data?.reference;
-
-    // handleRealEstateCharge returns false for references this product does
-    // not own, which is what lets this endpoint be shared with another product
-    // on the same Paystack account.
-    const owned = await handleRealEstateCharge(event);
-    if (!owned) return;
-
     // The handler inserts the payment row; find it so the same post-payment
     // work runs as for a manually recorded transfer — receipt, commission,
     // notification, audit. Before this, a card payment produced none of it.
     const { data: payment } = await supabaseAdmin
       .from('re_payments')
-      .select('id, organization_id')
+      .select('id, organization_id, overpayment')
       .eq('paystack_reference', reference)
       .maybeSingle();
 
@@ -108,6 +133,7 @@ router.post('/paystack', async (req, res) => {
       orgId: payment.organization_id,
       paymentId: payment.id,
       source: 'paystack',
+      overpayment: payment.overpayment,
     });
   } catch (err) {
     // The response has already gone, so there is nowhere to surface this but
@@ -116,7 +142,8 @@ router.post('/paystack', async (req, res) => {
     // to re_audit_log — the org this event belonged to is exactly what we
     // failed to establish, and an audit row with no organization_id is noise
     // in a table whose value is that every row can be traced to a workspace.
-    console.error('[webhook] failed processing charge.success:', err);
+    console.error('[webhook] failed processing charge.success side effects:', err.message);
+    if (env.isDev) console.error(err.stack);
   }
 });
 

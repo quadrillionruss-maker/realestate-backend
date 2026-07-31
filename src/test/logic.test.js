@@ -22,7 +22,7 @@ const path = require('path');
 const { buildSchedule, addMonthsUTC } = require('../services/installmentService');
 const { parseInstallmentReference, isRealEstateReference, buildReference } = require('../services/paystackService');
 const { buildAllocationLetterHtml, describePaymentPlan } = require('../services/documentService');
-const { buildFallbackBrief } = require('../services/aiBrief');
+const { buildFallbackBrief, sanitizeStateForModel, resolveRefs } = require('../services/aiBrief');
 const {
   lagosToday, isPastDue, overdueThroughDate, describeDue,
 } = require('../services/overdueService');
@@ -57,6 +57,19 @@ try {
   if (!/document is not defined/.test(err.message)) throw err;
 }
 const { waNumber, waLink } = global.window.RE;
+
+// screens.js is loaded second, in the same stub, exactly as index.html loads
+// it second — it reads `window.RE` at its own top (`var R = window.RE;`) and
+// registers screens onto it without touching `document` at require time, so
+// the stub above is enough. naturalSort and matchImportColumn/remapCsv are
+// otherwise private to its closure; both are exposed onto R purely so this
+// offline suite can reach them.
+try {
+  require('../../frontend/screens.js');
+} catch (err) {
+  if (!/document is not defined/.test(err.message)) throw err;
+}
+const { naturalSort, matchImportColumn, remapCsv } = global.window.RE;
 
 let passed = 0;
 const failures = [];
@@ -512,6 +525,86 @@ test('a rental in final-notice arrears references the Tenancy Agreement and tena
   assert.ok(!/this allocation is at risk/.test(draft.whatsapp_draft));
 });
 
+// The OpenAI brief prompt must never carry a real name, phone number or
+// email — every buyer is represented by an opaque customer_ref instead
+// (aiBrief.gatherOrgState), and these two functions are the whole boundary:
+// sanitizeStateForModel strips PII going out, resolveRefs restores real
+// names coming back. A regression in either one is a live NDPR problem, not
+// just a wrong label on screen.
+test('sanitizeStateForModel strips name, phone and email from every row before it would reach OpenAI', () => {
+  const state = {
+    today: '2026-07-26',
+    overdue: [{
+      schedule_id: 's1', reservation_id: 'r1', customer_ref: 'BUYER_1',
+      customer_name: 'Mrs Adeyemi Okonkwo', customer_phone: '08031234567', customer_email: 'a@example.com',
+      amount: 500_000,
+    }],
+    upcomingWeek: [],
+    pendingDocuments: [{
+      id: 'd1', customer_ref: 'BUYER_1', customer_name: 'Mrs Adeyemi Okonkwo', doc_type: 'allocation_letter',
+    }],
+    promises: [{
+      customer_ref: 'BUYER_1', customer_name: 'Mrs Adeyemi Okonkwo', status: 'open', promised_date: '2026-08-01',
+    }],
+    nameByRef: new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo']]),
+  };
+
+  const sanitized = sanitizeStateForModel(state);
+  const serialized = JSON.stringify(sanitized);
+
+  assert.ok(!/Adeyemi/.test(serialized), 'buyer name leaked into the sanitized payload');
+  assert.ok(!/08031234567/.test(serialized), 'phone number leaked into the sanitized payload');
+  assert.ok(!/a@example\.com/.test(serialized), 'email leaked into the sanitized payload');
+  assert.ok(!('nameByRef' in sanitized), 'the name lookup map itself must never be serialized outward');
+
+  // What SHOULD survive: the ref and every non-personal field, so the model
+  // still has enough to write a grounded brief.
+  assert.strictEqual(sanitized.overdue[0].customer_ref, 'BUYER_1');
+  assert.strictEqual(sanitized.overdue[0].amount, 500_000);
+  assert.strictEqual(sanitized.pendingDocuments[0].customer_ref, 'BUYER_1');
+  assert.strictEqual(sanitized.promises[0].customer_ref, 'BUYER_1');
+});
+
+test('resolveRefs turns the model\'s ref-only response back into one with real names', () => {
+  const nameByRef = new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo'], ['BUYER_2', 'Mr Bello']]);
+  const modelResponse = {
+    summary: 'BUYER_1 is 40 days behind; BUYER_2 is current.',
+    risks: [{ customer_ref: 'BUYER_1', reason: 'missed two installments', severity: 'high' }],
+    follow_ups: [{
+      customer_ref: 'BUYER_1',
+      reservation_id: 'r1',
+      whatsapp_draft: 'Dear BUYER_1, we have not received your installment.',
+      email_subject: 'Payment reminder for BUYER_1',
+      email_draft: 'Dear BUYER_1,\n\nPlease settle your balance.',
+    }],
+    recommendations: [{ title: 'Call BUYER_1 about the missed installment', reservation_id: 'r1' }],
+  };
+
+  const resolved = resolveRefs(modelResponse, nameByRef);
+
+  assert.strictEqual(resolved.risks[0].customer_name, 'Mrs Adeyemi Okonkwo');
+  assert.ok(!('customer_ref' in resolved.risks[0]), 'the raw ref must not leak into the stored brief');
+  assert.strictEqual(resolved.follow_ups[0].customer_name, 'Mrs Adeyemi Okonkwo');
+  assert.match(resolved.follow_ups[0].whatsapp_draft, /Dear Mrs Adeyemi Okonkwo,/);
+  assert.match(resolved.follow_ups[0].email_subject, /Mrs Adeyemi Okonkwo/);
+  assert.match(resolved.follow_ups[0].email_draft, /Dear Mrs Adeyemi Okonkwo,/);
+  assert.match(resolved.recommendations[0].title, /Call Mrs Adeyemi Okonkwo about/);
+  assert.match(resolved.summary, /Mrs Adeyemi Okonkwo is 40 days behind; Mr Bello is current\./);
+
+  // No stray ref tokens anywhere in the final, buyer-facing brief.
+  const serialized = JSON.stringify(resolved);
+  assert.ok(!/BUYER_\d/.test(serialized), 'a raw ref token survived into the resolved brief');
+});
+
+test('resolveRefs falls back to a safe phrase for a ref the model invents or drops', () => {
+  const nameByRef = new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo']]);
+  const resolved = resolveRefs({
+    risks: [{ customer_ref: 'BUYER_9', reason: 'unrecognized ref', severity: 'low' }],
+    follow_ups: [], recommendations: [], summary: '',
+  }, nameByRef);
+  assert.strictEqual(resolved.risks[0].customer_name, 'this buyer');
+});
+
 // ── Rental tenancies ─────────────────────────────────────────────────────
 // A rental's monthly-rent schedule is an installment plan in every sense
 // installmentService already understands one; these two are the only pieces
@@ -841,6 +934,76 @@ test('waLink renders no link at all for a number waNumber rejects', () => {
   // no link, because it looks like it should have worked.
   assert.strictEqual(waLink('12345'), null);
   assert.strictEqual(waLink('08031234567'), 'https://wa.me/2348031234567');
+});
+
+// naturalSort backs the Units screen, the reservation modal's unit dropdown
+// and the bulk generator — a plain string sort would put A10 before A2 the
+// moment a project passes nine units.
+test('naturalSort orders unit numbers numerically within a prefix, not alphabetically', () => {
+  const input = ['A10', 'A2', 'A100', 'A1', 'B1', 'A11'];
+  assert.deepStrictEqual(
+    input.slice().sort(naturalSort),
+    ['A1', 'A2', 'A10', 'A11', 'A100', 'B1']
+  );
+});
+
+// matchImportColumn drives the CSV import mapping step's auto-selected
+// dropdowns — every variation named in the spec must resolve to the same
+// canonical field regardless of case, punctuation or spacing.
+test('matchImportColumn auto-matches every known header variation', () => {
+  assert.strictEqual(matchImportColumn('unit_number', 'units'), 'unit_number');
+  assert.strictEqual(matchImportColumn('Unit No.', 'units'), 'unit_number');
+  assert.strictEqual(matchImportColumn('Unit Number', 'units'), 'unit_number');
+  assert.strictEqual(matchImportColumn('unit no', 'units'), 'unit_number');
+  assert.strictEqual(matchImportColumn('unit', 'units'), 'unit_number');
+
+  assert.strictEqual(matchImportColumn('list_price', 'units'), 'list_price');
+  assert.strictEqual(matchImportColumn('Price', 'units'), 'list_price');
+  assert.strictEqual(matchImportColumn('Price (₦)', 'units'), 'list_price');
+  assert.strictEqual(matchImportColumn('price', 'units'), 'list_price');
+  assert.strictEqual(matchImportColumn('amount', 'units'), 'list_price');
+
+  assert.strictEqual(matchImportColumn('unit_type', 'units'), 'unit_type');
+  assert.strictEqual(matchImportColumn('Type', 'units'), 'unit_type');
+  assert.strictEqual(matchImportColumn('type', 'units'), 'unit_type');
+
+  assert.strictEqual(matchImportColumn('size_sqm', 'units'), 'size_sqm');
+  assert.strictEqual(matchImportColumn('Size', 'units'), 'size_sqm');
+  assert.strictEqual(matchImportColumn('size', 'units'), 'size_sqm');
+  assert.strictEqual(matchImportColumn('sqm', 'units'), 'size_sqm');
+
+  assert.strictEqual(matchImportColumn('full_name', 'customers'), 'full_name');
+  assert.strictEqual(matchImportColumn('Name', 'customers'), 'full_name');
+  assert.strictEqual(matchImportColumn('name', 'customers'), 'full_name');
+  assert.strictEqual(matchImportColumn('Full Name', 'customers'), 'full_name');
+  assert.strictEqual(matchImportColumn('buyer name', 'customers'), 'full_name');
+
+  assert.strictEqual(matchImportColumn('phone', 'customers'), 'phone');
+  assert.strictEqual(matchImportColumn('Phone', 'customers'), 'phone');
+  assert.strictEqual(matchImportColumn('Phone Number', 'customers'), 'phone');
+  assert.strictEqual(matchImportColumn('mobile', 'customers'), 'phone');
+
+  assert.strictEqual(matchImportColumn('email', 'customers'), 'email');
+  assert.strictEqual(matchImportColumn('Email', 'customers'), 'email');
+});
+
+test('matchImportColumn defaults an unrecognized header to skip (null)', () => {
+  assert.strictEqual(matchImportColumn('Referral Source Notes', 'units'), null);
+  assert.strictEqual(matchImportColumn('Internal ID', 'customers'), null);
+  assert.strictEqual(matchImportColumn('', 'units'), null);
+  assert.strictEqual(matchImportColumn('unit_number', 'not_a_real_kind'), null);
+});
+
+// remapCsv is what actually turns a mapping into the CSV the backend receives
+// — columns mapped to null (Skip this column) must vanish from both the
+// header and every data row, without disturbing the columns kept.
+test('remapCsv drops skipped columns and renames the ones kept', () => {
+  const csv = 'Unit No.,Notes,Price (₦)\nB12,corner unit,45000000\nB13,,52000000';
+  const mapping = { 0: 'unit_number', 1: null, 2: 'list_price' };
+  assert.strictEqual(
+    remapCsv(csv, mapping),
+    'unit_number,list_price\r\nB12,45000000\r\nB13,52000000'
+  );
 });
 
 // ── Report ───────────────────────────────────────────────────────────────

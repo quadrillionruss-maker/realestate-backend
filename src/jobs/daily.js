@@ -15,6 +15,7 @@
 // app — the product's whole promise is that the thinking happened overnight.
 
 const cron = require('node-cron');
+const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { markOverdue } = require('../services/overdueService');
 const { generateDailyBrief } = require('../services/aiBrief');
@@ -22,8 +23,17 @@ const { sweepBrokenPromises } = require('../services/promiseService');
 const { sweepEscalations } = require('../services/escalationService');
 const { notifyOverdue, remindUpcoming } = require('../services/overdueAlerts');
 const { checkTenancyRenewals } = require('../services/rentalService');
+const { mapWithConcurrency } = require('../utils/concurrency');
 
-const SCHEDULE = process.env.RE_BRIEF_CRON || '0 7 * * *';
+const SCHEDULE = env.cron.schedule;
+
+// One org's OpenAI call running slow (a real, ordinary state — not a rare
+// hard-down) used to delay every org queued behind it in a strictly serial
+// loop; this runs up to `limit` orgs at once instead. The file's own header
+// already discloses that a duplicate run across instances is tolerated, so
+// bounding concurrency within ONE run is enough — nothing here needs the
+// coordination a real job queue would add.
+const ORG_CONCURRENCY = 8;
 
 // ORDER MATTERS, and each step depends on the one above it:
 //
@@ -79,18 +89,21 @@ async function runDailyJob() {
   //
   // A reservation is the first point at which there is money to track, which is
   // the first point at which a brief says anything.
-  const { data: reservations, error } = await supabaseAdmin
-    .from('re_reservations')
-    .select('organization_id')
-    .neq('status', 'cancelled');
+  //
+  // An RPC rather than a table query: PostgREST has no DISTINCT reachable
+  // through the query builder, and fetching organization_id off every
+  // non-cancelled reservation platform-wide just to de-duplicate it in Node
+  // is a read that grows forever to answer a question whose real answer is a
+  // short list of ids (migrations/010).
+  const { data: orgRows, error } = await supabaseAdmin.rpc('distinct_reservation_org_ids');
   if (error) throw error;
 
-  const orgIds = [...new Set((reservations || []).map((r) => r.organization_id))];
+  const orgIds = (orgRows || []).map((r) => r.organization_id);
   let succeeded = 0;
   let alerted = 0;
   let reminded = 0;
 
-  for (const orgId of orgIds) {
+  await mapWithConcurrency(orgIds, ORG_CONCURRENCY, async (orgId) => {
     // Alerts first: a rep should hear that their buyer missed a payment even
     // if OpenAI is down and the brief fails.
     try {
@@ -116,7 +129,7 @@ async function runDailyJob() {
       // One org's failure must not cost every other org their morning brief.
       console.error(`[re-daily] brief failed for org ${orgId}:`, err.message);
     }
-  }
+  });
 
   console.log(`[re-daily] briefed ${succeeded}/${orgIds.length} org(s), ${alerted} alert(s), ${reminded} reminder(s), `
     + `${renewals.filed} renewal flag(s)`);
@@ -131,7 +144,7 @@ async function runDailyJob() {
 // Marking overdue ONLY. No brief, no alerts, no SMS: a text message five
 // minutes after a deadline is aggressive, and the morning job is where anybody
 // is told anything.
-const EVENING_SCHEDULE = process.env.RE_EVENING_SWEEP_CRON || '5 18 * * *';
+const EVENING_SCHEDULE = env.cron.eveningSchedule;
 
 async function runEveningSweep() {
   const flipped = await markOverdue();
@@ -153,7 +166,7 @@ let task = null;
 let eveningTask = null;
 
 function start() {
-  if (process.env.RE_DISABLE_CRON === 'true') {
+  if (env.cron.disabled) {
     console.log('[re-daily] disabled via RE_DISABLE_CRON');
     return null;
   }

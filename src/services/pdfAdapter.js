@@ -28,6 +28,8 @@
 // build (`npm ci --omit=dev`) never installs it, and never attempts the
 // Chromium download that engine was going to throw away unused.
 
+const env = require('../config/env');
+
 // Container-only flags. `--single-process` and `--no-zygote` in particular
 // exist to fit inside a memory-constrained Linux container (Render); on an
 // ordinary Windows or macOS dev machine they do the opposite of help — this
@@ -48,7 +50,7 @@ const CONTAINER_ARGS = [
 ];
 
 function resolveEngine() {
-  const forced = String(process.env.PDF_ENGINE || '').toLowerCase();
+  const forced = env.pdf.engine;
   if (forced === 'core' || forced === 'full') return forced;
   // @sparticuz/chromium ships a Linux binary; anywhere else it cannot launch,
   // so platform — not environment — is the deciding fact.

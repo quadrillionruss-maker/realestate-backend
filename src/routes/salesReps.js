@@ -1,5 +1,5 @@
 const express = require('express');
-const { supabaseAdmin } = require('../middleware/orgContext');
+const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
 const router = express.Router();
 
 // A sales rep is a platform user tagged for this product, joined here to their
@@ -20,7 +20,7 @@ router.get('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/', async (req, res, next) => {
+router.post('/', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const { user_id, commission_rate } = req.body || {};
     if (!user_id) return res.status(400).json({ error: 'user_id is required' });
@@ -30,6 +30,26 @@ router.post('/', async (req, res, next) => {
     const { data: user } = await supabaseAdmin
       .from('users').select('id').eq('id', user_id).maybeSingle();
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // Identity is global, not org-scoped — without this, any caller could tag
+    // an unrelated person (anyone at all in the users table) as a rep in
+    // their own org, disclosing that person's name and email through this
+    // org's rep/commission screens and misattributing activity to them. Same
+    // "User not found" either way, so this cannot be used to test whether a
+    // given user_id exists at all.
+    const isSolo = req.orgId === req.userId;
+    if (isSolo) {
+      if (user_id !== req.userId) return res.status(404).json({ error: 'User not found' });
+    } else {
+      const { data: member } = await supabaseAdmin
+        .from('team_members')
+        .select('id')
+        .eq('team_id', req.orgId)
+        .eq('user_id', user_id)
+        .eq('status', 'active')
+        .maybeSingle();
+      if (!member) return res.status(404).json({ error: 'User not found' });
+    }
 
     // Falls back to the workspace default, so a developer sets "our reps get
     // 2.5%" once in Settings rather than on every rep they add.
@@ -59,7 +79,7 @@ router.post('/', async (req, res, next) => {
 
 // Deactivate rather than delete: reservations reference the rep, and who sold
 // what stays true after someone leaves.
-router.patch('/:id', async (req, res, next) => {
+router.patch('/:id', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const { active, commission_rate } = req.body || {};
     const updates = {};

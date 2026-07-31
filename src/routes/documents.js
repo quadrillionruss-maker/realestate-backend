@@ -50,7 +50,24 @@ router.post('/', async (req, res, next) => {
       .insert({ organization_id: req.orgId, reservation_id, doc_type })
       .select()
       .single();
-    if (error) throw error;
+    if (error) {
+      // uniq_re_allocation_letter_per_reservation (migrations/005) blocks a
+      // second live allocation letter for the same reservation — point the
+      // caller at the one that already exists instead of a raw 500.
+      if (error.code === '23505') {
+        const { data: existingDoc } = await supabaseAdmin
+          .from('re_documents')
+          .select()
+          .eq('reservation_id', reservation_id)
+          .eq('doc_type', doc_type)
+          .maybeSingle();
+        return res.status(409).json({
+          error: 'An allocation letter already exists for this reservation. Regenerate it instead of creating a new one.',
+          document: existingDoc || null,
+        });
+      }
+      throw error;
+    }
     res.status(201).json(data);
   } catch (e) { next(e); }
 });
@@ -69,11 +86,15 @@ router.post('/:id/generate', async (req, res, next) => {
     }
 
     audit(req, {
-      action: 'document.generated',
+      action: result.was_regeneration ? 'document.regenerated' : 'document.generated',
       entityType: 're_documents',
       entityId: req.params.id,
-      summary: `${result.document.doc_type.replace(/_/g, ' ')} generated`,
-      metadata: { reservation_id: result.document.reservation_id, doc_type: result.document.doc_type },
+      summary: `${result.document.doc_type.replace(/_/g, ' ')} ${result.was_regeneration ? 'regenerated' : 'generated'}`,
+      metadata: {
+        reservation_id: result.document.reservation_id,
+        doc_type: result.document.doc_type,
+        previous_storage_path: result.previous_storage_path || undefined,
+      },
     });
 
     res.json({ ...result.document, download_url: result.download_url });
@@ -99,6 +120,11 @@ router.patch('/:id/status', async (req, res, next) => {
       return res.status(400).json({ error: `status must be one of: ${DOC_STATUSES.join(', ')}` });
     }
 
+    const { data: existing } = await supabaseAdmin
+      .from('re_documents').select('id, doc_type, status')
+      .eq('id', req.params.id).eq('organization_id', req.orgId).maybeSingle();
+    if (!existing) return res.status(404).json({ error: 'Document not found' });
+
     const { data, error } = await supabaseAdmin
       .from('re_documents')
       .update({ status })
@@ -108,6 +134,19 @@ router.patch('/:id/status', async (req, res, next) => {
       .maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Document not found' });
+
+    // "Signed" in particular is a legally significant fact — the record
+    // that a buyer countersigned. Without this, a dispute over whether a
+    // letter was ever executed had nothing beyond the bare current value to
+    // point to.
+    audit(req, {
+      action: 'document.status_changed',
+      entityType: 're_documents',
+      entityId: data.id,
+      summary: `${existing.doc_type.replace(/_/g, ' ')} moved from ${existing.status} to ${status}`,
+      metadata: { from: existing.status, to: status },
+    });
+
     res.json(data);
   } catch (e) { next(e); }
 });

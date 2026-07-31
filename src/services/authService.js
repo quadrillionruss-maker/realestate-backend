@@ -32,8 +32,14 @@ const SCRYPT = { N: 16_384, r: 8, p: 1, keylen: 64 };
 // N * r * 128 * 2 exceeds Node's 32MB default and throws ERR_CRYPTO_INVALID_SCRYPT_PARAM.
 const SCRYPT_MAXMEM = 64 * 1024 * 1024;
 
-const MIN_PASSWORD_LENGTH = 8;
+const MIN_PASSWORD_LENGTH = 12;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+// Independent of the per-IP limiter in routes/auth.js: a distributed
+// attacker rotating source IPs exhausts that one but not this one, since it
+// keys on the account rather than where the request came from.
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_MINUTES = 15;
 
 const badRequest = (message) => Object.assign(new Error(message), { statusCode: 400 });
 const unauthorized = (message) => Object.assign(new Error(message), { statusCode: 401 });
@@ -97,6 +103,22 @@ async function burnTime() {
     await verifyPassword('not-the-password', await DUMMY_HASH_PROMISE);
   } catch {
     /* timing padding only; never fails a request */
+  }
+}
+
+// One wrong password closer to a lockout. Never throws: a login attempt
+// failing to record itself must not turn into a 500 on top of the wrong
+// password the person already knows they got.
+async function registerFailedLogin(user) {
+  try {
+    const count = Number(user.failed_login_count || 0) + 1;
+    const updates = { failed_login_count: count };
+    if (count >= MAX_FAILED_LOGIN_ATTEMPTS) {
+      updates.locked_until = new Date(Date.now() + LOCKOUT_MINUTES * 60_000).toISOString();
+    }
+    await supabaseAdmin.from('users').update(updates).eq('id', user.id);
+  } catch (err) {
+    console.warn('[auth] could not record failed login attempt:', err.message);
   }
 }
 
@@ -187,7 +209,7 @@ const publicUser = (user) => ({
 async function findUserByEmail(email) {
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select(`${PUBLIC_USER_COLUMNS}, password_hash, google_sub, email_verified_at`)
+    .select(`${PUBLIC_USER_COLUMNS}, password_hash, google_sub, email_verified_at, failed_login_count, locked_until`)
     .ilike('email', normalizeEmail(email))
     .maybeSingle();
   if (error) throw error;
@@ -246,8 +268,22 @@ async function login({ email, password }) {
 
   const user = await findUserByEmail(email);
 
+  // Checked before the password, not after: an attacker who has already
+  // tripped the lockout should not get a fresh timing signal on whether this
+  // particular guess was closer than the last one.
+  if (user?.locked_until && new Date(user.locked_until) > new Date()) {
+    throw Object.assign(
+      new Error('Too many failed attempts on this account. Try again in a few minutes.'),
+      { statusCode: 429 }
+    );
+  }
+
   if (!user || !(await verifyPassword(password, user.password_hash))) {
-    if (!user) await burnTime();
+    if (!user) {
+      await burnTime();
+    } else {
+      await registerFailedLogin(user);
+    }
     // One message for both cases. Which of the two it was is not the
     // attacker's business.
     throw unauthorized('Incorrect email or password.');
@@ -255,7 +291,7 @@ async function login({ email, password }) {
 
   await supabaseAdmin
     .from('users')
-    .update({ last_login_at: new Date().toISOString() })
+    .update({ last_login_at: new Date().toISOString(), failed_login_count: 0, locked_until: null })
     .eq('id', user.id);
 
   // Login SUCCEEDS for an unverified address, and the API is what refuses them

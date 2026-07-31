@@ -65,14 +65,19 @@ if (!TOKEN) {
 // number the product exists to report, in a way that is tedious to unpick.
 //
 // Anything that is not localhost is treated as possibly-real. RE_SMOKE_CONFIRM
-// is the second word, and it has to name the host, so it cannot be left
-// exported in a shell and forgotten.
+// is the second word, and it has to name the host AND today's date — naming
+// just the host would still let someone export it once in a shell profile and
+// have every future run silently confirmed, forever, which is exactly what
+// "cannot be forgotten" is supposed to prevent. Baking in the date means a
+// stale export from last week's staging run stops working on its own.
 const targetHost = (() => {
   try { return new URL(API).hostname; } catch { return ''; }
 })();
 
+const today = new Date().toISOString().slice(0, 10);
+const expectedConfirm = `${targetHost}:${today}`;
 const isLocal = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(targetHost);
-const confirmed = process.env.RE_SMOKE_CONFIRM === targetHost;
+const confirmed = process.env.RE_SMOKE_CONFIRM === expectedConfirm;
 
 if (!isLocal && !confirmed) {
   console.error(`
@@ -81,9 +86,11 @@ if (!isLocal && !confirmed) {
   This test writes real rows — a project, units, buyers, a reservation and a
   payment — which will show up in dashboards and KPIs. Point it at staging.
 
-  If ${targetHost} IS the staging environment, confirm by naming it:
+  If ${targetHost} IS the staging environment, confirm by naming it AND today's
+  date, so an old confirmation left exported in a shell does not silently
+  keep working tomorrow:
 
-      RE_SMOKE_CONFIRM=${targetHost} RE_SMOKE_TOKEN=… npm run smoke
+      RE_SMOKE_CONFIRM=${expectedConfirm} RE_SMOKE_TOKEN=… npm run smoke
 `);
   process.exit(1);
 }
@@ -287,10 +294,17 @@ async function run() {
     audit.status === 200 && audit.body.some((row) => row.action === 'payment.recorded'),
     audit.body?.slice(0, 3));
 
+  // The fragment after #token= is a live bearer credential, good for 60 days
+  // by default — printing it whole would leave it sitting in a terminal
+  // scrollback or a CI log, exactly the exposure the portal's own token
+  // design (frontend/portal.js) goes out of its way to avoid.
+  const redactedPortalUrl = String(portalLink.body.url || '').replace(/([?&#]token=)[^&]+/, '$1<redacted>');
+
   console.log(`\nAll checks passed. Test data is left in place for inspection:`);
   console.log(`  project     ${created.projectId}  ("Test Estate ${stamp}")`);
   console.log(`  reservation ${created.reservationId}`);
-  console.log(`  portal      ${portalLink.body.url}\n`);
+  console.log(`  portal      ${redactedPortalUrl}`);
+  console.log(`              (token redacted — POST /customers/${created.customerA}/portal-link again for a live link)\n`);
   console.log('To exercise overdue handling, set an installment due_date to a past');
   console.log('date in the SQL editor, run markOverdue(), then regenerate the brief.\n');
 }

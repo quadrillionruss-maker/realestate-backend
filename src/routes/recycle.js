@@ -24,6 +24,7 @@
 // name — the table is an implementation detail and should not appear in a URL.
 
 const express = require('express');
+const { requireRole } = require('../middleware/orgContext');
 const { softDelete, restore, listDeleted } = require('../services/softDelete');
 const router = express.Router();
 
@@ -82,7 +83,7 @@ router.get('/:resource/:id/impact', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.delete('/:resource/:id', async (req, res, next) => {
+router.delete('/:resource/:id', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const table = resolve(req, res);
     if (!table) return;

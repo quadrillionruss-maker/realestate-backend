@@ -177,7 +177,7 @@ app.use('/api/re', authenticate, reRoutes);
 // In production the frontend is usually deployed separately (Vercel); set
 // SERVE_FRONTEND=false there if you would rather this process not serve it.
 // Mounted after /api/* so it can never shadow an endpoint.
-if (process.env.SERVE_FRONTEND !== 'false') {
+if (env.serveFrontend) {
   app.use(express.static(require('path').join(__dirname, 'frontend'), { extensions: ['html'] }));
 }
 
@@ -199,20 +199,35 @@ const server = app.listen(env.port, () => {
   console.log(`  ↳  API:         http://localhost:${env.port}/api/re`);
   console.log(`  ↳  Sign in:     http://localhost:${env.port}/api/auth/login`);
   console.log(`  ↳  Webhook:     http://localhost:${env.port}/api/webhooks/paystack`);
-  if (process.env.SERVE_FRONTEND !== 'false') {
+  if (env.serveFrontend) {
     console.log(`  ↳  App:         http://localhost:${env.port}/`);
   }
   console.log('');
 });
 
 // A crash that leaves the process running serves broken responses to real
-// users; better to exit and let the platform restart a clean one.
+// users; better to exit and let the platform restart a clean one. Applied to
+// BOTH handlers — an unhandled rejection left running is the same class of
+// corrupted state as an uncaught exception, and this codebase has enough
+// fire-and-forget async work (unawaited audit writes, notification sends)
+// that treating the two differently was never a deliberate choice.
+//
+// `reason` on a rejection is not guaranteed to be an Error — anything can be
+// thrown or rejected with. Logging it directly if it is not one risks
+// printing an arbitrary value (in the worst case, a row containing a buyer's
+// name or email) to logs Render retains indefinitely.
+function describeCrash(value) {
+  if (value instanceof Error) return value.stack || value.message;
+  return `non-Error rejection of type ${typeof value}: ${String(value).slice(0, 200)}`;
+}
+
 process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled rejection:', reason);
+  console.error('Unhandled rejection:', describeCrash(reason));
+  process.exit(1);
 });
 
 process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
+  console.error('Uncaught exception:', describeCrash(err));
   process.exit(1);
 });
 

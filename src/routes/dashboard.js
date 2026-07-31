@@ -28,7 +28,8 @@ router.get('/', async (req, res, next) => {
     let paymentsQuery = supabaseAdmin.from('re_payments')
       .select('amount, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(property_type, re_units!inner(project_id))))')
       .eq('organization_id', orgId)
-      .gte('paid_at', monthStart);
+      .gte('paid_at', monthStart)
+      .is('voided_at', null);
 
     let scheduleQuery = supabaseAdmin.from('re_installment_schedule')
       .select(projectId
@@ -185,7 +186,7 @@ router.get('/at-risk', async (req, res, next) => {
     if (scheduleIds.length) {
       const { data: promises } = await supabaseAdmin
         .from('re_payment_promises')
-        .select('schedule_id, promised_date, promised_amount, status, spoke_to')
+        .select('id, schedule_id, promised_date, promised_amount, status, spoke_to')
         .eq('organization_id', req.orgId)
         .in('schedule_id', scheduleIds)
         .in('status', ['open', 'broken']);

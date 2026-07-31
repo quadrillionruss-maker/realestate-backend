@@ -19,9 +19,18 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { lagosToday, describeDue } = require('./overdueService');
 const { describeStage } = require('./escalationService');
 const notify = require('./notificationService');
+const { mapWithConcurrency } = require('../utils/concurrency');
 
-const naira = (amount) =>
-  '₦' + Number(amount || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+// Termii calls, one per buyer — a developer with a couple hundred buyers
+// three days from due plus a couple hundred who just missed used to send
+// these one at a time, each waiting out its own network round trip before
+// the next buyer's text even started.
+const SMS_CONCURRENCY = 5;
+
+const naira = (amount) => {
+  const n = Number(amount || 0);
+  return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+};
 
 const formatDate = (value) =>
   new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -253,8 +262,8 @@ async function remindUpcoming(orgId) {
     if (result.status === 'sent') sent += 1;
   };
 
-  for (const row of upcoming.data || []) await send(row, 'upcoming');
-  for (const row of justMissed.data || []) await send(row, 'missed');
+  await mapWithConcurrency(upcoming.data || [], SMS_CONCURRENCY, (row) => send(row, 'upcoming'));
+  await mapWithConcurrency(justMissed.data || [], SMS_CONCURRENCY, (row) => send(row, 'missed'));
 
   return { sent, upcoming: (upcoming.data || []).length, missed: (justMissed.data || []).length };
 }

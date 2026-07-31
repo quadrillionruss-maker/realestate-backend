@@ -72,9 +72,17 @@ async function softDelete(req, table, id, { reason = null } = {}) {
     throw Object.assign(new Error(`${table} cannot be deleted.`), { statusCode: 400 });
   }
 
+  // re_units is deliberately not in CHILDREN below a reservation — deleting a
+  // buyer's reservation must not delete the unit itself, which can outlive
+  // any number of reservations. But nothing else releases it either: a
+  // deleted reservation's unit used to stay 'reserved'/'sold' forever, with
+  // no route anywhere in the product able to set it back — PATCH /units/:id
+  // deliberately refuses to touch status, precisely to stop a unit being
+  // sold twice. Selected here, before the cascade runs, from the reservation
+  // being deleted.
   const { data: row, error: findError } = await supabaseAdmin
     .from(table)
-    .select('id')
+    .select(table === 're_reservations' ? 'id, unit_id' : 'id')
     .eq('id', id)
     .eq('organization_id', req.orgId)
     .is('deleted_at', null)
@@ -86,6 +94,14 @@ async function softDelete(req, table, id, { reason = null } = {}) {
   const deleted = {};
 
   await cascade(table, [id], req.orgId, stamp, deleted);
+
+  if (table === 're_reservations' && row.unit_id) {
+    await supabaseAdmin
+      .from('re_units')
+      .update({ status: 'available' })
+      .eq('id', row.unit_id)
+      .eq('organization_id', req.orgId);
+  }
 
   const total = Object.values(deleted).reduce((sum, n) => sum + n, 0);
 

@@ -1,6 +1,6 @@
 const express = require('express');
-const { supabaseAdmin } = require('../middleware/orgContext');
-const { initInstallmentPayment, recordManualPayment } = require('../services/paystackService');
+const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
+const { initInstallmentPayment, recordManualPayment, reallocateOverpayment, voidPayment } = require('../services/paystackService');
 const { onPaymentRecorded } = require('../services/paymentEvents');
 const { generateReceipt } = require('../services/receiptService');
 const { getDownloadUrl } = require('../services/documentService');
@@ -79,7 +79,7 @@ router.get('/schedule', async (req, res, next) => {
     const paidBySchedule = new Map();
     if (ids.length) {
       const { data: payments } = await supabaseAdmin
-        .from('re_payments').select('schedule_id, amount').in('schedule_id', ids);
+        .from('re_payments').select('schedule_id, amount').in('schedule_id', ids).is('voided_at', null);
       for (const payment of payments || []) {
         paidBySchedule.set(
           payment.schedule_id,
@@ -124,13 +124,15 @@ router.post('/:scheduleId/init', async (req, res, next) => {
 // path — it is the common one.
 router.post('/:scheduleId/record', async (req, res, next) => {
   try {
-    const { amount, method, reference } = req.body || {};
+    const { amount, method, reference, payer_name } = req.body || {};
     if (amount == null) return res.status(400).json({ error: 'amount is required' });
     if (method && !PAYMENT_METHODS.includes(method)) {
       return res.status(400).json({ error: `method must be one of: ${PAYMENT_METHODS.join(', ')}` });
     }
 
-    const payment = await recordManualPayment(req.orgId, req.params.scheduleId, { amount, method, reference });
+    const payment = await recordManualPayment(req.orgId, req.params.scheduleId, {
+      amount, method, reference, payerName: payer_name,
+    });
 
     // Receipt, commission, buyer notification, promise resolution and the
     // audit entry — the same work a Paystack payment triggers, because which
@@ -149,11 +151,78 @@ router.post('/:scheduleId/record', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Moves an existing overpayment onto a different installment, without
+// treating the credit as a second real-world transfer — see
+// paystackService.reallocateOverpayment for why this is not just another
+// call to /record.
+router.post('/:paymentId/reallocate', async (req, res, next) => {
+  try {
+    const { to_schedule_id } = req.body || {};
+    if (!to_schedule_id) return res.status(400).json({ error: 'to_schedule_id is required' });
+
+    const payment = await reallocateOverpayment(req.orgId, req.params.paymentId, to_schedule_id);
+
+    // Same post-payment work as any other payment — a receipt and a buyer
+    // notification are still correct here (the buyer should know their
+    // credit was applied). Commission is not: commissionService recognizes
+    // reallocated_from_payment_id and skips accrual on its own.
+    const effects = await onPaymentRecorded({
+      orgId: req.orgId,
+      paymentId: payment.id,
+      source: 'manual',
+      actor: req.user,
+      overpayment: payment.overpayment,
+    });
+
+    res.status(201).json({ ...payment, effects });
+  } catch (e) { next(e); }
+});
+
+// Correcting a payment entered with the wrong amount — not a delete, and not
+// an edit of the original row (see paystackService.voidPayment for why): the
+// mistake stays visible, it just stops counting. Owner/admin-gated for the
+// same reason waiving debt is: this is a direct, unilateral change to what a
+// buyer is recorded as owing.
+router.post('/:paymentId/void', requireRole(['owner', 'admin']), async (req, res, next) => {
+  try {
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'A reason is required.' });
+
+    const payment = await voidPayment(req.orgId, req.params.paymentId, reason);
+
+    // The commission this payment earned, if any, was money that turns out
+    // never to have arrived — void it too, rather than leaving a rep paid
+    // (or owed) on a transfer that didn't happen.
+    const { data: commission } = await supabaseAdmin
+      .from('re_commissions')
+      .update({ status: 'void' })
+      .eq('payment_id', payment.id)
+      .eq('organization_id', req.orgId)
+      .neq('status', 'void')
+      .select('id, amount')
+      .maybeSingle();
+
+    audit(req, {
+      action: 'payment.voided',
+      entityType: 're_payments',
+      entityId: payment.id,
+      summary: `₦${Number(payment.amount).toLocaleString('en-NG')} payment voided — ${reason}`
+        + (commission ? `; commission of ₦${Number(commission.amount).toLocaleString('en-NG')} voided with it` : ''),
+      metadata: {
+        reason, amount: payment.amount, schedule_id: payment.schedule_id,
+        commission_voided: commission?.id || null,
+      },
+    });
+
+    res.json({ ...payment, commission_voided: Boolean(commission) });
+  } catch (e) { next(e); }
+});
+
 // Writing off an installment the developer has decided not to collect — a
 // goodwill gesture, a dispute settled another way, a bad debt finally
 // accepted. Requires a reason: unlike a payment, there is no receipt behind
 // this to explain later why the money stopped being owed.
-router.patch('/:scheduleId/waive', async (req, res, next) => {
+router.patch('/:scheduleId/waive', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const reason = String(req.body?.reason || '').trim();
     if (!reason) return res.status(400).json({ error: 'A reason is required.' });
@@ -191,20 +260,24 @@ router.patch('/:scheduleId/waive', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Re-render a receipt. Idempotent — it writes back to the same document row
-// and the same storage path — so this doubles as "the buyer lost it, send it
-// again" without producing a second receipt for one payment.
+// Re-render a receipt. Idempotent — it writes back to the same document row,
+// each render at its own versioned storage path — so this doubles as "the
+// buyer lost it, send it again" without producing a second receipt for one
+// payment, and without the earlier render's exact bytes being lost.
 router.post('/:id/receipt', async (req, res, next) => {
   try {
     const result = await generateReceipt(req.orgId, req.params.id);
     if (result.notFound) return res.status(404).json({ error: 'Payment not found' });
 
     audit(req, {
-      action: 'receipt.generated',
+      action: result.was_regeneration ? 'receipt.regenerated' : 'receipt.generated',
       entityType: 're_payments',
       entityId: req.params.id,
-      summary: `Receipt ${result.receipt_number} generated`,
-      metadata: { document_id: result.document.id },
+      summary: `Receipt ${result.receipt_number} ${result.was_regeneration ? 'regenerated' : 'generated'}`,
+      metadata: {
+        document_id: result.document.id,
+        previous_storage_path: result.previous_storage_path || undefined,
+      },
     });
 
     res.json({

@@ -12,13 +12,10 @@
 
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { sanitizeSearchTerm } = require('../utils/searchFilter');
 const router = express.Router();
 
 const LIMIT_PER_KIND = 8;
-
-// % and _ are ILIKE wildcards. A search for "100%" must look for "100%", and a
-// search for "_" must not match every row in the table.
-const escapeLike = (term) => term.replace(/[%_\\]/g, (c) => `\\${c}`);
 
 router.get('/', async (req, res, next) => {
   try {
@@ -27,7 +24,7 @@ router.get('/', async (req, res, next) => {
       return res.json({ query: raw, customers: [], units: [], projects: [], reservations: [] });
     }
 
-    const term = escapeLike(raw);
+    const term = sanitizeSearchTerm(raw);
     const like = `%${term}%`;
     // Phone numbers are typed with spaces, dashes and +234 in every possible
     // combination. Matching on digits alone is what makes "0803 123" find

@@ -30,7 +30,7 @@ function check(name, cond, detail) {
 
   // ── Apply migrations, twice, to prove idempotency ───────────────────────
   for (const pass of ['first', 'second']) {
-    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql']) {
+    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -61,7 +61,7 @@ function check(name, cond, detail) {
     end $$;
   `);
 
-  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql']) {
+  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -619,6 +619,139 @@ function check(name, cond, detail) {
   const [{ hasIndex }] = await q(
     `select exists(select 1 from pg_indexes where indexname='idx_re_reservations_tenancy_end') as "hasIndex"`);
   check('the tenancy-renewal sweep index exists', hasIndex);
+
+  // ── 007: payment reallocation ────────────────────────────────────────────
+
+  const paymentCols = await colsOf('re_payments');
+  check('re_payments has reallocated_from_payment_id', paymentCols.includes('reallocated_from_payment_id'), paymentCols.join(', '));
+
+  const [{ id: reallocTargetSched }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,2,'2026-02-01',3750000) returning id`, [userId, planId]);
+
+  let reallocationAllowed = true;
+  try {
+    await q(`insert into re_payments (organization_id, schedule_id, amount, method, reallocated_from_payment_id)
+             values ($1,$2,300000,'bank_transfer',$3)`, [userId, reallocTargetSched, paymentId]);
+  } catch (err) { reallocationAllowed = false; console.log(`       ${err.message}`); }
+  check('a payment credit can be reallocated to a different installment', reallocationAllowed);
+
+  let doubleReallocationBlocked = false;
+  try {
+    await q(`insert into re_payments (organization_id, schedule_id, amount, method, reallocated_from_payment_id)
+             values ($1,$2,100000,'bank_transfer',$3)`, [userId, schedId, paymentId]);
+  } catch (err) { doubleReallocationBlocked = /unique|duplicate/i.test(err.message); }
+  check('the same overpayment cannot be reallocated twice', doubleReallocationBlocked);
+
+  // ── 008: voiding a wrongly recorded payment ──────────────────────────────
+
+  const voidCols = await colsOf('re_payments');
+  check('re_payments has voided_at and void_reason', voidCols.includes('voided_at') && voidCols.includes('void_reason'), voidCols.join(', '));
+
+  let voidAllowed = true;
+  try {
+    await q(`update re_payments set voided_at=now(), void_reason='entered in error' where id=$1`, [paymentId]);
+  } catch (err) { voidAllowed = false; console.log(`       ${err.message}`); }
+  check('a payment can be marked voided', voidAllowed);
+
+  // Voiding a reallocation must free its source to be reallocated again —
+  // otherwise the "one reallocation per payment" index would permanently
+  // lock out a correction to a misallocated credit.
+  const [{ id: freshSourceSched }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,3,'2026-03-01',500000) returning id`, [userId, planId]);
+  const [{ id: freshSourcePayment }] = await q(
+    `insert into re_payments (organization_id, schedule_id, amount, method, overpayment)
+     values ($1,$2,900000,'bank_transfer',400000) returning id`, [userId, freshSourceSched]);
+  const [{ id: freshTargetSched }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,4,'2026-04-01',400000) returning id`, [userId, planId]);
+
+  await q(`insert into re_payments (organization_id, schedule_id, amount, method, reallocated_from_payment_id)
+           values ($1,$2,400000,'bank_transfer',$3)`, [userId, freshTargetSched, freshSourcePayment]);
+  await q(`update re_payments set voided_at=now(), void_reason='wrong installment'
+           where reallocated_from_payment_id=$1`, [freshSourcePayment]);
+
+  let reallocationAfterVoidAllowed = true;
+  try {
+    await q(`insert into re_payments (organization_id, schedule_id, amount, method, reallocated_from_payment_id)
+             values ($1,$2,400000,'bank_transfer',$3)`, [userId, freshTargetSched, freshSourcePayment]);
+  } catch (err) { reallocationAfterVoidAllowed = false; console.log(`       ${err.message}`); }
+  check('voiding a reallocation frees its source to be reallocated again', reallocationAfterVoidAllowed);
+
+  // ── 009: per-account login lockout ───────────────────────────────────────
+
+  const lockoutCols = await colsOf('users');
+  check('users has failed_login_count and locked_until',
+    lockoutCols.includes('failed_login_count') && lockoutCols.includes('locked_until'), lockoutCols.join(', '));
+
+  const [{ failed_login_count: defaultFailedCount }] = await q(
+    `select failed_login_count from users where id=$1`, [userId]);
+  check('failed_login_count defaults to 0', Number(defaultFailedCount) === 0, `${defaultFailedCount}`);
+
+  // ── 010: distinct_reservation_org_ids() backs the daily job's org fan-out ──
+
+  let orgIdsFromRpc = [];
+  try {
+    orgIdsFromRpc = (await q(`select * from distinct_reservation_org_ids()`)).map((r) => r.organization_id);
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('distinct_reservation_org_ids() is callable and includes an org with a live reservation',
+    orgIdsFromRpc.includes(userId), orgIdsFromRpc.join(', '));
+
+  // ── 011: payer_name on a manual payment ──────────────────────────────────
+
+  const payerCols = await colsOf('re_payments');
+  check('re_payments has payer_name', payerCols.includes('payer_name'), payerCols.join(', '));
+
+  let payerNameStored = false;
+  try {
+    const [{ id: payerSched }] = await q(
+      `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+       values ($1,$2,5,'2026-05-01',500000) returning id`, [userId, planId]);
+    const [{ payer_name }] = await q(
+      `insert into re_payments (organization_id, schedule_id, amount, method, payer_name)
+       values ($1,$2,500000,'bank_transfer','A relative of the buyer') returning payer_name`,
+      [userId, payerSched]);
+    payerNameStored = payer_name === 'A relative of the buyer';
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('a payment records who actually paid', payerNameStored);
+
+  // ── 012: one pending invite per email, per team ──────────────────────────
+
+  let secondInviteBlocked = false;
+  try {
+    await q(`insert into team_members (team_id, invited_email, role, status)
+             values ($1,'invitee@example.com','member','invited')`, [teamId]);
+    await q(`insert into team_members (team_id, invited_email, role, status)
+             values ($1,'invitee@example.com','member','invited')`, [teamId]);
+  } catch (err) { secondInviteBlocked = /unique|duplicate/i.test(err.message); }
+  check('a pending invite cannot be duplicated for the same team and email', secondInviteBlocked);
+
+  // ── 013: one open AI task per title, per org ─────────────────────────────
+
+  let secondAiTaskBlocked = false;
+  try {
+    await q(`insert into re_tasks (organization_id, title, source, status)
+             values ($1,'Renew tenancy for Unit A1','ai','open')`, [userId]);
+    await q(`insert into re_tasks (organization_id, title, source, status)
+             values ($1,'Renew tenancy for Unit A1','ai','open')`, [userId]);
+  } catch (err) { secondAiTaskBlocked = /unique|duplicate/i.test(err.message); }
+  check('a duplicate open AI task with the same title is refused', secondAiTaskBlocked);
+
+  let manualTaskWithSameTitleOk = true;
+  try {
+    await q(`insert into re_tasks (organization_id, title, source, status)
+             values ($1,'Renew tenancy for Unit A1','manual','open')`, [userId]);
+  } catch (err) { manualTaskWithSameTitleOk = false; console.log(`       ${err.message}`); }
+  check('a manual task with the same title is not blocked by the AI-task index', manualTaskWithSameTitleOk);
+
+  // ── 014: indexes for the sweep and the commissions list ──────────────────
+
+  const perfIndexes = (await q(
+    `select indexname from pg_indexes where indexname in
+     ('idx_re_promises_status_date','idx_re_commissions_org_created')`)).map((r) => r.indexname);
+  check('idx_re_promises_status_date exists', perfIndexes.includes('idx_re_promises_status_date'));
+  check('idx_re_commissions_org_created exists', perfIndexes.includes('idx_re_commissions_org_created'));
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

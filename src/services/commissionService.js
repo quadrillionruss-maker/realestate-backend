@@ -17,6 +17,7 @@
 //    re-record — without a rep being paid twice for the same money.
 
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { auditSystem } = require('./auditService');
 
 const round2 = (value) => Math.round(Number(value) * 100) / 100;
 
@@ -27,10 +28,21 @@ async function accrueForPayment({ orgId, payment, reservation, salesRep }) {
   try {
     if (!salesRep?.id) return { accrued: false, reason: 'no sales rep on the reservation' };
 
+    // A reallocation row moves an existing credit onto a different
+    // installment — it is not new money, so it earns no new commission. The
+    // qualifying portion was already accrued on the payment it came from
+    // (capped by the same overpayment subtraction below).
+    if (payment.reallocated_from_payment_id) {
+      return { accrued: false, reason: 'reallocated credit — already accrued on the original payment' };
+    }
+
     const rate = Number(salesRep.commission_rate || 0);
     if (!(rate > 0)) return { accrued: false, reason: 'rep has no commission rate set' };
 
-    const base = Number(payment.amount || 0);
+    // Capped at what was actually due, not the full amount transferred — a
+    // buyer who sends ₦5m against a ₦500k installment should not pay the rep
+    // commission on the ₦4.5m sitting as an unresolved credit.
+    const base = Math.max(0, Number(payment.amount || 0) - Number(payment.overpayment || 0));
     if (!(base > 0)) return { accrued: false, reason: 'payment has no amount' };
 
     const { data, error } = await supabaseAdmin
@@ -51,6 +63,18 @@ async function accrueForPayment({ orgId, payment, reservation, salesRep }) {
     // job, not an error.
     if (error?.code === '23505') return { accrued: false, reason: 'already accrued' };
     if (error) throw error;
+
+    // No req in scope this deep in the payment pipeline (Paystack webhooks
+    // land here with no HTTP request behind them at all) — auditSystem is the
+    // form that takes an orgId directly rather than reading it off req.
+    auditSystem({
+      orgId,
+      action: 'commission.accrued',
+      entityType: 're_commissions',
+      entityId: data.id,
+      summary: `₦${round2((base * rate) / 100).toLocaleString('en-NG')} commission accrued for ${salesRep.id} at ${rate}%`,
+      metadata: { sales_rep_id: salesRep.id, reservation_id: reservation.id, payment_id: payment.id, rate, base_amount: base },
+    });
 
     return { accrued: true, commission: data };
   } catch (err) {

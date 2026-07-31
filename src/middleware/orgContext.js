@@ -17,10 +17,24 @@ const env = require('../config/env'); // also loads .env for everything downstre
 // `supabaseRaw` sees everything, including soft-deleted rows. Almost nothing
 // should use it: src/services/softDelete.js needs it to list and restore
 // deleted rows, and that is the whole legitimate audience.
+// supabase-js has no built-in request timeout — left alone, a stalled query
+// hangs until Node's own TCP timeout, which can be minutes or effectively
+// forever. This aborts and surfaces it as a normal rejection instead, so a
+// hung database connection turns into a 500 rather than a request that never
+// answers at all.
+function fetchWithTimeout(url, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), env.supabase.timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 const supabaseRaw = createClient(
   env.supabase.url,
   env.supabase.serviceRoleKey,
-  { auth: { persistSession: false, autoRefreshToken: false } }
+  {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { fetch: fetchWithTimeout },
+  }
 );
 
 // ── Soft delete, enforced at the client rather than per query ──────────────
@@ -106,4 +120,17 @@ function orgContext(req, res, next) {
   next();
 }
 
-module.exports = { orgContext, resolveOrgId, supabaseAdmin, supabaseRaw, SOFT_DELETABLE };
+// A gate for the handful of actions any team member could otherwise reach:
+// waiving debt, deleting cascading records, changing commission payouts,
+// editing workspace settings. Mounted per-route, after orgContext, wherever
+// the action is meant to be owner/admin-only rather than any-member-only.
+function requireRole(roles) {
+  return function (req, res, next) {
+    if (!roles.includes(req.orgRole)) {
+      return res.status(403).json({ error: `Only ${roles.join(' or ')} can do this.` });
+    }
+    next();
+  };
+}
+
+module.exports = { orgContext, resolveOrgId, requireRole, supabaseAdmin, supabaseRaw, SOFT_DELETABLE };

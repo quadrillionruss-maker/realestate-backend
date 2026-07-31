@@ -3,21 +3,28 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { issuePortalToken, portalUrl } = require('../services/portalService');
 const notify = require('../services/notificationService');
 const { audit } = require('../services/auditService');
+const { sanitizeSearchTerm } = require('../utils/searchFilter');
 const router = express.Router();
 
 router.get('/', async (req, res, next) => {
   try {
+    // Unbounded until now — a developer several years in has thousands of
+    // buyers, and every one of them came back on every load of this screen.
+    // Same cap shape as payments.js: a default that covers a normal
+    // workspace, a ceiling nobody needs to exceed in one page.
+    const limit = Math.min(Number(req.query.limit) || 500, 2000);
+
     let query = supabaseAdmin
       .from('re_customers')
       .select('*')
       .eq('organization_id', req.orgId)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(limit);
 
     if (req.query.search) {
       // Sales staff search by whatever they have to hand — a name, the phone
       // number from a WhatsApp thread, or an email.
-      // % and _ are escaped so a search for "100%" isn't read as a wildcard.
-      const term = String(req.query.search).replace(/[%_]/g, (c) => `\\${c}`);
+      const term = sanitizeSearchTerm(req.query.search);
       query = query.or(`full_name.ilike.%${term}%,phone.ilike.%${term}%,email.ilike.%${term}%`);
     }
 
@@ -48,9 +55,55 @@ router.get('/:id', async (req, res, next) => {
       .maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Customer not found' });
+
+    data.unallocated_credit = await findUnallocatedCredit(req.orgId, data);
     res.json(data);
   } catch (e) { next(e); }
 });
+
+// A payment that overpaid its installment leaves a real credit. This reads
+// it from the database rather than the per-device reminder the UI used to
+// keep in localStorage, so any staff member on any device sees the same
+// unresolved credit — not just whoever's browser recorded the payment.
+async function findUnallocatedCredit(orgId, customer) {
+  const scheduleIds = [];
+  for (const reservation of customer.re_reservations || []) {
+    const plans = Array.isArray(reservation.re_installment_plans)
+      ? reservation.re_installment_plans
+      : [reservation.re_installment_plans].filter(Boolean);
+    for (const plan of plans) {
+      for (const row of plan.re_installment_schedule || []) scheduleIds.push(row.id);
+    }
+  }
+  if (!scheduleIds.length) return null;
+
+  const { data: overpaid } = await supabaseAdmin
+    .from('re_payments')
+    .select('id, overpayment, paid_at')
+    .eq('organization_id', orgId)
+    .in('schedule_id', scheduleIds)
+    .gt('overpayment', 0)
+    .is('voided_at', null)
+    .order('paid_at', { ascending: false });
+  if (!overpaid?.length) return null;
+
+  // Excludes credit already moved elsewhere — a payment can only be the
+  // source of one LIVE reallocation (migrations/007's unique index applies
+  // to non-voided rows in practice, since a voided reallocation frees the
+  // credit again), so this is exactly the "has this one been spent yet" check.
+  const { data: spent } = await supabaseAdmin
+    .from('re_payments')
+    .select('reallocated_from_payment_id')
+    .eq('organization_id', orgId)
+    .in('reallocated_from_payment_id', overpaid.map((p) => p.id))
+    .is('voided_at', null);
+  const spentIds = new Set((spent || []).map((s) => s.reallocated_from_payment_id));
+
+  const live = overpaid.find((p) => !spentIds.has(p.id));
+  if (!live) return null;
+
+  return { payment_id: live.id, amount: Number(live.overpayment) };
+}
 
 router.post('/', async (req, res, next) => {
   try {

@@ -49,8 +49,11 @@
     });
   }
 
+  // Sign goes before the symbol — "-₦5,000", not "₦-5,000", which reads as a
+  // rendering glitch rather than a negative amount.
   function naira(amount) {
-    return '₦' + Number(amount || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+    var n = Number(amount || 0);
+    return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
   }
 
   // Compact money for tiles, where ₦1,240,000,000 wraps and ₦1.24b does not.
@@ -60,10 +63,11 @@
   // reads as a rendering bug. Below ₦1,000 there is nothing to abbreviate.
   function nairaShort(amount) {
     var n = Number(amount || 0);
+    var sign = n < 0 ? '-' : '';
     var abs = Math.abs(n);
-    if (abs >= 1e9) return '₦' + trimZeros((n / 1e9).toFixed(2)) + 'b';
-    if (abs >= 1e6) return '₦' + trimZeros((n / 1e6).toFixed(1)) + 'm';
-    if (abs >= 1e3) return '₦' + trimZeros((n / 1e3).toFixed(1)) + 'k';
+    if (abs >= 1e9) return sign + '₦' + trimZeros((abs / 1e9).toFixed(2)) + 'b';
+    if (abs >= 1e6) return sign + '₦' + trimZeros((abs / 1e6).toFixed(1)) + 'm';
+    if (abs >= 1e3) return sign + '₦' + trimZeros((abs / 1e3).toFixed(1)) + 'k';
     return naira(n);
   }
 
@@ -124,6 +128,12 @@
     var digits = String(phone || '').replace(/\D/g, '');
     if (!digits) return null;
 
+    // "00" is the international dialing prefix used in place of "+" —
+    // 00234803… means the same number as +234803…. Left unstripped, this fell
+    // into the "leading 0 = local trunk prefix" branch below and mangled it
+    // into a 14-digit non-number instead of dropping the link entirely.
+    if (digits.indexOf('00') === 0 && digits.length > 2) digits = digits.slice(2);
+
     var normalized;
     if (digits.indexOf('234') === 0) normalized = digits;
     else if (digits.charAt(0) === '0') normalized = '234' + digits.slice(1);
@@ -165,7 +175,7 @@
     openFile(url, filename);
     // Revoked on a delay: revoking immediately can cancel the download in
     // Safari, which reads the blob after the click returns.
-    setTimeout(function () { URL.revokeObjectURL(url); }, 30_000);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
   }
 
   function openFile(url, filename) {
@@ -287,6 +297,22 @@
   // that a design choice rather than a landmine.
   var modalSeq = 0;
 
+  // Keeps Tab cycling inside an open modal/drawer instead of escaping to the
+  // page underneath — a screen reader or keyboard-only user tabbing past the
+  // last field in a payment-record dialog should not land back on the sidebar.
+  function focusableIn(container) {
+    return qsa('a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])', container)
+      .filter(function (elx) { return elx.offsetParent !== null; });
+  }
+  function trapTab(container, e) {
+    if (e.key !== 'Tab') return;
+    var focusable = focusableIn(container);
+    if (!focusable.length) return;
+    var first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+
   function modal(options) {
     var opts = options || {};
     var overlay = el('overlay');
@@ -320,7 +346,7 @@
       document.removeEventListener('keydown', onKey);
     }
 
-    function onKey(e) { if (e.key === 'Escape') close(); }
+    function onKey(e) { if (e.key === 'Escape') close(); else trapTab(scrim.querySelector('.modal'), e); }
     document.addEventListener('keydown', onKey);
 
     qsa('[data-close]', scrim).forEach(function (b) { b.addEventListener('click', close); });
@@ -331,9 +357,16 @@
       e.preventDefault();
       if (!opts.onSubmit) return close();
 
+      // A second Enter keypress re-dispatches submit while the first call is
+      // still mid-await — pointer-events:none on the button only stops a
+      // second click, not this. Without the guard, a rep double-tapping Enter
+      // while recording a payment can fire the request twice.
+      if (form.dataset.submitting === 'true') return;
+      form.dataset.submitting = 'true';
+
       var error = qs('.modal-error', form);
       if (error) error.remove();
-      if (submit) submit.classList.add('is-working');
+      if (submit) { submit.classList.add('is-working'); submit.disabled = true; }
 
       try {
         await opts.onSubmit(form, close);
@@ -344,7 +377,8 @@
         notice.textContent = err.message;
         form.appendChild(notice);
       } finally {
-        if (submit) submit.classList.remove('is-working');
+        delete form.dataset.submitting;
+        if (submit) { submit.classList.remove('is-working'); submit.disabled = false; }
       }
     });
 
@@ -384,6 +418,8 @@
 
     var panel = document.createElement('aside');
     panel.className = 'drawer';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
     panel.innerHTML =
       '<div class="drawer-head">' +
         '<div style="flex:1;min-width:0">' +
@@ -402,11 +438,14 @@
       if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
       document.removeEventListener('keydown', onKey);
     }
-    function onKey(e) { if (e.key === 'Escape') close(); }
+    function onKey(e) { if (e.key === 'Escape') close(); else trapTab(panel, e); }
 
     document.addEventListener('keydown', onKey);
     qsa('[data-close]', panel).forEach(function (b) { b.addEventListener('click', close); });
     scrim.addEventListener('mousedown', function (e) { if (e.target === scrim) close(); });
+
+    var firstFocusable = panel.querySelector('[data-close]');
+    if (firstFocusable) setTimeout(function () { firstFocusable.focus(); }, 40);
 
     return { close: close, body: panel.querySelector('.drawer-body'), root: panel };
   }
@@ -820,10 +859,15 @@
       }
     });
 
+    // A double-tap on "Sign in" — a slow network, a keyboard user's stray
+    // second Enter — used to fire the request twice; is-working was only ever
+    // a spinner class, never a guard. disabled is the guard now.
     el('form-login').addEventListener('submit', async function (e) {
       e.preventDefault();
-      gateError('login-error', '');
       var button = el('login-submit');
+      if (button.disabled) return;
+      gateError('login-error', '');
+      button.disabled = true;
       button.classList.add('is-working');
 
       try {
@@ -837,14 +881,17 @@
       } catch (err) {
         gateError('login-error', err.message);
       } finally {
+        button.disabled = false;
         button.classList.remove('is-working');
       }
     });
 
     el('form-register').addEventListener('submit', async function (e) {
       e.preventDefault();
-      gateError('reg-error', '');
       var button = el('reg-submit');
+      if (button.disabled) return;
+      gateError('reg-error', '');
+      button.disabled = true;
       button.classList.add('is-working');
 
       try {
@@ -862,15 +909,18 @@
       } catch (err) {
         gateError('reg-error', err.message);
       } finally {
+        button.disabled = false;
         button.classList.remove('is-working');
       }
     });
 
     el('form-forgot').addEventListener('submit', async function (e) {
       e.preventDefault();
+      var button = el('forgot-submit');
+      if (button.disabled) return;
       gateError('forgot-error', '');
       el('forgot-ok').classList.add('hidden');
-      var button = el('forgot-submit');
+      button.disabled = true;
       button.classList.add('is-working');
 
       try {
@@ -889,14 +939,17 @@
       } catch (err) {
         gateError('forgot-error', err.message);
       } finally {
+        button.disabled = false;
         button.classList.remove('is-working');
       }
     });
 
     el('form-reset').addEventListener('submit', async function (e) {
       e.preventDefault();
-      gateError('reset-error', '');
       var button = el('reset-submit');
+      if (button.disabled) return;
+      gateError('reset-error', '');
+      button.disabled = true;
       button.classList.add('is-working');
 
       try {
@@ -925,6 +978,7 @@
       } catch (err) {
         gateError('reset-error', err.message);
       } finally {
+        button.disabled = false;
         button.classList.remove('is-working');
       }
     });

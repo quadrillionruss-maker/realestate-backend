@@ -6,7 +6,9 @@
 // for references it does not own, so the other product's logic proceeds
 // untouched, and no second endpoint is needed.
 
+const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { isPastDue } = require('./overdueService');
 
 const PAYSTACK_BASE = 'https://api.paystack.co';
 const REFERENCE_PREFIX = 'REINST-';
@@ -37,7 +39,7 @@ const toNaira = (kobo) => Number(kobo) / 100;
 async function applyPaymentsToSchedule(scheduleId) {
   const { data: schedule, error: schedErr } = await supabaseAdmin
     .from('re_installment_schedule')
-    .select('id, amount_due, status')
+    .select('id, amount_due, status, due_date')
     .eq('id', scheduleId)
     .single();
   if (schedErr || !schedule) throw new Error('Installment not found');
@@ -45,7 +47,8 @@ async function applyPaymentsToSchedule(scheduleId) {
   const { data: payments, error: payErr } = await supabaseAdmin
     .from('re_payments')
     .select('amount')
-    .eq('schedule_id', scheduleId);
+    .eq('schedule_id', scheduleId)
+    .is('voided_at', null);
   if (payErr) throw payErr;
 
   const totalPaid = (payments || []).reduce((sum, p) => sum + Number(p.amount), 0);
@@ -56,6 +59,14 @@ async function applyPaymentsToSchedule(scheduleId) {
     await supabaseAdmin
       .from('re_installment_schedule')
       .update({ status: 'paid', paid_at: new Date().toISOString() })
+      .eq('id', scheduleId);
+  } else if (!covered && schedule.status === 'paid') {
+    // Only reachable by voiding the payment(s) that made this row paid — a
+    // payment is never otherwise removed once recorded. Reverts to whatever
+    // this row would read as had it never been paid in the first place.
+    await supabaseAdmin
+      .from('re_installment_schedule')
+      .update({ status: isPastDue(schedule.due_date) ? 'overdue' : 'pending', paid_at: null })
       .eq('id', scheduleId);
   }
 
@@ -68,7 +79,7 @@ async function applyPaymentsToSchedule(scheduleId) {
 // default, and a buyer who has just paid lands on some generic page with no
 // route back to their own schedule.
 async function initInstallmentPayment(orgId, scheduleId, customerEmail, { callbackUrl = null } = {}) {
-  if (!process.env.PAYSTACK_SECRET_KEY) {
+  if (!env.paystack.secretKey) {
     throw Object.assign(new Error('Paystack is not configured.'), { statusCode: 503 });
   }
 
@@ -90,7 +101,8 @@ async function initInstallmentPayment(orgId, scheduleId, customerEmail, { callba
   const { data: payments } = await supabaseAdmin
     .from('re_payments')
     .select('amount')
-    .eq('schedule_id', scheduleId);
+    .eq('schedule_id', scheduleId)
+    .is('voided_at', null);
   const alreadyPaid = (payments || []).reduce((sum, p) => sum + Number(p.amount), 0);
   const outstandingKobo = toKobo(schedule.amount_due) - toKobo(alreadyPaid);
   if (outstandingKobo <= 0) {
@@ -98,20 +110,32 @@ async function initInstallmentPayment(orgId, scheduleId, customerEmail, { callba
   }
 
   const reference = buildReference(scheduleId);
-  const response = await fetch(`${PAYSTACK_BASE}/transaction/initialize`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      email: customerEmail,
-      amount: outstandingKobo,
-      reference,
-      ...(callbackUrl ? { callback_url: callbackUrl } : {}),
-      metadata: { product: 'realestate', schedule_id: scheduleId, organization_id: orgId },
-    }),
-  });
+  let response;
+  try {
+    response = await fetch(`${PAYSTACK_BASE}/transaction/initialize`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.paystack.secretKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: customerEmail,
+        amount: outstandingKobo,
+        reference,
+        ...(callbackUrl ? { callback_url: callbackUrl } : {}),
+        metadata: { product: 'realestate', schedule_id: scheduleId, organization_id: orgId },
+      }),
+      // Paystack hanging rather than erroring would otherwise hang this
+      // request indefinitely — the buyer's or staff member's "Pay" click
+      // spinning forever with no failure ever surfaced.
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (err) {
+    throw Object.assign(
+      new Error('Paystack is not responding right now. Try again shortly.'),
+      { statusCode: 503 }
+    );
+  }
 
   const json = await response.json().catch(() => ({}));
   if (!response.ok || !json.status) {
@@ -143,12 +167,17 @@ async function handleRealEstateCharge(event) {
 
   // Idempotency: Paystack retries until it gets a 200, so the same
   // charge.success arrives more than once. A unique partial index on
-  // paystack_reference backs this check up against concurrent deliveries.
-  const { data: existing } = await supabaseAdmin
+  // paystack_reference backs this check up against concurrent deliveries —
+  // this lookup is only a fast path to skip the extra work below, so a
+  // genuine query failure here (as opposed to "no row found", which is not
+  // an error) is logged and swallowed rather than thrown: the insert's own
+  // 23505 handling still catches a real duplicate either way.
+  const { data: existing, error: existingErr } = await supabaseAdmin
     .from('re_payments')
     .select('id')
     .eq('paystack_reference', reference)
     .maybeSingle();
+  if (existingErr) console.warn('[re-paystack] duplicate-reference lookup failed, relying on the unique index instead:', existingErr.message);
   if (existing) return true;
 
   // Read the org from the schedule row rather than from webhook metadata:
@@ -156,7 +185,7 @@ async function handleRealEstateCharge(event) {
   // Paystack dashboard, and organization_id is NOT NULL.
   const { data: schedule } = await supabaseAdmin
     .from('re_installment_schedule')
-    .select('id, organization_id')
+    .select('id, organization_id, amount_due')
     .eq('id', parsed.scheduleId)
     .maybeSingle();
   if (!schedule) {
@@ -164,13 +193,27 @@ async function handleRealEstateCharge(event) {
     return true;
   }
 
+  // Paystack normally only ever collects exactly the outstanding amount
+  // (initInstallmentPayment charges nothing else) — but a replayed or
+  // manually-edited dashboard transaction can still settle for more than is
+  // due. Computed the same way the manual path already does, so an
+  // overpaid card payment is exactly as visible as an overpaid bank
+  // transfer, not silently unaccounted for.
+  const amountNaira = toNaira(event.data.amount);
+  const { data: priorPayments } = await supabaseAdmin
+    .from('re_payments').select('amount').eq('schedule_id', schedule.id).is('voided_at', null);
+  const priorKobo = (priorPayments || []).reduce((sum, p) => sum + toKobo(p.amount), 0);
+  const excessKobo = priorKobo + toKobo(amountNaira) - toKobo(schedule.amount_due);
+  const overpayment = excessKobo > 0 ? toNaira(excessKobo) : 0;
+
   const { error: insertErr } = await supabaseAdmin.from('re_payments').insert({
     organization_id: schedule.organization_id,
     schedule_id: schedule.id,
-    amount: toNaira(event.data.amount),
+    amount: amountNaira,
     paystack_reference: reference,
     method: 'paystack',
     paid_at: event.data.paid_at || new Date().toISOString(),
+    overpayment,
   });
 
   // 23505 = unique violation: a concurrent delivery won the race and already
@@ -197,6 +240,7 @@ async function recordManualPayment(orgId, scheduleId, {
   amount,
   method = 'bank_transfer',
   reference = null,
+  payerName = null,
 }) {
   const numericAmount = Number(amount);
   if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
@@ -215,8 +259,32 @@ async function recordManualPayment(orgId, scheduleId, {
 
   // What was already on this installment before today's money.
   const { data: priorPayments } = await supabaseAdmin
-    .from('re_payments').select('amount').eq('schedule_id', scheduleId);
+    .from('re_payments').select('amount').eq('schedule_id', scheduleId).is('voided_at', null);
   const priorKobo = (priorPayments || []).reduce((sum, p) => sum + toKobo(p.amount), 0);
+
+  // Computed BEFORE the insert, and written onto the row itself — not just
+  // returned to the caller. Commission accrual reads this to cap its base at
+  // what was actually due rather than the full transferred amount, and the
+  // buyer's record reads it to surface unresolved credit to whoever opens it
+  // next, on any device — not just the one that recorded the payment.
+  const excessKobo = priorKobo + toKobo(numericAmount) - toKobo(schedule.amount_due);
+  const overpayment = excessKobo > 0 ? toNaira(excessKobo) : 0;
+
+  // Two staff members recording the SAME real transfer independently — one
+  // off a WhatsApp confirmation, one off the bank statement — is a plausible
+  // everyday duplicate, and unlike a Paystack reference there is nothing to
+  // reject it outright on: reference is free-text and optional for a manual
+  // payment. A warning, not a block — a buyer really can pay the same
+  // installment amount twice in one day.
+  const { data: recentSame } = await supabaseAdmin
+    .from('re_payments')
+    .select('id')
+    .eq('schedule_id', scheduleId)
+    .eq('amount', numericAmount)
+    .is('voided_at', null)
+    .gte('paid_at', new Date(Date.now() - 24 * 3600_000).toISOString())
+    .limit(1);
+  const possibleDuplicate = Boolean(recentSame?.length);
 
   const { data: payment, error: payErr } = await supabaseAdmin
     .from('re_payments')
@@ -226,6 +294,8 @@ async function recordManualPayment(orgId, scheduleId, {
       amount: numericAmount,
       method,
       paystack_reference: reference,
+      overpayment,
+      payer_name: String(payerName || '').trim() || null,
     })
     .select()
     .single();
@@ -233,26 +303,155 @@ async function recordManualPayment(orgId, scheduleId, {
 
   const result = await applyPaymentsToSchedule(scheduleId);
 
-  // Kobo arithmetic, like everywhere else money is compared here.
-  const excessKobo = priorKobo + toKobo(numericAmount) - toKobo(schedule.amount_due);
+  return {
+    ...payment,
+    installment_fully_paid: result.fullyPaid,
+    total_paid: result.totalPaid,
+    amount_due: Number(schedule.amount_due),
+    possible_duplicate: possibleDuplicate,
+  };
+}
+
+// ── Moving an existing credit onto a different installment ─────────────────
+//
+// "Allocate the credit" used to call recordManualPayment a second time, which
+// inserted a brand-new, independent payment row for money that was never a
+// second transfer — double commission, a second receipt, and a buyer total
+// inflated by the reallocated amount. This instead marks the new row as
+// MOVED credit (reallocated_from_payment_id), which commissionService reads
+// to skip accrual a second time, and which every "total paid across the
+// plan" sum excludes, since that money was already counted once.
+async function reallocateOverpayment(orgId, sourcePaymentId, toScheduleId) {
+  const { data: source, error: sourceErr } = await supabaseAdmin
+    .from('re_payments')
+    .select('id, amount, overpayment, method, paystack_reference, voided_at')
+    .eq('id', sourcePaymentId)
+    .eq('organization_id', orgId)
+    .maybeSingle();
+  if (sourceErr) throw sourceErr;
+  if (!source) throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+  if (source.voided_at) {
+    throw Object.assign(new Error('This payment was voided — it has no credit to allocate.'), { statusCode: 409 });
+  }
+
+  const creditKobo = toKobo(source.overpayment);
+  if (creditKobo <= 0) {
+    throw Object.assign(new Error('This payment has no unallocated credit.'), { statusCode: 409 });
+  }
+
+  const { data: schedule, error: schedErr } = await supabaseAdmin
+    .from('re_installment_schedule')
+    .select('id, amount_due')
+    .eq('id', toScheduleId)
+    .eq('organization_id', orgId)
+    .single();
+  if (schedErr || !schedule) {
+    throw Object.assign(new Error('Installment not found'), { statusCode: 404 });
+  }
+
+  const { data: priorPayments } = await supabaseAdmin
+    .from('re_payments').select('amount').eq('schedule_id', toScheduleId).is('voided_at', null);
+  const priorKobo = (priorPayments || []).reduce((sum, p) => sum + toKobo(p.amount), 0);
+  const creditAmount = toNaira(creditKobo);
+  const excessKobo = priorKobo + creditKobo - toKobo(schedule.amount_due);
   const overpayment = excessKobo > 0 ? toNaira(excessKobo) : 0;
+
+  const { data: payment, error: payErr } = await supabaseAdmin
+    .from('re_payments')
+    .insert({
+      organization_id: orgId,
+      schedule_id: toScheduleId,
+      amount: creditAmount,
+      method: source.method,
+      paystack_reference: source.paystack_reference,
+      overpayment,
+      reallocated_from_payment_id: source.id,
+    })
+    .select()
+    .single();
+  // The unique index on reallocated_from_payment_id is what actually stops
+  // the same credit being spent twice under concurrency — the overpayment
+  // check above is the fast, common-case rejection; this is the guarantee.
+  if (payErr?.code === '23505') {
+    throw Object.assign(new Error('This credit has already been allocated.'), { statusCode: 409 });
+  }
+  if (payErr) throw payErr;
+
+  const result = await applyPaymentsToSchedule(toScheduleId);
 
   return {
     ...payment,
     installment_fully_paid: result.fullyPaid,
     total_paid: result.totalPaid,
     amount_due: Number(schedule.amount_due),
-    // Positive means the buyer is in credit on this installment. The caller
-    // surfaces it; nothing here moves it automatically, because deciding which
-    // installment a credit belongs to is a conversation, not an inference.
-    overpayment,
   };
+}
+
+// ── Voiding a wrongly recorded payment ──────────────────────────────────────
+//
+// Not a delete — recycle.js's own rule holds here too: "a recorded payment
+// is a financial fact... the correction is another entry, not the
+// disappearance of the first one." The row stays exactly as entered,
+// forever; voided_at/void_reason mark it as no longer counting toward
+// anything. The installment it applied to is recomputed here (it may drop
+// back to pending or overdue); the caller is responsible for voiding the
+// linked commission, if any — see routes/payments.js's /void route, which
+// does both inside the same request.
+async function voidPayment(orgId, paymentId, reason) {
+  const trimmedReason = String(reason || '').trim();
+  if (!trimmedReason) {
+    throw Object.assign(new Error('A reason is required.'), { statusCode: 400 });
+  }
+
+  const { data: payment, error } = await supabaseAdmin
+    .from('re_payments')
+    .select('id, schedule_id, voided_at')
+    .eq('id', paymentId)
+    .eq('organization_id', orgId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!payment) throw Object.assign(new Error('Payment not found'), { statusCode: 404 });
+  if (payment.voided_at) {
+    throw Object.assign(new Error('This payment is already voided.'), { statusCode: 409 });
+  }
+
+  // A payment whose overpayment has already been moved onto another
+  // installment has to be unwound in that order — voiding this one first
+  // would leave the reallocated row pointing at money that turned out never
+  // to have existed.
+  const { data: reallocation } = await supabaseAdmin
+    .from('re_payments')
+    .select('id')
+    .eq('reallocated_from_payment_id', paymentId)
+    .is('voided_at', null)
+    .maybeSingle();
+  if (reallocation) {
+    throw Object.assign(
+      new Error("This payment's credit has already been allocated to another installment — void that allocation first."),
+      { statusCode: 409 }
+    );
+  }
+
+  const { data: voided, error: voidErr } = await supabaseAdmin
+    .from('re_payments')
+    .update({ voided_at: new Date().toISOString(), void_reason: trimmedReason })
+    .eq('id', paymentId)
+    .eq('organization_id', orgId)
+    .select()
+    .single();
+  if (voidErr) throw voidErr;
+
+  const result = await applyPaymentsToSchedule(payment.schedule_id);
+
+  return { ...voided, installment_still_paid: result.fullyPaid, total_paid: result.totalPaid };
 }
 
 module.exports = {
   initInstallmentPayment,
   handleRealEstateCharge,
   recordManualPayment,
+  reallocateOverpayment,
+  voidPayment,
   applyPaymentsToSchedule,
   parseInstallmentReference,
   isRealEstateReference,

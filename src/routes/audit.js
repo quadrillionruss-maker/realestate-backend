@@ -3,10 +3,10 @@
 // can alter is not evidence, and evidence is the point (see auditService).
 
 const express = require('express');
-const { supabaseAdmin } = require('../middleware/orgContext');
+const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
 const router = express.Router();
 
-router.get('/', async (req, res, next) => {
+router.get('/', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 100, 500);
 
@@ -49,7 +49,7 @@ router.get('/entity/:type/:id', async (req, res, next) => {
 // The notification outbox lives here rather than under its own prefix because
 // it answers the same question in a different register: not "who did this"
 // but "what did we actually send the buyer, and did it arrive".
-router.get('/notifications', async (req, res, next) => {
+router.get('/notifications', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     let query = supabaseAdmin
       .from('re_notifications')

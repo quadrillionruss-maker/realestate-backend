@@ -138,8 +138,12 @@ async function loadPortalAccount(customer) {
   const { data: payments } = scheduleIds.length
     ? await supabaseAdmin
         .from('re_payments')
-        .select('id, schedule_id, amount, method, paid_at')
+        .select('id, schedule_id, amount, method, paid_at, reallocated_from_payment_id')
         .in('schedule_id', scheduleIds)
+        // A voided payment was entered in error and corrected — a buyer
+        // seeing it in their own history, not reflected in their balance,
+        // is a support call this exists to prevent, not cause.
+        .is('voided_at', null)
         .order('paid_at', { ascending: false })
     : { data: [] };
 
@@ -190,7 +194,12 @@ async function loadPortalAccount(customer) {
     }
   }
 
-  totalPaid = (payments || []).reduce((sum, p) => sum + Number(p.amount || 0), 0);
+  // A reallocation row moves credit that was already counted once, on the
+  // payment it came from — summing it again here would show the buyer a
+  // balance smaller than what they actually still owe.
+  totalPaid = (payments || [])
+    .filter((p) => !p.reallocated_from_payment_id)
+    .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
   await supabaseAdmin
     .from('re_customers')

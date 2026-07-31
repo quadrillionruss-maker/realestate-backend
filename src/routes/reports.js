@@ -10,11 +10,25 @@
 // figure in a report can always be traced back to the rows that produced it.
 
 const express = require('express');
-const { supabaseAdmin } = require('../middleware/orgContext');
+const rateLimit = require('express-rate-limit');
+const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
 const { lagosToday } = require('../services/overdueService');
 const { toCsv } = require('../utils/csv');
 const { audit } = require('../services/auditService');
 const router = express.Router();
+
+// A compromised low-privilege account (see CLAUDE.md's RBAC notes) could
+// otherwise use the generic global limiter's 600/15min budget for fast,
+// hard-to-throttle data exfiltration — the whole buyer list and payment
+// history, repeatedly. Keyed per user, not per IP.
+const exportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: 'Too many exports. Wait a few minutes and try again.' },
+});
 
 const round2 = (value) => Math.round(Number(value) * 100) / 100;
 const sum = (rows, key) => rows.reduce((total, row) => total + Number(row[key] || 0), 0);
@@ -22,7 +36,7 @@ const sum = (rows, key) => rows.reduce((total, row) => total + Number(row[key] |
 // Investor / partner summary. Optionally scoped to one project, because an
 // investor almost always backed ONE development and has no business seeing
 // the developer's whole book.
-router.get('/investor', async (req, res, next) => {
+router.get('/investor', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const projectId = req.query.project_id || null;
     const today = lagosToday();
@@ -64,10 +78,17 @@ router.get('/investor', async (req, res, next) => {
       .in('re_units.project_id', projectIds);
     if (resErr) throw resErr;
 
+    // Filtered by project_id at the DB level, not just in the JS grouping
+    // below — an investor report scoped to one development (the common case:
+    // "an investor almost always backed ONE development") used to still pull
+    // every payment the whole organization has ever recorded, then discard
+    // everything outside the requested project after the fact.
     const { data: payments, error: payErr } = await supabaseAdmin
       .from('re_payments')
       .select('amount, paid_at, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(re_units!inner(project_id))))')
-      .eq('organization_id', req.orgId);
+      .eq('organization_id', req.orgId)
+      .in('re_installment_schedule.re_installment_plans.re_reservations.re_units.project_id', projectIds)
+      .is('voided_at', null);
     if (payErr) throw payErr;
 
     const paymentsByProject = new Map();
@@ -164,7 +185,7 @@ router.get('/investor', async (req, res, next) => {
 // and "how much sold" are different questions with different answers, and
 // folding rental units into the sales occupancy numbers above would answer
 // neither one correctly.
-router.get('/rental', async (req, res, next) => {
+router.get('/rental', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const today = lagosToday();
     const monthStart = today.slice(0, 8) + '01';
@@ -193,7 +214,8 @@ router.get('/rental', async (req, res, next) => {
         .select('amount, paid_at, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(property_type)))')
         .eq('organization_id', req.orgId)
         .eq('re_installment_schedule.re_installment_plans.re_reservations.property_type', 'rental')
-        .gte('paid_at', monthStart),
+        .gte('paid_at', monthStart)
+        .is('voided_at', null),
 
       // Renewals due in the next 90 days — the same fact
       // rentalService.checkTenancyRenewals() flags as a task at the 60-day
@@ -266,7 +288,7 @@ router.get('/rental', async (req, res, next) => {
 
 // Month-by-month collections, for the chart on the reports screen and the
 // "are we speeding up or slowing down" question underneath it.
-router.get('/collections', async (req, res, next) => {
+router.get('/collections', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const months = Math.min(Number(req.query.months) || 12, 36);
     const since = new Date();
@@ -278,6 +300,7 @@ router.get('/collections', async (req, res, next) => {
       .select('amount, paid_at, method')
       .eq('organization_id', req.orgId)
       .gte('paid_at', since.toISOString().slice(0, 10))
+      .is('voided_at', null)
       .order('paid_at');
     if (error) throw error;
 
@@ -409,7 +432,7 @@ const EXPORTS = {
 const reservationOf = (payment) =>
   payment.re_installment_schedule?.re_installment_plans?.re_reservations;
 
-router.get('/export/:kind', async (req, res, next) => {
+router.get('/export/:kind', exportLimiter, requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const spec = EXPORTS[req.params.kind];
     if (!spec) {

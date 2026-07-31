@@ -18,8 +18,10 @@ const { BUCKET, SIGNED_URL_TTL_SECONDS, ensureBucket, uploadPdf, createSignedUrl
 // Template lives inside src/ so it travels with the code.
 const TEMPLATE_PATH = path.join(__dirname, '../templates/allocation_letter.html');
 
-const naira = (amount) =>
-  '₦' + Number(amount || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+const naira = (amount) => {
+  const n = Number(amount || 0);
+  return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+};
 
 const formatDate = (value) =>
   new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -154,7 +156,15 @@ async function generateDocument(orgId, documentId) {
   const html = buildAllocationLetterHtml(doc, branding);
   const pdf = await renderHtmlToPdf(html);
 
-  const storagePath = await uploadPdf(`${orgId}/${documentId}.pdf`, pdf);
+  // Timestamped rather than a deterministic {documentId}.pdf: the DB row is
+  // correctly reused on regeneration (one allocation letter per reservation
+  // is still enforced there), but the OLD PDF's exact bytes used to be
+  // silently overwritten in storage — gone the moment a letter was
+  // regenerated after a branding change or a price correction, with nothing
+  // left to produce in a dispute over the original wording. Each generation
+  // now lands at its own path; storage_path always points at the latest.
+  const wasRegeneration = doc.status === 'generated';
+  const storagePath = await uploadPdf(`${orgId}/${documentId}/${Date.now()}.pdf`, pdf);
 
   const { data: updated, error: updateError } = await supabaseAdmin
     .from('re_documents')
@@ -169,7 +179,12 @@ async function generateDocument(orgId, documentId) {
     .single();
   if (updateError) throw updateError;
 
-  return { document: updated, download_url: await createSignedUrl(storagePath) };
+  return {
+    document: updated,
+    download_url: await createSignedUrl(storagePath),
+    was_regeneration: wasRegeneration,
+    previous_storage_path: wasRegeneration ? doc.storage_path : null,
+  };
 }
 
 async function getDownloadUrl(orgId, documentId) {

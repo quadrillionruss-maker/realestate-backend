@@ -50,7 +50,7 @@ async function assess(orgId, reservationId) {
   const { data: reservation, error } = await supabaseAdmin
     .from('re_reservations')
     .select(`
-      id, status,
+      id, status, property_type,
       re_customers(id, full_name),
       re_units(unit_number, list_price, re_projects(name)),
       re_installment_plans(
@@ -84,7 +84,8 @@ async function assess(orgId, reservationId) {
     const { data: payments } = await supabaseAdmin
       .from('re_payments')
       .select('amount')
-      .in('schedule_id', scheduleIds);
+      .in('schedule_id', scheduleIds)
+      .is('voided_at', null);
     paidKobo = (payments || []).reduce((sum, p) => sum + toKobo(p.amount), 0);
   }
 
@@ -145,6 +146,20 @@ async function restructure(req, reservationId, {
   if (state.reservation.status === 'cancelled') {
     throw Object.assign(
       new Error('This reservation is cancelled. Reinstate it before restructuring the plan.'),
+      { statusCode: 409 }
+    );
+  }
+  // Rentals have their own renegotiation path (rentalService.renewTenancy)
+  // for a reason: it deliberately carries forward NO balance or
+  // original_total_amount, because a lease renewal is a fresh term, not a
+  // renegotiation of a debt. Restructuring a rental through this path would
+  // set both anyway, corrupting the monthly-rent figure everything else
+  // derives from (total_amount / number_of_installments) and leaving
+  // tenancy_end_date pointing at a date the new schedule no longer agrees
+  // with.
+  if (state.reservation.property_type === 'rental') {
+    throw Object.assign(
+      new Error('This is a rental. Use "Renew tenancy" instead of restructuring a lease term.'),
       { statusCode: 409 }
     );
   }

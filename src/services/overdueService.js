@@ -30,12 +30,10 @@
 // Idempotent: re-running changes nothing.
 
 const { supabaseAdmin } = require('../middleware/orgContext');
+const env = require('../config/env');
 
 // Close of business, Lagos. 0–23.
-const DUE_CUTOFF_HOUR = (() => {
-  const raw = parseInt(process.env.RE_DUE_CUTOFF_HOUR || '18', 10);
-  return Number.isInteger(raw) && raw >= 0 && raw <= 23 ? raw : 18;
-})();
+const DUE_CUTOFF_HOUR = env.overdue.cutoffHour;
 
 const LAGOS = 'Africa/Lagos';
 

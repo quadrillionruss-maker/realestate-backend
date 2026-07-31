@@ -12,6 +12,7 @@
 // changing a digit in a link shows you someone else's payment history.
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const portal = require('../services/portalService');
 const { getDownloadUrl } = require('../services/documentService');
 const { initInstallmentPayment } = require('../services/paystackService');
@@ -19,17 +20,42 @@ const { auditSystem } = require('../services/auditService');
 
 const router = express.Router();
 
+// Keyed by the token's own customer id rather than IP: the global 600/15min
+// limiter (server.js) is loose enough to let one buyer session, or a stolen
+// link, hammer payment initialization — a real Paystack transaction — far
+// beyond normal use. Bounded here independently of how many other requests
+// that IP happens to be making.
+const payLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customer?.id || req.ip,
+  message: { error: 'Too many payment attempts. Wait a few minutes and try again.' },
+});
+
 // The token arrives as a bearer header (the page reads it out of the URL
 // fragment once, then keeps it in memory — the fragment is never sent to a
 // server, which is why the link is in the hash and not the query string).
+// The header is the ONLY accepted form, deliberately — a query-string
+// fallback would put this same highly privileged token into server, proxy
+// and CDN access logs, and into the Referer header of any third-party
+// resource the page loads, defeating the entire point of keeping it out of
+// the URL in the first place.
 async function portalAuth(req, res, next) {
   try {
     const header = req.headers.authorization || '';
-    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : (req.query.token || '');
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
     req.customer = await portal.verifyPortalToken(token);
     next();
   } catch (err) {
-    res.status(err.statusCode || 401).json({ error: err.message });
+    // Deliberate throws (no token, expired, revoked) already carry
+    // statusCode: 401 — errorHandler reads that straight through. Anything
+    // without one (a transient Supabase error inside verifyPortalToken) is
+    // exactly the kind of internal detail that must NOT be reported to a
+    // buyer as if their link were invalid, and must be redacted in
+    // production like every other unexpected failure in this app.
+    next(err);
   }
 }
 
@@ -67,7 +93,7 @@ router.get('/documents/:id/download', async (req, res, next) => {
 // A buyer paying their own installment without anyone having to send them a
 // link is the point of the whole portal. The amount is decided server-side
 // from the schedule row — the browser does not get to say what it owes.
-router.post('/pay/:scheduleId', async (req, res, next) => {
+router.post('/pay/:scheduleId', payLimiter, async (req, res, next) => {
   try {
     await portal.assertOwnsSchedule(req.customer, req.params.scheduleId);
 

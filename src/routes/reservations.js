@@ -1,5 +1,5 @@
 const express = require('express');
-const { supabaseAdmin } = require('../middleware/orgContext');
+const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
 const { createPlanWithSchedule } = require('../services/installmentService');
 const { assess, preview, restructure } = require('../services/restructureService');
 const { assessTenancy, renewTenancy } = require('../services/rentalService');
@@ -16,11 +16,16 @@ const PROPERTY_TYPES = ['off_plan', 'outright', 'rental'];
 
 router.get('/', async (req, res, next) => {
   try {
+    // Unbounded until now — every reservation ever made, on every load of
+    // this screen, for a developer years into selling several projects.
+    const limit = Math.min(Number(req.query.limit) || 500, 2000);
+
     let query = supabaseAdmin
       .from('re_reservations')
       .select('*, re_customers(full_name, phone), re_units(unit_number, list_price, re_projects(name)), re_installment_plans(id, total_amount, number_of_installments)')
       .eq('organization_id', req.orgId)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: false })
+      .limit(limit);
 
     if (req.query.status) query = query.eq('status', req.query.status);
     if (req.query.property_type) query = query.eq('property_type', req.query.property_type);
@@ -150,9 +155,29 @@ router.post('/', async (req, res, next) => {
       } catch (err) {
         // Unwind fully: a reservation with a broken payment plan is worse than
         // no reservation, because the schedule is what everything else counts.
+        // A hard delete, not a soft one — this row is seconds old, has no
+        // children, and nobody has ever seen it; softDelete.js's cascade
+        // machinery exists for records that were real, not for undoing a
+        // request that didn't finish. Audited anyway, so "a reservation was
+        // created and destroyed in the same request" has a trace rather than
+        // being the one hard delete in this product with none.
         await supabaseAdmin.from('re_reservations').delete().eq('id', reservation.id);
         await releaseUnit();
-        return res.status(400).json({ error: err.message || 'Could not build the installment schedule' });
+        audit(req, {
+          action: 'reservation.rollback',
+          entityType: 're_reservations',
+          entityId: reservation.id,
+          summary: `Reservation for unit ${unit_id} rolled back — plan creation failed: ${err.message}`,
+          metadata: { unit_id, customer_id, reason: err.message },
+        });
+        // installmentService's own validation (bad total_amount, a start_date
+        // that doesn't parse) throws a plain Error with a message written for
+        // this response. A raw Postgres/PostgREST error always carries a
+        // `.code` — forwarding ITS message would hand the caller a constraint
+        // or column name from the schema instead of something they can act on.
+        return res.status(400).json({
+          error: err.code ? 'Could not build the installment schedule' : err.message,
+        });
       }
     }
 
@@ -194,7 +219,7 @@ router.patch('/:id/status', async (req, res, next) => {
 
     const { data: existing } = await supabaseAdmin
       .from('re_reservations')
-      .select('id, unit_id, status')
+      .select('id, unit_id, status, property_type')
       .eq('id', req.params.id)
       .eq('organization_id', req.orgId)
       .maybeSingle();
@@ -207,12 +232,28 @@ router.patch('/:id/status', async (req, res, next) => {
       .eq('organization_id', req.orgId)
       .select()
       .single();
-    if (error) throw error;
+    if (error) {
+      // The partial unique index (one live reservation per unit) is what
+      // actually blocks a double allocation here — reactivating a cancelled
+      // reservation (or any transition off it) races the same unit being
+      // claimed by someone else in the meantime, the same conflict
+      // POST /reservations already handles explicitly rather than as a raw 500.
+      if (error.code === '23505') {
+        return res.status(409).json({
+          error: 'This unit already has another active reservation. Double allocation blocked.',
+        });
+      }
+      throw error;
+    }
 
     // Unit status follows the reservation: cancelling puts the unit back on
-    // the market, completing takes it off for good.
+    // the market, completing takes it off for good — UNLESS this is a
+    // rental, where "completed" means a tenancy ended, not a unit sold. A
+    // rental unit is never "sold" by this transition, and mapping it to
+    // 'sold' would permanently retire it from ever being let again, since
+    // only an 'available' unit can be claimed by a new reservation.
     const unitStatus = status === 'cancelled' ? 'available'
-      : status === 'completed' ? 'sold'
+      : status === 'completed' ? (existing.property_type === 'rental' ? 'available' : 'sold')
       : 'reserved';
 
     const { error: unitErr } = await supabaseAdmin
@@ -282,7 +323,7 @@ router.get('/:id/restructure', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/:id/restructure', async (req, res, next) => {
+router.post('/:id/restructure', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const { number_of_installments, frequency, start_date, reason } = req.body || {};
     if (!number_of_installments || !start_date) {
@@ -325,7 +366,7 @@ router.get('/:id/renew-tenancy', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post('/:id/renew-tenancy', async (req, res, next) => {
+router.post('/:id/renew-tenancy', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const { monthly_rent, duration_months, start_date, reason } = req.body || {};
     if (!monthly_rent || !duration_months) {

@@ -5,6 +5,8 @@
 // deliberately (404 for a missing installment, 409 for one already paid);
 // anything without one is an unexpected failure and becomes a 500.
 
+const env = require('../config/env');
+
 function errorHandler(err, req, res, _next) {
   const statusCode = err.statusCode || err.status || 500;
 
@@ -17,7 +19,7 @@ function errorHandler(err, req, res, _next) {
   // production they are replaced — the detail is in the log above.
   const body = { success: false, error: statusCode >= 500 ? 'Something went wrong.' : err.message };
 
-  if (statusCode >= 500 && process.env.NODE_ENV !== 'production') {
+  if (statusCode >= 500 && env.isDev) {
     body.error = err.message;
     body.stack = err.stack;
   }

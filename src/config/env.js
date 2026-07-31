@@ -16,6 +16,11 @@ const env = {
   supabase: {
     url: process.env.SUPABASE_URL,
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+    // A stalled query used to hang the request until Node's own TCP timeout
+    // (minutes, if it ever gave up at all) — an operator's "Record payment"
+    // click would just spin. This bounds it to something a person will
+    // actually wait through before assuming it failed.
+    timeoutMs: parseInt(process.env.SUPABASE_TIMEOUT_MS || '20000', 10),
   },
 
   // Tokens are HS256. This service now both issues (POST /api/auth/login) and
@@ -108,12 +113,34 @@ const env = {
 
   storage: {
     documentsBucket: process.env.RE_DOCUMENTS_BUCKET || 're-documents',
+    mediaBucket: process.env.RE_MEDIA_BUCKET || 're-media',
   },
 
   cron: {
     disabled: process.env.RE_DISABLE_CRON === 'true',
     schedule: process.env.RE_BRIEF_CRON || '0 7 * * *',
+    // The post-cutoff marking-only sweep — see overdueService for why the day
+    // needs both a 07:00 and an 18:05 run.
+    eveningSchedule: process.env.RE_EVENING_SWEEP_CRON || '5 18 * * *',
   },
+
+  // 'core' | 'full' | '' — pdfAdapter picks by platform when this is unset;
+  // set explicitly to force one engine for local diagnosis.
+  pdf: {
+    engine: (process.env.PDF_ENGINE || '').toLowerCase(),
+  },
+
+  overdue: {
+    // Close of business, Lagos. 0-23, falls back to 18 on anything invalid.
+    cutoffHour: (() => {
+      const raw = parseInt(process.env.RE_DUE_CUTOFF_HOUR || '18', 10);
+      return Number.isInteger(raw) && raw >= 0 && raw <= 23 ? raw : 18;
+    })(),
+  },
+
+  // Whether this process serves frontend/ itself. Set false when the
+  // frontend is deployed separately (Vercel) and this process is API-only.
+  serveFrontend: process.env.SERVE_FRONTEND !== 'false',
 };
 
 // Called by server.js before anything binds a port. Failing loudly at boot

@@ -2,7 +2,7 @@
 // commission default, who gets told what, and who else is in here.
 
 const express = require('express');
-const { supabaseAdmin } = require('../middleware/orgContext');
+const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
 const { audit } = require('../services/auditService');
 const auth = require('../services/authService');
 const router = express.Router();
@@ -49,7 +49,7 @@ router.get('/', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.put('/', async (req, res, next) => {
+router.put('/', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const body = req.body || {};
     const updates = { organization_id: req.orgId };
@@ -175,7 +175,19 @@ router.post('/team', async (req, res, next) => {
       .from('team_members')
       .insert({ team_id: team.id, user_id: req.userId, role: 'owner', status: 'active' });
     if (memberErr) {
+      // A hard delete, not a soft one — this team row is seconds old, has no
+      // member and nothing points at it yet (the org-scoped move below
+      // hasn't run), so there's nothing for softDelete.js's cascade to
+      // protect. Audited anyway, so this rollback isn't the one hard delete
+      // in the product with no trace.
       await supabaseAdmin.from('teams').delete().eq('id', team.id);
+      audit(req, {
+        action: 'team.rollback',
+        entityType: 'teams',
+        entityId: team.id,
+        summary: `Team "${name}" rolled back — membership creation failed: ${memberErr.message}`,
+        metadata: { name, reason: memberErr.message },
+      });
       throw memberErr;
     }
 
@@ -203,15 +215,14 @@ router.post('/team', async (req, res, next) => {
       metadata: { moved, failed, previous_organization_id: req.orgId },
     });
 
-    res.status(201).json({
-      team,
-      moved,
-      failed,
-      // The caller's existing token still resolves to the OLD org id, because
-      // team membership is read at authentication time. Say so — otherwise the
-      // screen looks empty and the user assumes the conversion ate their data.
-      note: 'Sign out and back in to pick up the new team scope.',
-    });
+    // No new token to issue: it carries no org scope of its own (id, email
+    // and tv only — see authService.issueToken) and org scope is resolved
+    // fresh from team_members on every request, not cached in the token. The
+    // team_members row above already exists by the time this responds, so
+    // the caller's EXISTING token already resolves to the new team id on its
+    // very next use. What does go stale is the frontend's own cached
+    // /auth/me snapshot — its job to refetch, not this endpoint's.
+    res.status(201).json({ team, moved, failed });
   } catch (e) { next(e); }
 });
 
@@ -238,6 +249,12 @@ router.post('/team/invite', async (req, res, next) => {
     // against the address until they register with it.
     const existing = await auth.findUserByEmail(email);
 
+    // Two different conflict targets because a NULL user_id is never equal
+    // to another NULL under a plain unique constraint — inviting the same
+    // not-yet-registered address twice used to create two 'invited' rows
+    // instead of updating the one already there. migrations/012 adds the
+    // second index this branch targets, scoped to pending (user_id is null)
+    // invites only; an accepted member still upserts on (team_id, user_id).
     const { data, error } = await supabaseAdmin
       .from('team_members')
       .upsert({
@@ -246,7 +263,7 @@ router.post('/team/invite', async (req, res, next) => {
         invited_email: email,
         role,
         status: existing ? 'active' : 'invited',
-      }, { onConflict: 'team_id,user_id' })
+      }, { onConflict: existing ? 'team_id,user_id' : 'team_id,invited_email' })
       .select()
       .single();
     if (error) throw error;
@@ -268,7 +285,7 @@ router.post('/team/invite', async (req, res, next) => {
 // them to:" instead of removing him and leaving forty buyers with nobody
 // chasing them, no commission accruing, and the morning brief naming a rep who
 // no longer exists.
-router.get('/team/:id/workload', async (req, res, next) => {
+router.get('/team/:id/workload', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const { data: member } = await supabaseAdmin
       .from('team_members')
@@ -336,6 +353,70 @@ router.get('/team/:id/workload', async (req, res, next) => {
           commission_rate: Number(r.commission_rate || 0),
         })),
     });
+  } catch (e) { next(e); }
+});
+
+// The owner can never be removed or demoted through PATCH /team/:id below —
+// deliberately, so a workspace can't end up with nobody able to administer
+// it. This is the one sanctioned way ownership actually moves: it promotes a
+// target member and demotes the caller in the same request, rather than
+// leaving "the owner left the company" with no route through the product at
+// all. Owner-only — an admin can manage members, but handing off the
+// workspace itself is the current owner's call alone.
+router.post('/team/transfer-owner', requireRole(['owner']), async (req, res, next) => {
+  try {
+    const { member_id } = req.body || {};
+    if (!member_id) return res.status(400).json({ error: 'member_id is required' });
+
+    const { data: target } = await supabaseAdmin
+      .from('team_members')
+      .select('id, user_id, role, status, users(full_name, email)')
+      .eq('id', member_id)
+      .eq('team_id', req.orgId)
+      .maybeSingle();
+    if (!target) return res.status(404).json({ error: 'Team member not found' });
+    if (target.status !== 'active') {
+      return res.status(409).json({ error: 'Only an active team member can become the owner.' });
+    }
+    if (target.role === 'owner') {
+      return res.status(409).json({ error: 'This person is already the owner.' });
+    }
+
+    const { data: caller } = await supabaseAdmin
+      .from('team_members')
+      .select('id')
+      .eq('team_id', req.orgId)
+      .eq('user_id', req.userId)
+      .eq('role', 'owner')
+      .maybeSingle();
+    if (!caller) return res.status(404).json({ error: 'Your own membership record could not be found.' });
+
+    // Promote first: Supabase's REST client has no cross-row transaction, so
+    // a failure between the two writes should fail toward two owners rather
+    // than zero — recoverable, unlike a workspace nobody can administer.
+    const { error: promoteErr } = await supabaseAdmin
+      .from('team_members')
+      .update({ role: 'owner' })
+      .eq('id', target.id)
+      .eq('team_id', req.orgId);
+    if (promoteErr) throw promoteErr;
+
+    const { error: demoteErr } = await supabaseAdmin
+      .from('team_members')
+      .update({ role: 'admin' })
+      .eq('id', caller.id)
+      .eq('team_id', req.orgId);
+    if (demoteErr) throw demoteErr;
+
+    audit(req, {
+      action: 'team.owner_transferred',
+      entityType: 'team_members',
+      entityId: target.id,
+      summary: `Ownership transferred to ${target.users?.full_name || target.users?.email || 'another member'}`,
+      metadata: { from_user_id: req.userId, to_member_id: target.id, to_user_id: target.user_id },
+    });
+
+    res.json({ transferred: true });
   } catch (e) { next(e); }
 });
 

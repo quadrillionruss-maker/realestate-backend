@@ -7,6 +7,7 @@
 //      timezone (all date maths is UTC).
 
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { auditSystem } = require('./auditService');
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -110,7 +111,23 @@ async function createPlanWithSchedule(orgId, {
     .order('installment_number');
 
   if (schedErr) {
+    // A hard delete, not a soft one — this plan row is seconds old and has
+    // no schedule rows yet (the insert above is what just failed), so
+    // there's nothing for softDelete.js's cascade to protect. Audited
+    // anyway: no HTTP request is in scope this deep in the service layer
+    // (this is called from reservations.js, imports.js and
+    // restructureService.js alike), so this is the one place in the
+    // rollback that can only attribute itself to the system, not a user —
+    // still better than the silent hard delete this used to be.
     await supabaseAdmin.from('re_installment_plans').delete().eq('id', plan.id);
+    auditSystem({
+      orgId,
+      action: 'installment_plan.rollback',
+      entityType: 're_installment_plans',
+      entityId: plan.id,
+      summary: `Plan for reservation ${reservationId} rolled back — schedule creation failed: ${schedErr.message}`,
+      metadata: { reservation_id: reservationId, reason: schedErr.message },
+    });
     throw schedErr;
   }
 

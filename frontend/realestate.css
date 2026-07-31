@@ -51,7 +51,9 @@
   /* Warm white, not #fff. Pure white on near-black vibrates. */
   --text:       #ece7dd;
   --text-dim:   #9d988e;
-  --text-faint: #6b675f;
+  /* WCAG AA (4.5:1) against the darkest AND lightest surfaces this token
+     appears on — panel-3 is the binding case (a badge background). */
+  --text-faint: #8c8779;
 
   --gold:       #c9a45c;
   --gold-soft:  #e0c48c;
@@ -730,6 +732,17 @@ table.data tbody tr { transition: background .12s; }
 table.data tbody tr:hover { background: var(--panel-2); }
 table.data tr.is-clickable { cursor: pointer; }
 
+/* A voided payment stays in the ledger — it happened, it was just wrong —
+   dimmed rather than hidden, so the correction is visible next to the entry
+   it corrects. */
+table.data tr.is-voided { opacity: .5; }
+
+/* CSV import column mapping: a column nothing could confidently match
+   defaults to "Skip this column" and stays amber until a human either
+   confirms that or points it somewhere else. */
+table.data tr.map-row-unmatched td { background: var(--gold-wash); }
+table.data tr.map-row-unmatched:hover td { background: var(--gold-wash); }
+
 table.data td.num, table.data th.num {
   text-align: right;
   font-family: var(--mono);
@@ -802,6 +815,7 @@ table.data td.num, table.data th.num {
 }
 
 .field-hint { font-size: 11.5px; color: var(--text-faint); margin-top: 5px; line-height: 1.5; }
+.field-hint.warn { color: var(--gold-soft); }
 .field-error { font-size: 12px; color: var(--clay); margin-top: 5px; }
 
 .field-row { display: grid; gap: 13px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -952,12 +966,12 @@ table.data td.num, table.data th.num {
 }
 
 .badge.overdue, .badge.broken, .badge.cancelled, .badge.failed,
-.badge.legal, .badge.final_notice {
+.badge.legal, .badge.final_notice, .badge.removed {
   background: var(--clay-wash); color: var(--clay); border-color: rgba(205, 95, 67, 0.28);
 }
 
 .badge.reserved, .badge.pending, .badge.open, .badge.accrued,
-.badge.formal_notice, .badge.reminder, .badge.planning {
+.badge.formal_notice, .badge.reminder, .badge.planning, .badge.invited {
   background: var(--gold-wash); color: var(--gold); border-color: var(--line-gold);
 }
 
@@ -965,7 +979,7 @@ table.data td.num, table.data th.num {
   background: var(--steel-wash); color: var(--steel); border-color: rgba(127, 158, 198, 0.28);
 }
 
-.badge.none, .badge.dismissed, .badge.archived, .badge.void, .badge.sold_out {
+.badge.none, .badge.dismissed, .badge.archived, .badge.void, .badge.sold_out, .badge.waived {
   background: var(--panel-3); color: var(--text-faint); border-color: var(--line-2);
 }
 
@@ -1511,6 +1525,11 @@ table.data td.num, table.data th.num {
   .grid.cols-2, .grid.cols-3, .grid.cols-4 { grid-template-columns: minmax(0, 1fr); }
   .field-row, .field-row.three { grid-template-columns: minmax(0, 1fr); }
   .drawer { width: 100vw; }
+
+  /* Below this width a pointer is a finger, not a mouse — 28px was fine for
+     a cursor, not for a thumb. Desktop density is untouched. */
+  .icon-btn { width: 44px; height: 44px; font-size: 17px; }
+  .btn-quiet { height: 36px; padding: 0 12px; }
 }
 
 /* Below this the search bar is squeezed between the hamburger and "Sign

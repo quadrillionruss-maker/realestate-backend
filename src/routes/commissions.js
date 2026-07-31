@@ -1,5 +1,5 @@
 const express = require('express');
-const { supabaseAdmin } = require('../middleware/orgContext');
+const { supabaseAdmin, requireRole } = require('../middleware/orgContext');
 const { summaryByRep, repPerformance } = require('../services/commissionService');
 const { audit } = require('../services/auditService');
 const router = express.Router();
@@ -53,7 +53,7 @@ router.get('/', async (req, res, next) => {
 // Payout runs move many rows at once, so this takes a list. Approving and
 // paying are separate states because in practice they are separate people:
 // a sales director approves, finance pays.
-router.patch('/status', async (req, res, next) => {
+router.patch('/status', requireRole(['owner', 'admin']), async (req, res, next) => {
   try {
     const { ids, status } = req.body || {};
     if (!Array.isArray(ids) || !ids.length) {

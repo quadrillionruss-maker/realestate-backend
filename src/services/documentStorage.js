@@ -56,7 +56,7 @@ async function createSignedUrl(storagePath) {
 // signing every image URL — which then expires inside a page a rep left open —
 // or making allocation letters publicly readable. Two buckets, two answers.
 
-const MEDIA_BUCKET = process.env.RE_MEDIA_BUCKET || 're-media';
+const MEDIA_BUCKET = env.storage.mediaBucket;
 
 // Raster only. An SVG is a document that can carry script, and these URLs end
 // up both in an <img> in the browser and inside a Puppeteer-rendered page.

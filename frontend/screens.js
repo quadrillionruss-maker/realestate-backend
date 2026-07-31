@@ -116,6 +116,242 @@
     return value ? [value] : [];
   }
 
+  // A1, A2, A10, A11, A100, B1 — not the A1, A10, A100, A11, A2 a plain string
+  // sort produces once a project passes nine units. Splits a unit number into
+  // its alphabetic prefix and trailing numeric suffix, sorts by prefix first
+  // (alphabetically), then by the suffix as a NUMBER rather than more
+  // characters to compare. A unit number with no trailing digits sorts before
+  // any numbered variant of the same prefix.
+  function naturalSort(a, b) {
+    var sa = String(a == null ? '' : a);
+    var sb = String(b == null ? '' : b);
+    var ma = /^(.*?)(\d+)\s*$/.exec(sa);
+    var mb = /^(.*?)(\d+)\s*$/.exec(sb);
+    var prefixA = ma ? ma[1] : sa;
+    var prefixB = mb ? mb[1] : sb;
+    if (prefixA !== prefixB) return prefixA < prefixB ? -1 : 1;
+    var numA = ma ? Number(ma[2]) : -1;
+    var numB = mb ? Number(mb[2]) : -1;
+    return numA - numB;
+  }
+
+  // The array the API hands back is never sorted in place — callers may still
+  // hold the original reference (e.g. for a count in the page header).
+  function sortUnitsNaturally(units) {
+    return units.slice().sort(function (a, b) { return naturalSort(a.unit_number, b.unit_number); });
+  }
+
+  // Exposed for the offline logic test suite, which loads this file under a
+  // window/document stub (src/test/logic.test.js) and has no way to reach a
+  // function private to this closure otherwise.
+  R.naturalSort = naturalSort;
+
+  /* ══ CSV column mapping (import modals) ═══════════════════════════════════
+     A raw spreadsheet header ("Unit No.", "Price (₦)", "Full Name"…) rarely
+     matches the field name the API expects. Rather than reject the file or
+     silently guess wrong, each import shows a mapping step between the pasted
+     CSV and the dry-run preview: every header gets a dropdown, pre-selected by
+     matching known spreadsheet variations, so a developer's own export
+     usually needs no manual remapping at all. Unmatched columns default to
+     "Skip this column" rather than a guess that could put phone numbers in
+     the price column. */
+  var IMPORT_FIELDS = {
+    units: {
+      unit_number: ['unit_number', 'Unit No.', 'Unit Number', 'unit no', 'unit'],
+      list_price: ['list_price', 'Price', 'Price (₦)', 'price', 'amount'],
+      unit_type: ['unit_type', 'Type', 'type'],
+      size_sqm: ['size_sqm', 'Size', 'size', 'sqm'],
+    },
+    customers: {
+      full_name: ['full_name', 'Name', 'name', 'Full Name', 'buyer name'],
+      phone: ['phone', 'Phone', 'Phone Number', 'mobile'],
+      email: ['email', 'Email'],
+      source: ['source'],
+      project: ['project'],
+      unit_number: ['unit_number', 'Unit No.', 'Unit Number', 'unit no', 'unit'],
+      unit_type: ['unit_type', 'Type', 'type'],
+      size_sqm: ['size_sqm', 'Size', 'size', 'sqm'],
+      list_price: ['list_price', 'Price', 'Price (₦)', 'price', 'amount'],
+      total_amount: ['total_amount', 'Total Amount', 'total amount'],
+      number_of_installments: ['number_of_installments', 'Number of Installments', 'installments'],
+      frequency: ['frequency'],
+      start_date: ['start_date', 'Start Date', 'first payment date'],
+      amount_paid_to_date: ['amount_paid_to_date', 'Amount Paid', 'amount paid to date', 'paid to date'],
+    },
+  };
+
+  var IMPORT_FIELD_LABELS = {
+    unit_number: 'Unit number', list_price: 'List price', unit_type: 'Unit type', size_sqm: 'Size (sqm)',
+    full_name: 'Full name', phone: 'Phone', email: 'Email', source: 'Source', project: 'Project',
+    total_amount: 'Total amount', number_of_installments: 'Number of installments', frequency: 'Frequency',
+    start_date: 'Start date', amount_paid_to_date: 'Amount paid to date',
+  };
+
+  var REQUIRED_IMPORT_FIELDS = { units: ['unit_number', 'list_price'], customers: ['full_name'] };
+
+  // Case, spacing and punctuation all vary between exports of the same field
+  // ("Unit No." vs "unit no" vs "unit_number"), so both the header and every
+  // candidate variation are folded to the same shape before comparing.
+  function normalizeColumnLabel(value) {
+    return String(value == null ? '' : value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+
+  // The canonical field name a raw CSV header most likely means, or null —
+  // meaning the mapping UI should default that column to "Skip this column".
+  function matchImportColumn(header, kind) {
+    var fields = IMPORT_FIELDS[kind];
+    var needle = normalizeColumnLabel(header);
+    if (!fields || !needle) return null;
+    var found = null;
+    Object.keys(fields).forEach(function (field) {
+      if (found) return;
+      fields[field].some(function (variant) {
+        if (normalizeColumnLabel(variant) === needle) { found = field; return true; }
+        return false;
+      });
+    });
+    return found;
+  }
+
+  R.matchImportColumn = matchImportColumn;
+
+  // A minimal mirror of the backend's RFC 4180 parser (src/utils/csv.js),
+  // needed here only to read the header row for the mapping step and to
+  // rewrite it before the file is sent. Quoted fields, embedded commas and
+  // escaped quotes all round-trip; nothing more is used on this side.
+  function parseCsvRows(text) {
+    var input = String(text || '').replace(/^﻿/, '');
+    var rows = [], row = [], field = '', inQuotes = false, i = 0;
+
+    while (i < input.length) {
+      var char = input[i];
+      if (inQuotes) {
+        if (char === '"') {
+          if (input[i + 1] === '"') { field += '"'; i += 2; continue; }
+          inQuotes = false; i += 1; continue;
+        }
+        field += char; i += 1; continue;
+      }
+      if (char === '"') { inQuotes = true; i += 1; continue; }
+      if (char === ',') { row.push(field); field = ''; i += 1; continue; }
+      if (char === '\r') { i += 1; continue; }
+      if (char === '\n') { row.push(field); rows.push(row); row = []; field = ''; i += 1; continue; }
+      field += char; i += 1;
+    }
+    if (field.length || row.length) { row.push(field); rows.push(row); }
+    return rows.filter(function (r) { return r.some(function (cell) { return String(cell).trim().length; }); });
+  }
+
+  function quoteCsvField(value) {
+    var s = value == null ? '' : String(value);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }
+
+  // Rewrites a CSV's header row to canonical field names and drops every
+  // column mapped to "skip" — so the backend, which knows nothing about a
+  // mapping UI, receives exactly the columns it already understands, named
+  // the way it already expects. `mapping` is { columnIndex: fieldName|null }.
+  function remapCsv(text, mapping) {
+    var rows = parseCsvRows(text);
+    if (!rows.length) return '';
+    var header = rows[0];
+    var keepIndexes = [];
+    var newHeader = [];
+    header.forEach(function (h, index) {
+      var field = mapping[index];
+      if (!field) return;
+      keepIndexes.push(index);
+      newHeader.push(field);
+    });
+
+    var lines = [newHeader.map(quoteCsvField).join(',')];
+    rows.slice(1).forEach(function (r) {
+      lines.push(keepIndexes.map(function (index) { return quoteCsvField(r[index]); }).join(','));
+    });
+    return lines.join('\r\n');
+  }
+
+  R.remapCsv = remapCsv;
+
+  // Renders the mapping table into `container` for the given CSV text and
+  // kind ('units' or 'customers'), wires its dropdowns, and calls
+  // onChange(mapping, missingRequiredFields) whenever a selection changes —
+  // including once immediately, so the caller's initial gate state is correct.
+  // `mapping` is keyed by column index because two columns can share a header
+  // in a messy export.
+  function renderColumnMapping(container, csvText, kind, onChange) {
+    var rows = parseCsvRows(csvText);
+    if (!rows.length) {
+      container.innerHTML = '';
+      container.classList.add('hidden');
+      if (onChange) onChange({}, REQUIRED_IMPORT_FIELDS[kind] || []);
+      return;
+    }
+    container.classList.remove('hidden');
+
+    var headers = rows[0];
+    var fields = IMPORT_FIELDS[kind] || {};
+    var fieldNames = Object.keys(fields);
+    var required = REQUIRED_IMPORT_FIELDS[kind] || [];
+    var auto = headers.map(function (h) { return matchImportColumn(h, kind); });
+
+    container.innerHTML =
+      '<div class="table-wrap"><table class="data"><thead><tr>' +
+        '<th>CSV column</th><th>Maps to</th>' +
+      '</tr></thead><tbody>' +
+      headers.map(function (h, index) {
+        return '<tr data-map-row="' + index + '"' + (auto[index] ? '' : ' class="map-row-unmatched"') + '>' +
+          '<td class="mono">' + esc(h || '(blank)') + '</td>' +
+          '<td><select class="select map-select" data-map-index="' + index + '">' +
+            '<option value="">Skip this column</option>' +
+            fieldNames.map(function (f) {
+              return '<option value="' + esc(f) + '"' + (auto[index] === f ? ' selected' : '') + '>' +
+                esc(IMPORT_FIELD_LABELS[f] || f) + '</option>';
+            }).join('') +
+          '</select></td>' +
+        '</tr>';
+      }).join('') +
+      '</tbody></table></div>' +
+      '<p class="field-hint map-summary"></p>';
+
+    function currentMapping() {
+      var mapping = {};
+      R.qsa('.map-select', container).forEach(function (select) {
+        mapping[Number(select.dataset.mapIndex)] = select.value || null;
+      });
+      return mapping;
+    }
+
+    function refresh() {
+      var mapping = currentMapping();
+      var mappedCount = 0, skippedCount = 0;
+      headers.forEach(function (h, index) { if (mapping[index]) mappedCount += 1; else skippedCount += 1; });
+      var mappedFields = Object.keys(mapping).map(function (i) { return mapping[i]; }).filter(Boolean);
+      var missing = required.filter(function (f) { return mappedFields.indexOf(f) === -1; });
+
+      var summary = R.qs('.map-summary', container);
+      summary.textContent = mappedCount + ' column' + (mappedCount === 1 ? '' : 's') + ' matched, ' +
+        skippedCount + ' column' + (skippedCount === 1 ? '' : 's') + ' will be skipped' +
+        (missing.length
+          ? ', ' + missing.length + ' required field' + (missing.length === 1 ? '' : 's') +
+            ' missing (' + missing.map(function (f) { return IMPORT_FIELD_LABELS[f] || f; }).join(', ') + ').'
+          : '.');
+      summary.classList.toggle('warn', missing.length > 0);
+
+      if (onChange) onChange(mapping, missing);
+    }
+
+    R.qsa('.map-select', container).forEach(function (select) {
+      select.addEventListener('change', function () {
+        // A manual choice is no longer "the default nobody looked at".
+        select.closest('tr').classList.remove('map-row-unmatched');
+        refresh();
+      });
+    });
+
+    refresh();
+  }
+
   function options(list, valueKey, labelKey, selected) {
     return list.map(function (item) {
       return '<option value="' + esc(item[valueKey]) + '"' +
@@ -331,7 +567,14 @@
       '<div class="record-actions">' +
         (phone ? '<a class="action-link" href="tel:' + esc(phone) + '">Call</a>' : '') +
         (whatsapp ? '<a class="action-link" target="_blank" rel="noopener" href="' + esc(whatsapp) + '">WhatsApp</a>' : '') +
-        '<button class="action-link" data-promise="' + esc(c.oldest_schedule_id) + '" data-name="' + esc(c.customer.full_name) + '">Log a promise</button>' +
+        // A promise the morning sweep already flagged open or broken still
+        // needs a way out that isn't "wait for the buyer to pay" — paid in
+        // cash at the office, or withdrawn on a second call. Without this the
+        // only path off the at-risk list was the automatic one.
+        (c.promise
+          ? '<button class="action-link" data-resolve-promise="' + esc(c.promise.id) + '" data-resolve-status="kept">Mark kept</button>' +
+            '<button class="action-link" data-resolve-promise="' + esc(c.promise.id) + '" data-resolve-status="cancelled">Cancel promise</button>'
+          : '<button class="action-link" data-promise="' + esc(c.oldest_schedule_id) + '" data-name="' + esc(c.customer.full_name) + '">Log a promise</button>') +
         '<button class="action-link" data-buyer="' + esc(c.customer.id) + '">Open</button>' +
       '</div>' +
     '</div>';
@@ -340,6 +583,24 @@
   function wireRiskRows(root) {
     R.qsa('[data-promise]', root).forEach(function (button) {
       button.addEventListener('click', function () { promiseModal(button.dataset.promise, button.dataset.name); });
+    });
+    R.qsa('[data-resolve-promise]', root).forEach(function (button) {
+      button.addEventListener('click', async function () {
+        var status = button.dataset.resolveStatus;
+        var ok = await R.confirm({
+          title: status === 'kept' ? 'Mark promise kept' : 'Cancel this promise',
+          message: status === 'kept'
+            ? 'Marks this promise kept without waiting for the sweep — use this when the money arrived outside Paystack, e.g. paid in cash at the office.'
+            : 'Withdraws this promise. Use this when the buyer walked it back on a later call.',
+          confirmLabel: status === 'kept' ? 'Mark kept' : 'Cancel promise',
+        });
+        if (!ok) return;
+        try {
+          await api.patch('/promises/' + button.dataset.resolvePromise + '/status', { status: status });
+          toast(status === 'kept' ? 'Promise marked kept.' : 'Promise cancelled.', 'ok');
+          R.reload();
+        } catch (err) { toast(err.message, 'err'); }
+      });
     });
     R.qsa('[data-buyer]', root).forEach(function (button) {
       button.addEventListener('click', function () { openCustomer(button.dataset.buyer); });
@@ -608,6 +869,10 @@
         var needle = query.q.toLowerCase();
         units = units.filter(function (u) { return String(u.unit_number).toLowerCase().indexOf(needle) >= 0; });
       }
+
+      // A1, A2 … A10, A11 … A100, then B1 — not the plain alphabetical order
+      // the API returns (order('unit_number') is a string sort in Postgres).
+      units = sortUnitsNaturally(units);
 
       if (!projects.length) {
         view.innerHTML = head('Units', 'Inventory across your developments.') +
@@ -904,6 +1169,7 @@
             list_price: v.list_price,
           });
         }
+        units.sort(function (a, b) { return naturalSort(a.unit_number, b.unit_number); });
 
         var created = await api.post('/units/bulk', { project_id: v.project_id, units: units });
         close();
@@ -929,27 +1195,33 @@
   }
 
   function importUnitsModal(projects) {
+    var mapping = {};
+    var missing = REQUIRED_IMPORT_FIELDS.units;
+
     var panel = R.modal({
       title: 'Import units from CSV',
       wide: true,
       body:
-        '<p class="muted mb-2">Columns: <code>unit_number, unit_type, size_sqm, list_price</code>. ' +
-        'The first row must be the header. <a class="link-quiet" href="' + R.API_BASE + '/re/imports/template/units" target="_blank" rel="noopener">Download the template</a></p>' +
+        '<p class="muted mb-2">Any column headings — map them below. The first row must be the header. ' +
+        '<a class="link-quiet" href="' + R.API_BASE + '/re/imports/template/units" target="_blank" rel="noopener">Download the template</a></p>' +
         '<div class="field"><label for="i-project">Project</label>' +
           '<select class="select" id="i-project" name="project_id" required>' + options(projects, 'id', 'name', projectFilter) + '</select></div>' +
         '<div class="field"><label for="i-file">CSV file</label>' +
           '<input class="input" id="i-file" type="file" accept=".csv,text/csv"></div>' +
         '<div class="field"><label for="i-csv">…or paste it</label>' +
           '<textarea class="textarea" id="i-csv" name="csv" rows="7" style="font-family:var(--mono);font-size:12px" placeholder="unit_number,unit_type,size_sqm,list_price&#10;B12,3-bed terrace,145,45000000"></textarea></div>' +
+        '<div id="i-mapping" class="hidden mt-2"></div>' +
         '<div id="i-result"></div>',
       submitLabel: 'Preview import',
       onSubmit: async function (form, close) {
         var v = R.values(form);
         if (!v.csv) throw new Error('Paste the CSV or choose a file.');
+        if (missing.length) throw new Error('Map the required fields first: ' + missing.join(', ') + '.');
 
         var previewed = form.dataset.previewed === 'true';
+        var remapped = R.remapCsv(v.csv, mapping);
         var result = await api.post('/imports/units', {
-          project_id: v.project_id, csv: v.csv, dry_run: !previewed,
+          project_id: v.project_id, csv: remapped, dry_run: !previewed,
         });
 
         if (!previewed) {
@@ -974,15 +1246,33 @@
       },
     });
 
+    // No mapping yet, nothing valid to preview — the button reappears once
+    // the required fields are mapped.
+    var submitBtn = R.qs('[type="submit"]', panel.root);
+    submitBtn.classList.add('hidden');
+
+    function refreshMapping() {
+      var csvText = R.el('i-csv').value;
+      renderColumnMapping(R.el('i-mapping'), csvText, 'units', function (nextMapping, nextMissing) {
+        mapping = nextMapping;
+        missing = nextMissing;
+        submitBtn.classList.toggle('hidden', !csvText || missing.length > 0);
+        submitBtn.textContent = 'Preview import';
+      });
+      // A changed mapping invalidates whatever was already previewed.
+      panel.form.dataset.previewed = 'false';
+      R.el('i-result').innerHTML = '';
+    }
+
+    R.el('i-csv').addEventListener('input', refreshMapping);
+
     R.el('i-file').addEventListener('change', function (e) {
       var file = e.target.files[0];
       if (!file) return;
       var reader = new FileReader();
       reader.onload = function () {
         R.el('i-csv').value = reader.result;
-        // A new file invalidates the previous preview, so the next submit
-        // previews again instead of importing something nobody has seen.
-        panel.form.dataset.previewed = 'false';
+        refreshMapping();
       };
       reader.readAsText(file);
     });
@@ -1094,12 +1384,25 @@
 
   // The onboarding moment: 150 existing buyers, their units, their plans and
   // what they have already paid, in one paste.
+  var IMPORT_OUTCOME_LABEL = {
+    buyer_only: 'buyer only',
+    buyer_and_reservation: 'buyer + reservation',
+    buyer_and_plan: 'buyer + reservation + payment plan',
+  };
+
   function importCustomersModal() {
+    var mapping = {};
+    var missing = REQUIRED_IMPORT_FIELDS.customers;
+
     var panel = R.modal({
       title: 'Import buyers from CSV',
       wide: true,
       body:
-        '<p class="muted mb-2">One row per buyer. Include their unit, plan and payments so far and it all comes across in one go. ' +
+        '<p class="muted mb-2">One row per buyer. A <code>unit_number</code> column reserves that unit for them ' +
+        'automatically — add <code>total_amount</code>, <code>number_of_installments</code>, <code>frequency</code>, ' +
+        '<code>start_date</code> and <code>amount_paid_to_date</code> too and the payment plan is created in the same ' +
+        'pass. Everything beyond the buyer\'s name is optional; a <code>unit_number</code> with no plan columns just ' +
+        'reserves the unit with no schedule attached. Map your own column headings below. ' +
         '<a class="link-quiet" href="' + R.API_BASE + '/re/imports/template/customers" target="_blank" rel="noopener">Download the template</a></p>' +
         '<div class="notice info" style="font-size:12px">' +
           'Imported payments settle the schedule silently — no receipts are emailed for money that arrived months ago.' +
@@ -1108,14 +1411,17 @@
           '<input class="input" id="ic-file" type="file" accept=".csv,text/csv"></div>' +
         '<div class="field"><label for="ic-csv">…or paste it</label>' +
           '<textarea class="textarea" id="ic-csv" name="csv" rows="7" style="font-family:var(--mono);font-size:12px" placeholder="full_name,phone,email,project,unit_number,list_price,total_amount,number_of_installments,start_date,amount_paid_to_date"></textarea></div>' +
+        '<div id="ic-mapping" class="hidden mt-2"></div>' +
         '<div id="ic-result"></div>',
       submitLabel: 'Preview import',
       onSubmit: async function (form, close) {
         var v = R.values(form);
         if (!v.csv) throw new Error('Paste the CSV or choose a file.');
+        if (missing.length) throw new Error('Map the required fields first: ' + missing.join(', ') + '.');
 
         var previewed = form.dataset.previewed === 'true';
-        var result = await api.post('/imports/customers', { csv: v.csv, dry_run: !previewed });
+        var remapped = R.remapCsv(v.csv, mapping);
+        var result = await api.post('/imports/customers', { csv: remapped, dry_run: !previewed });
 
         if (!previewed) {
           form.dataset.previewed = 'true';
@@ -1129,7 +1435,10 @@
               : '') +
             '<div class="mt-1" style="font-size:12px;max-height:170px;overflow:auto;color:var(--text-dim)">' +
               result.preview.slice(0, 25).map(function (p) {
-                return '<b>' + esc(p.full_name) + '</b> — ' + esc(p.actions.join('; '));
+                var outcome = IMPORT_OUTCOME_LABEL[p.outcome] || 'buyer only';
+                return '<b>' + esc(p.full_name) + '</b> <span class="mono" style="opacity:.6">[' + esc(outcome) + ']</span>' +
+                  (p.conflict ? ' <b class="clay">⚠ conflict</b>' : '') +
+                  ' — ' + esc(p.actions.join('; '));
               }).join('<br>') +
             '</div>';
           R.qs('[type="submit"]', form.closest('.modal')).textContent = 'Import ' + result.rows + ' buyers';
@@ -1143,13 +1452,30 @@
       },
     });
 
+    var submitBtn = R.qs('[type="submit"]', panel.root);
+    submitBtn.classList.add('hidden');
+
+    function refreshMapping() {
+      var csvText = R.el('ic-csv').value;
+      renderColumnMapping(R.el('ic-mapping'), csvText, 'customers', function (nextMapping, nextMissing) {
+        mapping = nextMapping;
+        missing = nextMissing;
+        submitBtn.classList.toggle('hidden', !csvText || missing.length > 0);
+        submitBtn.textContent = 'Preview import';
+      });
+      panel.form.dataset.previewed = 'false';
+      R.el('ic-result').innerHTML = '';
+    }
+
+    R.el('ic-csv').addEventListener('input', refreshMapping);
+
     R.el('ic-file').addEventListener('change', function (e) {
       var file = e.target.files[0];
       if (!file) return;
       var reader = new FileReader();
       reader.onload = function () {
         R.el('ic-csv').value = reader.result;
-        panel.form.dataset.previewed = 'false';
+        refreshMapping();
       };
       reader.readAsText(file);
     });
@@ -1180,7 +1506,7 @@
       });
 
       var pct = totalPlan ? Math.round((totalPaid / totalPlan) * 100) : 0;
-      var credit = unallocatedCreditFor(c.id);
+      var credit = c.unallocated_credit;
 
       panel.body.innerHTML =
         // A credit from an overpayment that nobody has allocated yet stays
@@ -1309,7 +1635,7 @@
       var creditNotice = R.qs('#d-credit-notice', panel.body);
       if (creditNotice) {
         creditNotice.addEventListener('click', function () {
-          allocateOverpaymentModal(null, c.id, credit.amount, credit.method, function (resolved) {
+          allocateOverpaymentModal(credit.payment_id, null, c.id, credit.amount, function (resolved) {
             if (resolved) openCustomer(id);
           });
         });
@@ -1389,7 +1715,7 @@
                       esc((r.re_customers && r.re_customers.full_name) || '') + '">Restructure</button> '
                     : '') +
                 '<button class="btn-quiet" data-res-menu="' + esc(r.id) + '" data-status="' + esc(r.status) +
-                  '" data-buyer-name="' + esc((r.re_customers && r.re_customers.full_name) || '') + '">Change</button>' +
+                  '" data-rental="' + (rental ? '1' : '') + '" data-buyer-name="' + esc((r.re_customers && r.re_customers.full_name) || '') + '">Change</button>' +
               '</td>' +
             '</tr>';
           },
@@ -1405,7 +1731,7 @@
 
       R.qsa('[data-res-menu]', view).forEach(function (button) {
         button.addEventListener('click', function () {
-          reservationStatusModal(button.dataset.resMenu, button.dataset.status, button.dataset.buyerName);
+          reservationStatusModal(button.dataset.resMenu, button.dataset.status, button.dataset.buyerName, Boolean(button.dataset.rental));
         });
       });
 
@@ -1625,6 +1951,7 @@
       return toast('Add a buyer first.', 'err');
     }
 
+    units = sortUnitsNaturally(units);
     var unitList = units.map(function (u) {
       return {
         id: u.id,
@@ -1697,8 +2024,13 @@
           '<div class="field-row">' +
             '<div class="field"><label for="r-rent">Monthly rent amount</label>' +
               '<div class="input-money"><input class="input" id="r-rent" name="monthly_rent" type="number" min="1" step="10000"></div></div>' +
-            '<div class="field"><label for="r-duration">Tenancy duration (months)</label>' +
-              '<input class="input" id="r-duration" name="duration_months" type="number" min="1" max="120" value="12"></div>' +
+            '<div class="field"><label for="r-duration">Initial lease period</label>' +
+              '<select class="select" id="r-duration" name="duration_months">' +
+                '<option value="6">6 months</option>' +
+                '<option value="12" selected>1 year</option>' +
+                '<option value="24">2 years</option>' +
+                '<option value="36">3 years</option>' +
+              '</select></div>' +
           '</div>' +
           '<div class="field"><label for="r-tenancy-start">Tenancy start date</label>' +
             '<input class="input" id="r-tenancy-start" name="tenancy_start_date" type="date" value="' + R.todayISO() + '"></div>' +
@@ -1805,11 +2137,12 @@
     setPrice();
   }
 
-  function reservationStatusModal(id, current, buyerName) {
+  function reservationStatusModal(id, current, buyerName, isRental) {
     var panel = R.modal({
       title: 'Change reservation status',
       body:
-        '<p class="muted mb-2">Currently <b>' + esc(current) + '</b>. The unit follows: cancelling puts it back on the market, completing takes it off for good.</p>' +
+        '<p class="muted mb-2">Currently <b>' + esc(current) + '</b>. The unit follows: cancelling puts it back on the market' +
+          (isRental ? ', completing ends the tenancy and the unit is available to let again.</p>' : ', completing takes it off for good.</p>') +
         '<div class="field"><label for="rs-status">New status</label>' +
           '<select class="select" id="rs-status" name="status">' +
             ['reserved', 'confirmed', 'completed', 'cancelled'].map(function (s) {
@@ -1851,7 +2184,9 @@
           ? '<div class="notice mt-1">The unit returns to <b>available</b> and can be reserved by someone else. ' +
             'The payment history stays, but the allocation does not.</div>'
           : next === 'completed'
-            ? '<div class="notice info mt-1">The unit is marked <b>sold</b> and taken off the market permanently.</div>'
+            ? (isRental
+                ? '<div class="notice info mt-1">The tenancy ends and the unit returns to <b>available</b> to let again.</div>'
+                : '<div class="notice info mt-1">The unit is marked <b>sold</b> and taken off the market permanently.</div>')
             : '';
     };
     select.addEventListener('change', describe);
@@ -1914,17 +2249,27 @@
                 var s = row.re_installment_schedule || {};
                 var reservation = (s.re_installment_plans && s.re_installment_plans.re_reservations) || {};
                 var unit = reservation.re_units || {};
-                return '<tr>' +
+                var buyerName = (reservation.re_customers && reservation.re_customers.full_name) || '';
+                return '<tr' + (row.voided_at ? ' class="is-voided"' : '') + '>' +
                   '<td class="muted">' + esc(fmtDate(row.paid_at)) + '</td>' +
-                  '<td class="cell-primary">' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</td>' +
+                  '<td class="cell-primary">' + esc(buyerName || '—') + '</td>' +
                   '<td class="muted">' + esc(unit.unit_number || '—') +
                     '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
                   '<td class="muted">' + esc(String(row.method).replace(/_/g, ' ')) + '</td>' +
-                  '<td class="num moss">' + naira(row.amount) + '</td>' +
-                  '<td class="right"><button class="btn-quiet" data-receipt="' + esc(row.id) + '">Receipt</button></td>' +
+                  '<td class="num moss">' + naira(row.amount) +
+                    (row.voided_at ? '<div class="cell-meta">voided — ' + esc(row.void_reason || '') + '</div>' : '') + '</td>' +
+                  '<td class="right nowrap">' + (row.voided_at
+                    ? '<span class="muted">Voided</span>'
+                    : '<button class="btn-quiet" data-receipt="' + esc(row.id) + '">Receipt</button> ' +
+                      '<button class="btn-quiet" data-void="' + esc(row.id) + '" data-amount="' + esc(row.amount) +
+                        '" data-name="' + esc(buyerName) + '">Void</button>') + '</td>' +
                 '</tr>';
               },
-              { emptyTitle: 'No payments recorded yet' }
+              {
+                emptyTitle: 'No payments recorded yet',
+                emptyHint: 'Record one against a due installment, or wait for the next Paystack payment to settle.',
+                emptyAction: '<a class="btn-quiet" href="#/payments?tab=due">Go to Due</a>',
+              }
             ), { flush: true }) +
             paginationControls(p);
 
@@ -1932,6 +2277,13 @@
             var result = await api.post('/payments/' + button.dataset.receipt + '/receipt');
             R.openFile(result.download_url);
             toast('Receipt ' + result.receipt_number + ' ready.', 'ok');
+          });
+
+          R.qsa('[data-void]', view).forEach(function (button) {
+            button.addEventListener('click', async function () {
+              var voided = await voidPaymentModal(button.dataset.void, button.dataset.amount, button.dataset.name);
+              if (voided) renderHistory();
+            });
           });
 
           R.onClick(view, '#btn-export-payments', async function () {
@@ -2077,14 +2429,16 @@
             '<option value="paystack">Paystack</option>' +
           '</select></div>' +
         '<div class="field"><label for="pay-ref">Reference</label>' +
-          '<input class="input" id="pay-ref" name="reference" placeholder="Bank reference or teller number"></div>',
+          '<input class="input" id="pay-ref" name="reference" placeholder="Bank reference or teller number"></div>' +
+        '<div class="field"><label for="pay-payer">Payer name <span class="muted">(if not ' + esc(customerName || 'the buyer') + ')</span></label>' +
+          '<input class="input" id="pay-payer" name="payer_name" placeholder="e.g. a spouse, company or lawyer\'s account"></div>',
       submitLabel: 'Record payment',
       onSubmit: async function (form, close) {
         var v = R.values(form);
         if (!v.amount) throw new Error('Enter the amount received.');
 
         var result = await api.post('/payments/' + scheduleId + '/record', {
-          amount: v.amount, method: v.method, reference: v.reference || null,
+          amount: v.amount, method: v.method, reference: v.reference || null, payer_name: v.payer_name || null,
         });
         close();
 
@@ -2100,6 +2454,14 @@
 
         toast('Payment recorded' + (notes.length ? ' — ' + notes.join(', ') : '') + '.', 'ok');
 
+        // Not blocked — a buyer really can pay the same amount twice in one
+        // day — but flagged immediately, while whoever just recorded it can
+        // still remember whether it really was a second transfer. Void it
+        // from Payments → History if it was not.
+        if (result.possible_duplicate) {
+          toast('A payment of the same amount was already recorded on this installment in the last 24 hours. Check this isn\'t a duplicate entry.', 'err');
+        }
+
         // An overpayment gets its own message, not a clause in a list. It is
         // the thing the buyer will phone about — and immediately after it, a
         // chance to actually do something about it rather than a note to
@@ -2108,12 +2470,12 @@
           toast(naira(result.overpayment) + ' more than this installment required.', 'err');
 
           if (customerId) {
-            // Marked as unresolved BEFORE the picker opens, not after it
-            // closes — every dismissal path (backdrop, Escape, Cancel) then
-            // leaves the credit correctly flagged without having to be
-            // caught individually. A successful allocation clears it.
-            setUnallocatedCredit(customerId, result.overpayment, v.method);
-            await allocateOverpaymentModal(scheduleId, customerId, result.overpayment, v.method);
+            // The credit is a real column on the payment row now (server
+            // computed it before this response came back), so there is
+            // nothing to mark client-side — dismissing this picker without
+            // allocating still leaves it correctly visible next time this
+            // buyer's record is opened, on any device.
+            await allocateOverpaymentModal(result.id, scheduleId, customerId, result.overpayment);
           }
         }
 
@@ -2174,6 +2536,38 @@
     });
   }
 
+  /* ══ VOID A WRONGLY RECORDED PAYMENT ═══════════════════════════════════
+     Not a delete — the entry stays in the ledger, dimmed, with the reason
+     attached, because a payment is a financial fact even when it was
+     entered wrong. Any commission it earned is voided with it. */
+  function voidPaymentModal(paymentId, amount, customerName) {
+    return new Promise(function (resolve) {
+      var panel = R.modal({
+        title: 'Void this payment',
+        body:
+          '<p class="muted mb-2">' + esc(naira(amount)) + (customerName ? ' from ' + esc(customerName) : '') +
+            '. The entry stays on the record, marked voided — it stops counting toward what is owed, ' +
+            'and any commission it earned is voided with it.</p>' +
+          '<div class="field"><label for="void-reason">Reason</label>' +
+            '<textarea class="textarea" id="void-reason" name="reason" rows="3" required ' +
+              'placeholder="Why was this entered wrongly?"></textarea>' +
+            '<p class="field-hint">Recorded in the activity log.</p></div>',
+        submitLabel: 'Void payment',
+        onSubmit: async function (form, close) {
+          var v = R.values(form);
+          if (!v.reason) throw new Error('A reason is required.');
+          await api.post('/payments/' + paymentId + '/void', { reason: v.reason });
+          close();
+          toast('Payment voided.', 'ok');
+          resolve(true);
+        },
+      });
+      var submit = R.qs('.modal-foot [type="submit"]');
+      if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
+      qsaCloseWatch(panel, resolve);
+    });
+  }
+
   // Every dismissal path a modal can take — the × button, "Cancel", the
   // backdrop, Escape — resolves the same outer promise with `false` if
   // nothing has resolved it already. `resolve` is a no-op the second time it
@@ -2193,32 +2587,17 @@
      money already recorded — what it is not yet is ASSIGNED to anything, and
      "agree with the buyer which installment it goes against" used to be the
      whole plan. This is that conversation, made concrete: every other open
-     installment for the same buyer, one tap to apply the credit to it. */
-  var UNALLOCATED_KEY_PREFIX = 'archta.unallocated.';
+     installment for the same buyer, one tap to apply the credit to it.
 
-  function unallocatedCreditFor(customerId) {
-    try {
-      var raw = window.localStorage.getItem(UNALLOCATED_KEY_PREFIX + customerId);
-      return raw ? JSON.parse(raw) : null;
-    } catch (e) { return null; }
-  }
-
-  function setUnallocatedCredit(customerId, amount, method) {
-    try {
-      window.localStorage.setItem(UNALLOCATED_KEY_PREFIX + customerId,
-        JSON.stringify({ amount: amount, method: method || 'bank_transfer' }));
-    } catch (e) { /* private mode: the reminder just will not survive a reload */ }
-  }
-
-  function clearUnallocatedCredit(customerId) {
-    try { window.localStorage.removeItem(UNALLOCATED_KEY_PREFIX + customerId); }
-    catch (e) { /* ignore */ }
-  }
+     The credit itself is a column on the original payment row
+     (re_payments.overpayment) — the server surfaces it on the buyer's
+     record (c.unallocated_credit), so it is visible to any staff member on
+     any device, not just the one that recorded the payment. */
 
   // `onResolved(true)` fires only once the excess has actually been applied
   // somewhere — that is the one signal the caller needs, to know whether to
   // refresh a drawer that might now be showing the persistent notice.
-  async function allocateOverpaymentModal(excludeScheduleId, customerId, overpaymentAmount, method, onResolved) {
+  async function allocateOverpaymentModal(paymentId, excludeScheduleId, customerId, overpaymentAmount, onResolved) {
     var rows = await api('/payments/schedule?customer_id=' + encodeURIComponent(customerId) + '&limit=200');
     var candidates = rows.filter(function (s) {
       return s.id !== excludeScheduleId && (s.status === 'pending' || s.status === 'overdue');
@@ -2252,10 +2631,12 @@
         if (button.disabled) return;
         button.disabled = true;
         try {
-          await api.post('/payments/' + button.dataset.allocate + '/record', {
-            amount: overpaymentAmount, method: method, reference: 'Overpayment credit allocation',
+          // Moves the existing credit — it is not a second transfer, so this
+          // does not go through /record a second time (that was the bug: a
+          // brand-new payment row for money that never arrived twice).
+          await api.post('/payments/' + paymentId + '/reallocate', {
+            to_schedule_id: button.dataset.allocate,
           });
-          clearUnallocatedCredit(customerId);
           panel.close();
           toast('Credit allocated.', 'ok');
           if (onResolved) onResolved(true);
@@ -2382,7 +2763,11 @@
                 '<td class="num gold">' + naira(p.commission_earned) + '</td>' +
               '</tr>';
             },
-            { emptyTitle: 'No sales reps yet', emptyHint: 'Add reps in Settings, then assign them to reservations.' }
+            {
+              emptyTitle: 'No sales reps yet',
+              emptyHint: 'Add reps in Settings, then assign them to reservations.',
+              emptyAction: '<a class="btn-quiet" href="#/settings?tab=team">Go to Settings</a>',
+            }
           ), { flush: true });
         return;
       }
@@ -2407,7 +2792,11 @@
                 '<td>' + badge(c.status) + '</td>' +
               '</tr>';
             },
-            { emptyTitle: 'No commission accrued yet', emptyHint: 'Commission accrues when a payment lands against a reservation with a rep on it.' }
+            {
+              emptyTitle: 'No commission accrued yet',
+              emptyHint: 'Commission accrues when a payment lands against a reservation with a rep on it.',
+              emptyAction: '<a class="btn-quiet" href="#/payments">Go to Payments</a>',
+            }
           ), { flush: true });
         return;
       }
@@ -2442,7 +2831,11 @@
                 : '') + '</td>' +
             '</tr>';
           },
-          { emptyTitle: 'No commission yet', emptyHint: 'Set a rate on each rep in Settings, then assign them to reservations.' }
+          {
+            emptyTitle: 'No commission yet',
+            emptyHint: 'Set a rate on each rep in Settings, then assign them to reservations.',
+            emptyAction: '<a class="btn-quiet" href="#/settings?tab=team">Go to Settings</a>',
+          }
         ), { flush: true });
 
       R.qsa('[data-payout]', view).forEach(function (button) {
@@ -2659,47 +3052,72 @@
               '<input class="input" id="s-current" name="current_password" type="password" autocomplete="current-password"' +
                 (me.has_password ? '' : ' disabled placeholder="You sign in with Google"') + '></div>' +
             '<div class="field"><label for="s-new">' + (me.has_password ? 'New password' : 'Set a password') + '</label>' +
-              '<input class="input" id="s-new" name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters"></div>' +
+              '<input class="input" id="s-new" name="password" type="password" autocomplete="new-password" placeholder="At least 12 characters"></div>' +
             '<button class="btn mt-1" type="submit">Update account</button>' +
           '</form>') +
+
+          card('Sessions',
+            '<p class="muted mb-2">Ends every signed-in session for your account — this tab included, ' +
+              'though it stays signed in with a fresh session. Use this if a device you signed in on ' +
+              'is lost, stolen, or no longer yours.</p>' +
+            '<button class="btn" id="btn-sign-out-everywhere">Sign out everywhere</button>') +
         '</div>' +
       '</div>';
 
-    R.qs('#form-org', view).addEventListener('submit', async function (e) {
-      e.preventDefault();
-      try {
-        await api.put('/settings', R.values(e.target));
-        toast('Company details saved.', 'ok');
-      } catch (err) { toast(err.message, 'err'); }
+    guardedSubmit(R.qs('#form-org', view), async function (form) {
+      await api.put('/settings', R.values(form));
+      toast('Company details saved.', 'ok');
     });
 
-    R.qs('#form-notify', view).addEventListener('submit', async function (e) {
-      e.preventDefault();
-      try {
-        await api.put('/settings', R.values(e.target));
-        toast('Preferences saved.', 'ok');
-      } catch (err) { toast(err.message, 'err'); }
+    guardedSubmit(R.qs('#form-notify', view), async function (form) {
+      await api.put('/settings', R.values(form));
+      toast('Preferences saved.', 'ok');
     });
 
-    R.qs('#form-me', view).addEventListener('submit', async function (e) {
-      e.preventDefault();
-      var v = R.values(e.target);
+    guardedSubmit(R.qs('#form-me', view), async function (form) {
+      var v = R.values(form);
       var payload = { full_name: v.full_name };
       if (v.password) { payload.password = v.password; payload.current_password = v.current_password; }
-      try {
-        var result = await R.request('/auth/me', { method: 'PATCH', body: JSON.stringify(payload) });
+      var result = await R.request('/auth/me', { method: 'PATCH', body: JSON.stringify(payload) });
 
-        // Changing the password invalidates every token, including the one this
-        // tab is holding. The server returns a replacement so the person who
-        // made the change is not signed out by making it.
-        if (result && result.token) {
-          R.adoptToken(result.token);
-          toast('Password changed. Every other signed-in device has been signed out.', 'ok');
-        } else {
-          toast('Account updated.', 'ok');
-        }
-        R.reload();
-      } catch (err) { toast(err.message, 'err'); }
+      // Changing the password invalidates every token, including the one this
+      // tab is holding. The server returns a replacement so the person who
+      // made the change is not signed out by making it.
+      if (result && result.token) {
+        R.adoptToken(result.token);
+        toast('Password changed. Every other signed-in device has been signed out.', 'ok');
+      } else {
+        toast('Account updated.', 'ok');
+      }
+      R.reload();
+    });
+
+    R.onClick(view, '#btn-sign-out-everywhere', async function () {
+      var result = await R.request('/auth/logout', { method: 'POST' });
+      if (result && result.token) R.adoptToken(result.token);
+      toast('Signed out everywhere. This tab stays signed in.', 'ok');
+    });
+  }
+
+  // Same disable-and-spin protection R.onClick already gives every button —
+  // these three Settings forms submit directly rather than through
+  // R.modal(), and were the one place in the app missing it entirely: no
+  // visual feedback, and nothing stopping a double-click from firing two
+  // concurrent requests (a real race on the password form, which bumps
+  // token_version and returns a fresh token per request).
+  function guardedSubmit(form, handler) {
+    form.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      var submit = R.qs('[type="submit"]', form);
+      if (submit && submit.disabled) return;
+      if (submit) { submit.disabled = true; submit.classList.add('is-working'); }
+      try {
+        await handler(form);
+      } catch (err) {
+        toast(err.message, 'err');
+      } finally {
+        if (submit) { submit.disabled = false; submit.classList.remove('is-working'); }
+      }
     });
   }
 
@@ -2722,7 +3140,12 @@
             '<td>' + badge(m.status) + '</td>' +
             // The owner cannot be removed — the API refuses it, and offering the
             // button anyway is just a dead end with a confirmation on it.
-            '<td class="right">' + (m.role !== 'owner' && m.status !== 'removed' && m.id
+            '<td class="right nowrap">' + (
+              m.role !== 'owner' && m.status === 'active' && m.id && R.state.user.role === 'owner'
+                ? '<button class="btn-quiet" data-make-owner="' + esc(m.id) + '" data-name="' +
+                  esc(m.full_name || m.email || 'this person') + '">Make owner</button> '
+                : ''
+            ) + (m.role !== 'owner' && m.status !== 'removed' && m.id
               ? '<button class="btn-quiet" data-remove="' + esc(m.id) + '" data-name="' +
                 esc(m.full_name || m.email || 'this person') + '">Remove</button>'
               : '') + '</td>' +
@@ -2782,18 +3205,28 @@
         R.modal({
           title: 'Turn this into a team workspace',
           body:
-            '<p class="muted mb-2">Everything you have — projects, buyers, payments, documents — moves to the new team. You will need to sign out and back in afterwards.</p>' +
+            '<p class="muted mb-2">Everything you have — projects, buyers, payments, documents — moves to the new team.</p>' +
             '<div class="field"><label for="tm-name">Team name</label>' +
               '<input class="input" id="tm-name" name="name" required placeholder="Adron Homes"></div>',
           submitLabel: 'Create team',
           onSubmit: async function (form, close) {
             var result = await api.post('/settings/team', R.values(form));
             close();
+
+            // The API token itself needs no change — org scope is resolved
+            // fresh from team_members on every request, never carried in the
+            // token — but this screen's cached view of "am I a solo account
+            // or a team" was set once at sign-in and has to be refreshed
+            // explicitly, or the app goes on describing a workspace that no
+            // longer exists until the next full sign-in.
+            R.state.user = await R.authApi('/me');
+
             if (result.failed && result.failed.length) {
               toast('Team created, but some records did not move. Check the activity log.', 'err');
             } else {
-              toast('Team created. Sign out and back in to continue.', 'ok');
+              toast('Team created.', 'ok');
             }
+            R.reload();
           },
         });
       });
@@ -2801,6 +3234,26 @@
 
     R.onClick(view, '[data-remove]', async function (button) {
       await removeMemberModal(button.dataset.remove, button.dataset.name);
+    });
+
+    R.qsa('[data-make-owner]', view).forEach(function (button) {
+      button.addEventListener('click', function () {
+        R.modal({
+          title: 'Make ' + button.dataset.name + ' the workspace owner?',
+          body:
+            '<div class="notice mb-2">You will no longer be the owner — you move to <b>admin</b> instead. ' +
+              esc(button.dataset.name) + ' becomes the only person who can transfer ownership again.</div>' +
+            '<p class="muted">Everything else — projects, buyers, payments — stays exactly as it is.</p>',
+          submitLabel: 'Transfer ownership',
+          onSubmit: async function (form, close) {
+            await api.post('/settings/team/transfer-owner', { member_id: button.dataset.makeOwner });
+            close();
+            toast('Ownership transferred.', 'ok');
+            R.state.user = await R.authApi('/me');
+            R.reload();
+          },
+        });
+      });
     });
 
     R.qsa('[data-rate]', view).forEach(function (button) {
@@ -2920,7 +3373,7 @@
       body:
         (work.has_workload
           ? '<div class="notice mb-2">' +
-              '<b>' + name + ' holds ' + work.open_reservations + ' open reservation' +
+              '<b>' + esc(name) + ' holds ' + work.open_reservations + ' open reservation' +
               (work.open_reservations === 1 ? '' : 's') + '</b>' +
               (work.open_value ? ' worth ' + esc(nairaShort(work.open_value)) : '') + '. ' +
               'Choose who takes them over.' +

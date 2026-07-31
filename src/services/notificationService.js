@@ -32,8 +32,12 @@ const SEND_TIMEOUT_MS = 15_000;
 // 234803…. Termii wants the second form. Anything already in international
 // form, with or without a +, is left alone.
 function normalizeNigerianPhone(raw) {
-  const digits = String(raw || '').replace(/[^\d+]/g, '').replace(/^\+/, '');
+  let digits = String(raw || '').replace(/[^\d+]/g, '').replace(/^\+/, '');
   if (!digits) return null;
+  // "00" is the international dialing prefix used in place of "+" —
+  // 00234803… is the same number as +234803…. Left unstripped this fell into
+  // the "leading 0 = local trunk prefix" branch below and mangled it.
+  if (digits.startsWith('00') && digits.length > 2) digits = digits.slice(2);
   if (digits.startsWith('234')) return digits;
   if (digits.startsWith('0')) return `234${digits.slice(1)}`;
   // 10 digits with no leading zero is the local form with the zero dropped.
@@ -50,13 +54,22 @@ async function record(entry) {
   }
 }
 
-function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms).unref?.()
-    ),
-  ]);
+// Promise.race against a bare fetch() used to "time out" the CALLER while the
+// request itself kept running to completion (or hanging) in the background —
+// no signal ever told the socket to give up, so a slow provider still left a
+// connection open for however long it felt like. AbortController actually
+// stops the request.
+async function fetchWithTimeout(url, options, ms, label) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`${label} timed out after ${ms}ms`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ── Email ──────────────────────────────────────────────────────────────────
@@ -109,15 +122,16 @@ async function sendEmail({
       }));
     }
 
-    const response = await withTimeout(
-      fetch(RESEND_URL, {
+    const response = await fetchWithTimeout(
+      RESEND_URL,
+      {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${env.resend.apiKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
-      }),
+      },
       SEND_TIMEOUT_MS,
       'Resend'
     );
@@ -159,8 +173,9 @@ async function sendSms({ orgId, to, body, template = null, relatedType = null, r
   }
 
   try {
-    const response = await withTimeout(
-      fetch(TERMII_URL, {
+    const response = await fetchWithTimeout(
+      TERMII_URL,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -171,7 +186,7 @@ async function sendSms({ orgId, to, body, template = null, relatedType = null, r
           channel: 'generic',
           api_key: env.termii.apiKey,
         }),
-      }),
+      },
       SEND_TIMEOUT_MS,
       'Termii'
     );
@@ -197,8 +212,10 @@ async function sendSms({ orgId, to, body, template = null, relatedType = null, r
 // ── Presentation ───────────────────────────────────────────────────────────
 const stripTags = (html) => String(html).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 
-const naira = (amount) =>
-  '₦' + Number(amount || 0).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+const naira = (amount) => {
+  const n = Number(amount || 0);
+  return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+};
 
 // One shell for every transactional email, so a receipt and a reset link look
 // like they came from the same company. Inline styles only — Gmail strips

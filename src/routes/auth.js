@@ -299,4 +299,22 @@ router.patch('/me', authenticate, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// "Sign out" in the browser only ever cleared localStorage — the token
+// itself kept working for the rest of its 30 days if it had been copied
+// anywhere else (a stolen laptop, a shared machine, a support ticket pasting
+// a header). This is the lightweight "end my other sessions" the product
+// otherwise only offered via a full password change. Bumping token_version
+// ends every session including this one, so a fresh token is returned in the
+// same response — the caller asked to sign out of everywhere ELSE, not to be
+// immediately logged out of the request they just made.
+router.post('/logout', authenticate, async (req, res, next) => {
+  try {
+    const version = await auth.bumpTokenVersion(req.user.id);
+    res.json({
+      token: auth.issueToken({ id: req.user.id, email: req.user.email, token_version: version ?? 0 }),
+      sessions_ended: true,
+    });
+  } catch (e) { next(e); }
+});
+
 module.exports = router;
