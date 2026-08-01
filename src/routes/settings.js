@@ -10,11 +10,16 @@ const auth = require('../services/authService');
 const invites = require('../services/inviteService');
 const { ROLE_LABELS, INVITABLE_ROLES, canInviteRole } = require('../services/permissions');
 const { uploadTeamLogo } = require('../services/documentStorage');
+const { encrypt, last4 } = require('../utils/credentials');
+const { verifyPaystackKey } = require('../services/paystackService');
+const { sendTestEmail } = require('../services/notificationService');
 const router = express.Router();
 
 const SETTINGS_COLUMNS = `organization_id, company_name, logo_url, address, phone, website,
   default_commission_rate, notify_md_email, notify_on_payment, notify_on_overdue,
-  notify_payment_reminders, reply_to_email, updated_at`;
+  notify_payment_reminders, reply_to_email, updated_at,
+  paystack_public_key, paystack_secret_key_last4,
+  resend_from_email, resend_api_key_last4`;
 
 // A logo is a handful of uploads a year, not traffic — this just keeps one
 // account from hammering Storage.
@@ -61,6 +66,10 @@ router.get('/', requirePermission('settings.read'), async (req, res, next) => {
       notify_on_overdue: true,
       notify_payment_reminders: false,
       reply_to_email: null,
+      paystack_public_key: null,
+      paystack_secret_key_last4: null,
+      resend_from_email: null,
+      resend_api_key_last4: null,
     };
 
     // A team's logo upload (POST /logo below) writes to teams.logo_url, not
@@ -74,6 +83,14 @@ router.get('/', requirePermission('settings.read'), async (req, res, next) => {
         .from('teams').select('logo_url').eq('id', req.orgId).maybeSingle();
       if (team?.logo_url) settings.logo_url = team.logo_url;
     }
+
+    // The encrypted columns are never selected in the first place (see
+    // SETTINGS_COLUMNS) — *_last4 plus this boolean is the entire vocabulary
+    // the frontend gets for "is a key on file", the same masked-credential
+    // convention as paystackService.js and notificationService.js use
+    // wherever a secret is read back for display rather than for use.
+    settings.paystack_configured = !!settings.paystack_secret_key_last4;
+    settings.resend_configured = !!settings.resend_api_key_last4;
 
     res.json(settings);
   } catch (e) { next(e); }
@@ -182,6 +199,145 @@ router.post('/logo', requirePermission('settings.write'), logoLimiter, async (re
     });
 
     res.json({ logo_url: logoUrl, team });
+  } catch (e) { next(e); }
+});
+
+// ── Per-workspace Paystack ───────────────────────────────────────────────
+// Owner only, same tier as PUT / — a Paystack secret key settles buyers'
+// money into whichever business it belongs to, which is squarely "money",
+// not "workspace identity" but gated no less tightly for it.
+//
+// paystack_secret_key is accepted as plaintext in the request body (over
+// HTTPS, from an authenticated owner) and never stored that way — it is
+// encrypted immediately via credentials.js and only the ciphertext and a
+// last4 fingerprint are written. Sending an empty string clears it and
+// reverts the workspace to the platform's own key; omitting the field
+// entirely leaves whatever is already saved untouched.
+router.put('/paystack', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const updates = { organization_id: req.orgId };
+
+    if (body.paystack_public_key !== undefined) {
+      updates.paystack_public_key = body.paystack_public_key || null;
+    }
+
+    if (body.paystack_secret_key !== undefined) {
+      const key = String(body.paystack_secret_key || '').trim();
+      if (key) {
+        updates.paystack_secret_key_encrypted = encrypt(key);
+        updates.paystack_secret_key_last4 = last4(key);
+      } else {
+        updates.paystack_secret_key_encrypted = null;
+        updates.paystack_secret_key_last4 = null;
+      }
+    }
+
+    if (Object.keys(updates).length === 1) {
+      return res.status(400).json({ error: 'No updatable fields provided' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('re_org_settings')
+      .upsert(updates, { onConflict: 'organization_id' })
+      .select('paystack_public_key, paystack_secret_key_last4')
+      .single();
+    if (error) throw error;
+
+    audit(req, {
+      action: 'settings.paystack_updated',
+      entityType: 're_org_settings',
+      summary: body.paystack_secret_key !== undefined
+        ? (data.paystack_secret_key_last4
+          ? 'Workspace Paystack secret key updated'
+          : 'Workspace Paystack secret key cleared — reverted to the platform key')
+        : 'Workspace Paystack public key updated',
+      metadata: { paystack_configured: !!data.paystack_secret_key_last4 },
+    });
+
+    res.json({
+      paystack_public_key: data.paystack_public_key,
+      paystack_secret_key_last4: data.paystack_secret_key_last4,
+      paystack_configured: !!data.paystack_secret_key_last4,
+    });
+  } catch (e) { next(e); }
+});
+
+// The Settings "test these keys" button — tests the CANDIDATE value still
+// sitting in the form, not whatever is already saved, so a typo is caught
+// before it is committed. No side effects: verifyPaystackKey lists (at most)
+// one existing transaction and nothing more.
+router.post('/paystack/test', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const secretKey = String(req.body?.secret_key || '').trim();
+    res.json(await verifyPaystackKey(secretKey));
+  } catch (e) { next(e); }
+});
+
+// ── Per-workspace email (Resend) ────────────────────────────────────────
+// Same shape and the same owner-only gate as Paystack above. Configuring
+// this is entirely optional — every send already works against the
+// platform's own Resend account (see notificationService.js); the only
+// thing this changes is whose name and domain a buyer sees it come from.
+router.put('/email', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const updates = { organization_id: req.orgId };
+
+    if (body.resend_from_email !== undefined) {
+      updates.resend_from_email = body.resend_from_email || null;
+    }
+
+    if (body.resend_api_key !== undefined) {
+      const key = String(body.resend_api_key || '').trim();
+      if (key) {
+        updates.resend_api_key_encrypted = encrypt(key);
+        updates.resend_api_key_last4 = last4(key);
+      } else {
+        updates.resend_api_key_encrypted = null;
+        updates.resend_api_key_last4 = null;
+      }
+    }
+
+    if (Object.keys(updates).length === 1) {
+      return res.status(400).json({ error: 'No updatable fields provided' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('re_org_settings')
+      .upsert(updates, { onConflict: 'organization_id' })
+      .select('resend_from_email, resend_api_key_last4')
+      .single();
+    if (error) throw error;
+
+    audit(req, {
+      action: 'settings.email_updated',
+      entityType: 're_org_settings',
+      summary: body.resend_api_key !== undefined
+        ? (data.resend_api_key_last4
+          ? 'Workspace email (Resend) key updated'
+          : 'Workspace email key cleared — reverted to the platform default')
+        : 'Workspace From-email address updated',
+      metadata: { resend_configured: !!data.resend_api_key_last4 },
+    });
+
+    res.json({
+      resend_from_email: data.resend_from_email,
+      resend_api_key_last4: data.resend_api_key_last4,
+      resend_configured: !!data.resend_api_key_last4,
+    });
+  } catch (e) { next(e); }
+});
+
+// Sends one real email to the CALLING owner's own address — Resend has no
+// no-side-effect validity check the way Paystack's transaction list does, so
+// "does this work" and "send a test" are necessarily the same call. Tests the
+// candidate form values, not whatever is already saved.
+router.post('/email/test', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const apiKey = String(req.body?.resend_api_key || '').trim();
+    const from = String(req.body?.resend_from_email || '').trim();
+    res.json(await sendTestEmail({ apiKey, from, to: req.user.email }));
   } catch (e) { next(e); }
 });
 

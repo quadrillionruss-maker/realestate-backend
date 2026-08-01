@@ -202,6 +202,63 @@ hand in `screens.js`. Every one of those is presentation only: the frontend
 hiding a button does not substitute for the server re-checking the same
 permission on the request, which it always does.
 
+## Per-workspace credentials
+
+Two third-party services — Paystack and Resend — started as one platform-wide
+account for every workspace on the deployment. `PAYSTACK_SECRET_KEY` and
+`RESEND_API_KEY`/`RESEND_FROM` (`.env`) are now a **fallback**, not the whole
+story: a workspace can enter its own keys under Settings → Payments and
+Settings → Notifications → Email, and every payment operation and every send
+for that workspace uses them instead (`migrations/017`, `migrations/018`).
+Nothing else in the product needs to know which case it's in —
+`paystackService.resolvePaystackSecretKey(orgId)` and
+`notificationService.resolveResendCredentials(orgId)` are the two places that
+decide, and every caller goes through them.
+
+**A workspace's own secret key is encrypted at rest, never stored plain.**
+`src/utils/credentials.js` — AES-256-GCM, so a tampered or truncated
+ciphertext (a bit flip in a backup restore, a bug that mangles a column) fails
+to decrypt *loudly* instead of silently handing back garbage that then gets
+used as an API key. `CREDENTIALS_ENCRYPTION_KEY` (32 bytes, 64 hex chars) is a
+separate secret from `JWT_SECRET` — losing it makes every already-stored
+workspace key permanently undecryptable, so it needs the same backup
+discipline. Public values (`paystack_public_key`, `resend_from_email`) are not
+secrets and are stored plain, same reasoning as everything else in
+`re_org_settings`.
+
+**Never returned to the browser once saved.** Settings shows `*_last4` (the
+plaintext's last four characters, computed once at save time) plus a
+`*_configured` boolean — enough for someone to recognise their own key,
+nothing worth stealing if the response ever leaked. The two "test" buttons
+(`POST /settings/paystack/test`, `POST /settings/email/test`) test whatever is
+still sitting in the form, not what's already saved, so a typo is caught
+before it's committed — Paystack via a read-only transaction-list call,
+Resend via an actual test send to the workspace owner's own address, because
+Resend has no side-effect-free validity check.
+
+**The webhook is one shared URL, verified against every known key — not the
+key the reference names.** `paystackService.verifyWebhookSignature` tries the
+platform key plus every workspace's own decrypted key against the incoming
+HMAC and trusts nothing about the request body until one of them actually
+matches. The alternative — read the `REINST-` reference first, look up which
+org it names, verify only against that org's key — was rejected deliberately:
+it would let an unauthenticated caller force a database lookup with no proof
+of anything, exactly what today's single-key check rejects before touching
+the database at all. HMAC-SHA512 against N keys costs microseconds each,
+cheap enough at the scale this product actually runs at. One consequence: a
+workspace with its own Paystack account still points its dashboard's webhook
+at the same shared `/api/webhooks/paystack` URL — nothing to reconfigure.
+
+**A decrypt failure is handled differently depending on what's at stake.**
+`resolvePaystackSecretKey` throws rather than silently falling back to the
+platform key — charging a buyer's card through the wrong Paystack account
+because a workspace's key couldn't be read would settle real money into the
+wrong business. `resolveResendCredentials` does not throw — `sendEmail` never
+fails the request that triggered it (the three rules at the top of
+`notificationService.js`) — but it also doesn't silently fall back to sending
+as "Archta"; the send is recorded `failed` with a clear reason, same as any
+other misconfiguration.
+
 ## Deployment
 
 Required env: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `JWT_SECRET`. The
@@ -215,7 +272,8 @@ degrades:
 | `RESEND_API_KEY` | Receipts and alerts are recorded `skipped`, never sent. Visible in Settings → Activity |
 | `TERMII_API_KEY` | Same, for SMS |
 | `OPENAI_API_KEY` | Brief still runs, rule-based, marked `generated_by: 'fallback'` |
-| `PAYSTACK_SECRET_KEY` | Payment links 503; the webhook 503s; bank transfers still work |
+| `PAYSTACK_SECRET_KEY` | Payment links 503; the webhook 503s — for any workspace that hasn't set its own Paystack keys. Bank transfers still work |
+| `CREDENTIALS_ENCRYPTION_KEY` | A workspace cannot save its own Paystack or Resend keys (those two Settings forms 503) — the platform fallback keeps working exactly as before |
 | `ALLOWED_ORIGINS` | No browser origin is allowed in production |
 
 Three deployment gotchas, all covered in `render.yaml`:
@@ -249,7 +307,7 @@ a host.
 
 1. Run every file in `migrations/`, in numeric order, in the Supabase SQL
    editor — `001_phase1_schema.sql` through the highest-numbered file present
-   (`016_rbac.sql` as of this writing). `001` is self-contained — it creates
+   (`018_resend_org_keys.sql` as of this writing). `001` is self-contained — it creates
    the identity tables (`users`, `teams`, `team_members`) as well as the
    domain ones, so an empty project is all it needs. Every migration is
    idempotent, so re-running the whole set after a change is safe and is how
@@ -470,6 +528,10 @@ pattern, never by splitting on the delimiter.
 `handleRealEstateCharge(event)` returns `false` for references it does not
 own, so `routes/webhooks.js` can be shared with another product on the same
 Paystack account without a second endpoint.
+
+Which Paystack account a given payment actually settles into — the platform's
+or a workspace's own — and how the shared webhook verifies either, is covered
+in "Per-workspace credentials" above.
 
 **Money arrives by two doors and both call the same thing.** A recorded bank
 transfer and a Paystack webhook both end in

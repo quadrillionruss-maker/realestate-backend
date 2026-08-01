@@ -26,29 +26,13 @@
 // Paystack shout. An UNVERIFIED request is a different matter and gets a 401.
 
 const express = require('express');
-const crypto = require('crypto');
 const env = require('../config/env');
-const { handleRealEstateCharge } = require('../services/paystackService');
+const { handleRealEstateCharge, verifyWebhookSignature } = require('../services/paystackService');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { onPaymentRecorded } = require('../services/paymentEvents');
 const { auditSystem } = require('../services/auditService');
 
 const router = express.Router();
-
-function signatureMatches(rawBody, header) {
-  if (!header || !env.paystack.secretKey) return false;
-
-  const expected = crypto
-    .createHmac('sha512', env.paystack.secretKey)
-    .update(rawBody)
-    .digest('hex');
-
-  const a = Buffer.from(expected, 'utf8');
-  const b = Buffer.from(String(header), 'utf8');
-  // timingSafeEqual throws on a length mismatch, which is itself a signal —
-  // check length first and return the same false either way.
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
 
 router.post('/paystack', async (req, res) => {
   // express.raw leaves a Buffer here. If some other body parser got there
@@ -59,12 +43,14 @@ router.post('/paystack', async (req, res) => {
     return res.status(500).json({ error: 'Webhook misconfigured.' });
   }
 
-  if (!env.paystack.secretKey) {
-    // Without the secret there is no way to tell Paystack from anyone else.
-    return res.status(503).json({ error: 'Paystack is not configured on this server.' });
-  }
-
-  if (!signatureMatches(req.body, req.headers['x-paystack-signature'])) {
+  // One shared endpoint, now signed by as many distinct Paystack accounts as
+  // workspaces have configured their own — verifyWebhookSignature tries every
+  // known key (the platform's, plus every workspace's own) and trusts nothing
+  // about the body until one of them actually matches. See that function's
+  // own comment for why the order matters: picking a key based on the
+  // (unverified) reference first would let an unauthenticated request force a
+  // database lookup with no proof of anything, which this order never does.
+  if (!(await verifyWebhookSignature(req.body, req.headers['x-paystack-signature']))) {
     console.warn('[webhook] rejected an unsigned or mis-signed Paystack request');
     return res.status(401).json({ error: 'Invalid signature.' });
   }

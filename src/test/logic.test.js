@@ -13,6 +13,11 @@ process.env.SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ||
 // exist. It never leaves this process.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-at-least-thirty-two-characters-long';
 process.env.RE_DISABLE_CRON = 'true';
+// credentials.js (a workspace's own Paystack/Resend keys, encrypted at rest)
+// refuses to run at all without this — see that file for why. Fixed rather
+// than random so a failing assertion below is reproducible.
+process.env.CREDENTIALS_ENCRYPTION_KEY = process.env.CREDENTIALS_ENCRYPTION_KEY
+  || 'df5730e8398de01582d884020f9522a777190b5e3d4904a8bad5217687c47d9f';
 
 const assert = require('assert');
 const jwt = require('jsonwebtoken');
@@ -45,6 +50,7 @@ const {
 const {
   canAccess, normalizeRole, canInviteRole, wouldExceedWorkspaceCap, actionsFor, ROLES,
 } = require('../services/permissions');
+const { encrypt, decrypt, last4 } = require('../utils/credentials');
 
 // frontend/realestate.js is a browser script, not a CommonJS module — it
 // assigns onto `window.RE` rather than `module.exports`, and its very last
@@ -1228,6 +1234,39 @@ async function runBrandingTests() {
     assert.strictEqual(branding.logo_url, 'https://cdn.example.com/solo.png');
   });
 }
+
+// ── Credentials — encrypting a workspace's own Paystack/Resend keys ─────
+// (src/utils/credentials.js, migrations/017 + 018). Pure crypto, no
+// database — the DB half (a value actually round-tripping through
+// re_org_settings) is asserted in schema.test.js.
+section('Credentials — AES-256-GCM at rest');
+
+test('encrypt then decrypt returns the original plaintext', () => {
+  const stored = encrypt('sk_live_abcdef1234567890');
+  assert.strictEqual(decrypt(stored), 'sk_live_abcdef1234567890');
+});
+
+test('two encryptions of the same plaintext produce different ciphertext (random IV)', () => {
+  const a = encrypt('sk_live_same_key');
+  const b = encrypt('sk_live_same_key');
+  assert.notStrictEqual(a, b);
+  assert.strictEqual(decrypt(a), decrypt(b));
+});
+
+test('decrypt throws on a tampered ciphertext instead of returning garbage', () => {
+  const stored = Buffer.from(encrypt('sk_live_do_not_corrupt'), 'base64');
+  stored[stored.length - 1] ^= 0xff; // flip the last ciphertext byte
+  assert.throws(() => decrypt(stored.toString('base64')));
+});
+
+test('decrypt(null) is null, not a thrown error — "no key configured" is not tampering', () => {
+  assert.strictEqual(decrypt(null), null);
+});
+
+test('last4 returns only the final four characters', () => {
+  assert.strictEqual(last4('sk_live_abcdef7f3a'), '7f3a');
+  assert.strictEqual(last4('ab'), 'ab'); // shorter than 4 — the whole thing, not padded
+});
 
 runBrandingTests().then(() => {
   // ── Report ─────────────────────────────────────────────────────────────

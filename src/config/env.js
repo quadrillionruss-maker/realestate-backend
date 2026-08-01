@@ -98,6 +98,16 @@ const env = {
     secretKey: process.env.PAYSTACK_SECRET_KEY || '',
   },
 
+  // Encrypts an org's OWN Paystack/Resend credentials at rest
+  // (src/utils/credentials.js) — a separate concern from the platform's own
+  // keys above, which are never stored in the database at all. Optional: a
+  // workspace that never enters its own third-party keys never needs this
+  // set, and the routes that would use it fail with a clear 503 rather than
+  // storing anything unencrypted if it's missing.
+  credentials: {
+    encryptionKey: process.env.CREDENTIALS_ENCRYPTION_KEY || '',
+  },
+
   // Feature switches for the work that costs money or writes to the world.
   features: {
     // Auto-render a receipt PDF when a payment is recorded. Puppeteer is heavy

@@ -30,7 +30,8 @@ function check(name, cond, detail) {
 
   // ── Apply migrations, twice, to prove idempotency ───────────────────────
   for (const pass of ['first', 'second']) {
-    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql']) {
+    for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql',
+      '017_paystack_org_keys.sql', '018_resend_org_keys.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -61,7 +62,8 @@ function check(name, cond, detail) {
     end $$;
   `);
 
-  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql']) {
+  for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql',
+      '017_paystack_org_keys.sql', '018_resend_org_keys.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -851,6 +853,60 @@ function check(name, cond, detail) {
     `select count(distinct team_id)::int as "workspaceCount" from team_members
      where user_id=$1 and status in ('active','invited')`, [capUserId]);
   check('a person already in ten workspaces counts as exactly ten', workspaceCount === 10, `${workspaceCount}`);
+
+  // ── 017: per-workspace Paystack keys ─────────────────────────────────────
+
+  const orgSettingsCols = await colsOf('re_org_settings');
+  check('re_org_settings has the Paystack credential columns',
+    ['paystack_secret_key_encrypted', 'paystack_secret_key_last4', 'paystack_public_key']
+      .every((c) => orgSettingsCols.includes(c)),
+    orgSettingsCols.join(', '));
+
+  let paystackKeyStored = false;
+  try {
+    const [{ paystack_secret_key_encrypted, paystack_secret_key_last4, paystack_public_key }] = await q(
+      `insert into re_org_settings (organization_id, paystack_secret_key_encrypted, paystack_secret_key_last4, paystack_public_key)
+       values ($1,'ZmFrZS1jaXBoZXJ0ZXh0','7f3a','pk_live_abc123')
+       on conflict (organization_id) do update set
+         paystack_secret_key_encrypted=excluded.paystack_secret_key_encrypted,
+         paystack_secret_key_last4=excluded.paystack_secret_key_last4,
+         paystack_public_key=excluded.paystack_public_key
+       returning paystack_secret_key_encrypted, paystack_secret_key_last4, paystack_public_key`, [userId]);
+    paystackKeyStored = paystack_secret_key_encrypted === 'ZmFrZS1jaXBoZXJ0ZXh0'
+      && paystack_secret_key_last4 === '7f3a' && paystack_public_key === 'pk_live_abc123';
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('an org Paystack key round-trips through the row (encrypted text + last4 + public key)', paystackKeyStored);
+
+  // A workspace that never configures its own key is the default and the
+  // common case — the columns must allow that, not require a value.
+  const [{ id: noKeyOrg }] = await q(
+    `insert into users (email, full_name) values ('no-paystack-key@example.com','No Key') returning id`);
+  let noKeyOrgOk = true;
+  try {
+    await q(`insert into re_org_settings (organization_id) values ($1)`, [noKeyOrg]);
+  } catch (err) { noKeyOrgOk = false; console.log(`       ${err.message}`); }
+  check('re_org_settings can be created with no Paystack key at all', noKeyOrgOk);
+
+  // ── 018: per-workspace Resend (email) credentials ────────────────────────
+
+  check('re_org_settings has the Resend credential columns',
+    ['resend_api_key_encrypted', 'resend_api_key_last4', 'resend_from_email']
+      .every((c) => orgSettingsCols.includes(c)),
+    orgSettingsCols.join(', '));
+
+  let resendCredentialsStored = false;
+  try {
+    const [{ resend_api_key_encrypted, resend_api_key_last4, resend_from_email }] = await q(
+      `update re_org_settings set
+         resend_api_key_encrypted='ZmFrZS1yZXNlbmQta2V5',
+         resend_api_key_last4='9c21',
+         resend_from_email='receipts@developer-domain.com'
+       where organization_id=$1
+       returning resend_api_key_encrypted, resend_api_key_last4, resend_from_email`, [userId]);
+    resendCredentialsStored = resend_api_key_encrypted === 'ZmFrZS1yZXNlbmQta2V5'
+      && resend_api_key_last4 === '9c21' && resend_from_email === 'receipts@developer-domain.com';
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('an org Resend key + from-address round-trips through the row', resendCredentialsStored);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

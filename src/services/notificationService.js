@@ -22,10 +22,40 @@
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { escapeHtml } = require('../utils/escapeHtml');
+const { decrypt } = require('../utils/credentials');
 
 const RESEND_URL = 'https://api.resend.com/emails';
 const TERMII_URL = 'https://api.ng.termii.com/api/sms/send';
 const SEND_TIMEOUT_MS = 15_000;
+
+// ── Per-workspace credentials ────────────────────────────────────────────
+// Same shape as paystackService.js's resolvePaystackSecretKey: a workspace
+// that has configured its own Resend account sends receipts, portal links,
+// document notifications and overdue alerts from ITS domain; one that never
+// has keeps using the platform's, exactly as before this feature existed.
+//
+// Unlike the Paystack key, a decrypt failure here does not throw up to the
+// caller — rule 1 above (a send must never fail the request that triggered
+// it) still holds — but it also must not silently fall back to sending as
+// "Archta" when a workspace's own key just failed to read; sendEmail below
+// records that as a failed send instead, same as any other misconfiguration.
+async function resolveResendCredentials(orgId) {
+  const { data } = await supabaseAdmin
+    .from('re_org_settings')
+    .select('resend_api_key_encrypted, resend_from_email')
+    .eq('organization_id', orgId)
+    .maybeSingle();
+
+  if (data?.resend_api_key_encrypted) {
+    try {
+      return { apiKey: decrypt(data.resend_api_key_encrypted), from: data.resend_from_email || env.resend.from, error: null };
+    } catch (err) {
+      console.error('[notify] could not decrypt org Resend key:', err.message);
+      return { apiKey: null, from: null, error: "This workspace's email key could not be read." };
+    }
+  }
+  return { apiKey: env.resend.apiKey || null, from: env.resend.from || null, error: null };
+}
 
 // ── Phone numbers ──────────────────────────────────────────────────────────
 // Nigerian numbers are written locally as 0803… and internationally as
@@ -99,14 +129,21 @@ async function sendEmail({
 
   if (!to) return { status: 'skipped', reason: 'no recipient' };
 
-  if (!env.resend.apiKey || !env.resend.from) {
+  const { apiKey, from, error } = await resolveResendCredentials(orgId);
+
+  if (error) {
+    await record({ ...base, status: 'failed', error });
+    return { status: 'failed', reason: error };
+  }
+
+  if (!apiKey || !from) {
     await record({ ...base, status: 'skipped', error: 'RESEND_API_KEY or RESEND_FROM not configured' });
     return { status: 'skipped', reason: 'email not configured' };
   }
 
   try {
     const payload = {
-      from: env.resend.from,
+      from,
       to: [String(to)],
       subject: subject || '(no subject)',
       html: html || undefined,
@@ -127,7 +164,7 @@ async function sendEmail({
       {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${env.resend.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -149,6 +186,50 @@ async function sendEmail({
     await record({ ...base, status: 'failed', error: err.message });
     return { status: 'failed', reason: err.message };
   }
+}
+
+// The Settings "test these credentials" button. Unlike Paystack's key check,
+// Resend has no read-only "am I valid" endpoint that doesn't cost a send — so
+// this sends one real, small email to the workspace owner's own address,
+// using the CANDIDATE key and from-address (not yet saved), exactly the same
+// reasoning as verifyPaystackKey testing the form value rather than whatever
+// is already persisted.
+async function sendTestEmail({ apiKey, from, to }) {
+  if (!apiKey || !from) return { valid: false, reason: 'Both an API key and a From address are required.' };
+  if (!to) return { valid: false, reason: 'No recipient to send the test to.' };
+
+  let response;
+  try {
+    response = await fetchWithTimeout(
+      RESEND_URL,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from,
+          to: [String(to)],
+          subject: 'Archta — test email',
+          html: emailShell({
+            heading: 'This is a test email',
+            intro: "If you can read this, your Resend API key and From address are both working. Emails from this workspace will now be sent from this address instead of Archta's default.",
+          }),
+        }),
+      },
+      SEND_TIMEOUT_MS,
+      'Resend'
+    );
+  } catch (err) {
+    return { valid: false, reason: err.message || 'Resend is not responding right now. Try again shortly.' };
+  }
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return { valid: false, reason: body.message || `Resend returned ${response.status}.` };
+  }
+  return { valid: true };
 }
 
 // ── SMS ────────────────────────────────────────────────────────────────────
@@ -262,6 +343,8 @@ function emailShell({ heading, intro, rows = [], body = '', ctaLabel, ctaUrl, fo
 module.exports = {
   sendEmail,
   sendSms,
+  sendTestEmail,
+  resolveResendCredentials,
   emailShell,
   normalizeNigerianPhone,
   naira,

@@ -6,12 +6,121 @@
 // for references it does not own, so the other product's logic proceeds
 // untouched, and no second endpoint is needed.
 
+const crypto = require('crypto');
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { isPastDue } = require('./overdueService');
+const { decrypt } = require('../utils/credentials');
 
 const PAYSTACK_BASE = 'https://api.paystack.co';
 const REFERENCE_PREFIX = 'REINST-';
+
+// ── Per-workspace keys ───────────────────────────────────────────────────
+// A workspace with its own Paystack account uses ITS key for every payment
+// operation; one that has never configured one keeps using the platform's
+// own PAYSTACK_SECRET_KEY, exactly as before this feature existed.
+async function resolvePaystackSecretKey(orgId) {
+  const { data } = await supabaseAdmin
+    .from('re_org_settings')
+    .select('paystack_secret_key_encrypted')
+    .eq('organization_id', orgId)
+    .maybeSingle();
+
+  if (data?.paystack_secret_key_encrypted) {
+    try {
+      return decrypt(data.paystack_secret_key_encrypted);
+    } catch (err) {
+      // Decryption failing (a bad CREDENTIALS_ENCRYPTION_KEY, a corrupted
+      // row) must not silently fall back to charging through the PLATFORM's
+      // own Paystack account on this org's behalf — that would settle a
+      // buyer's money into the wrong business. Fail the payment instead.
+      console.error('[re-paystack] could not decrypt org Paystack key:', err.message);
+      throw Object.assign(new Error('This workspace\'s Paystack key could not be read. Contact support.'), { statusCode: 500 });
+    }
+  }
+  return env.paystack.secretKey || null;
+}
+
+// The webhook has the opposite problem: an incoming charge.success carries
+// no organization_id until AFTER its signature is trusted, and a shared
+// endpoint now receives events signed by however many distinct Paystack
+// accounts workspaces have configured. The only safe order of operations is
+// to try every KNOWN key against the signature and trust nothing about the
+// body until one actually matches — see CLAUDE.md's "Roles and permissions"
+// neighbour section, "Per-workspace credentials", for why looking at the
+// reference first (to decide which key to check) would be backwards: it
+// would let an unauthenticated caller force a database lookup with no proof
+// of anything, which today's single-key check rejects before touching the
+// database at all.
+//
+// HMAC-SHA512 against N keys is microseconds each — cheap enough that this
+// scales fine to however many workspaces actually configure their own
+// account, which will never be a large fraction of "every webhook Paystack
+// ever sends this endpoint".
+async function allConfiguredSecretKeys() {
+  const keys = [];
+  if (env.paystack.secretKey) keys.push(env.paystack.secretKey);
+
+  const { data } = await supabaseAdmin
+    .from('re_org_settings')
+    .select('paystack_secret_key_encrypted')
+    .not('paystack_secret_key_encrypted', 'is', null);
+
+  for (const row of data || []) {
+    try {
+      const key = decrypt(row.paystack_secret_key_encrypted);
+      if (key) keys.push(key);
+    } catch (err) {
+      // One workspace's corrupted key must not take down webhook processing
+      // for every other workspace — skip it, log it, move on.
+      console.warn('[re-paystack] skipping an org Paystack key that failed to decrypt:', err.message);
+    }
+  }
+  return keys;
+}
+
+// Returns true the moment ANY known key's HMAC matches — constant-time per
+// comparison, same as the single-key check this replaces, so which key
+// (if any) matched is not observable by timing.
+async function verifyWebhookSignature(rawBody, signatureHeader) {
+  if (!signatureHeader) return false;
+  const provided = Buffer.from(String(signatureHeader), 'utf8');
+
+  for (const key of await allConfiguredSecretKeys()) {
+    const expected = Buffer.from(
+      crypto.createHmac('sha512', key).update(rawBody).digest('hex'), 'utf8'
+    );
+    if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The Settings "test these keys" button. A read-only, no-side-effect call
+// that only succeeds with a genuinely valid secret key — listing (at most)
+// one transaction creates nothing and costs nothing, unlike initializing a
+// real charge just to see if the key works.
+async function verifyPaystackKey(secretKey) {
+  if (!secretKey) return { valid: false, reason: 'No key provided.' };
+
+  let response;
+  try {
+    response = await fetch(`${PAYSTACK_BASE}/transaction?perPage=1`, {
+      headers: { Authorization: `Bearer ${secretKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    return { valid: false, reason: 'Paystack is not responding right now. Try again shortly.' };
+  }
+
+  if (response.status === 401) return { valid: false, reason: 'Paystack rejected this key — check it was copied in full.' };
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok || json.status === false) {
+    return { valid: false, reason: json.message || `Paystack returned ${response.status}.` };
+  }
+  return { valid: true };
+}
 
 // A schedule id is a UUID, which itself contains '-'. Splitting the reference
 // on '-' therefore yields a UUID fragment, not the id — match the whole shape
@@ -79,7 +188,10 @@ async function applyPaymentsToSchedule(scheduleId) {
 // default, and a buyer who has just paid lands on some generic page with no
 // route back to their own schedule.
 async function initInstallmentPayment(orgId, scheduleId, customerEmail, { callbackUrl = null } = {}) {
-  if (!env.paystack.secretKey) {
+  // This workspace's own key if it has configured one, otherwise the
+  // platform's — see resolvePaystackSecretKey above.
+  const secretKey = await resolvePaystackSecretKey(orgId);
+  if (!secretKey) {
     throw Object.assign(new Error('Paystack is not configured.'), { statusCode: 503 });
   }
 
@@ -115,7 +227,7 @@ async function initInstallmentPayment(orgId, scheduleId, customerEmail, { callba
     response = await fetch(`${PAYSTACK_BASE}/transaction/initialize`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${env.paystack.secretKey}`,
+        Authorization: `Bearer ${secretKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -456,4 +568,7 @@ module.exports = {
   parseInstallmentReference,
   isRealEstateReference,
   buildReference,
+  resolvePaystackSecretKey,
+  verifyWebhookSignature,
+  verifyPaystackKey,
 };

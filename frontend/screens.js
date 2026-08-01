@@ -3084,6 +3084,27 @@
             '</div>' +
             '<button class="btn primary mt-1" type="submit">Save company details</button>' +
           '</form>') +
+
+          card('Payments — Paystack',
+            (me.role === 'owner'
+              ? '<p class="field-hint mb-2">Optional. Without your own Paystack account, card payments settle into Archta\'s default account and are forwarded to you. Add your own keys to receive them directly.</p>' +
+                '<form id="form-paystack">' +
+                  '<div class="field"><label for="s-pk-public">Public key</label>' +
+                    '<input class="input" id="s-pk-public" name="paystack_public_key" value="' + esc(settings.paystack_public_key || '') + '" placeholder="pk_live_…"></div>' +
+                  '<div class="field"><label for="s-pk-secret">Secret key</label>' +
+                    '<input class="input" id="s-pk-secret" name="paystack_secret_key" type="password" autocomplete="off" placeholder="' +
+                      (settings.paystack_configured ? 'Configured, ending in ' + esc(settings.paystack_secret_key_last4) + ' — leave blank to keep' : 'sk_live_…') + '">' +
+                    '<p class="field-hint">Never shown again once saved. Leave blank to keep the current key.</p></div>' +
+                  '<div class="field-row">' +
+                    '<button class="btn primary" type="submit">Save</button>' +
+                    '<button class="btn" type="button" id="btn-test-paystack">Test key</button>' +
+                  '</div>' +
+                '</form>'
+              : '<p class="muted">' +
+                (settings.paystack_configured
+                  ? 'Configured, ending in ' + esc(settings.paystack_secret_key_last4) + '.'
+                  : 'Not configured — card payments use the platform default account.') +
+                ' Only the workspace owner can change this.</p>')) +
         '</div>' +
 
         '<div>' +
@@ -3107,6 +3128,28 @@
               '<p class="field-hint">Percent. Applied to a new sales rep unless you set theirs individually.</p></div>' +
             '<button class="btn primary mt-1" type="submit">Save preferences</button>' +
           '</form>') +
+
+          card('Email',
+            (me.role === 'owner'
+              ? '<p class="field-hint mb-2">Optional. Without this, receipts, portal links and alerts still send — they just arrive from Archta rather than your own domain.</p>' +
+                '<form id="form-email">' +
+                  '<div class="field"><label for="s-resend-key">Resend API key</label>' +
+                    '<input class="input" id="s-resend-key" name="resend_api_key" type="password" autocomplete="off" placeholder="' +
+                      (settings.resend_configured ? 'Configured, ending in ' + esc(settings.resend_api_key_last4) + ' — leave blank to keep' : 're_…') + '">' +
+                    '<p class="field-hint">Never shown again once saved. Leave blank to keep the current key.</p></div>' +
+                  '<div class="field"><label for="s-resend-from">From email address</label>' +
+                    '<input class="input" id="s-resend-from" name="resend_from_email" type="email" value="' + esc(settings.resend_from_email || '') + '" placeholder="receipts@yourcompany.com">' +
+                    '<p class="field-hint">Must belong to a domain verified in your own Resend account, or Resend will refuse to send.</p></div>' +
+                  '<div class="field-row">' +
+                    '<button class="btn primary" type="submit">Save</button>' +
+                    '<button class="btn" type="button" id="btn-test-email">Send test email</button>' +
+                  '</div>' +
+                '</form>'
+              : '<p class="muted">' +
+                (settings.resend_configured
+                  ? 'Configured — sending from ' + esc(settings.resend_from_email || 'your domain') + '.'
+                  : 'Not configured — email sends from Archta\'s default address.') +
+                ' Only the workspace owner can change this.</p>')) +
 
           card('Your account', '<form id="form-me">' +
             '<div class="field"><label for="s-name">Your name</label>' +
@@ -3137,6 +3180,49 @@
     guardedSubmit(R.qs('#form-notify', view), async function (form) {
       await api.put('/settings', R.values(form));
       toast('Preferences saved.', 'ok');
+    });
+
+    // Owner-only cards — absent from the DOM entirely for anyone else, so
+    // these two forms only exist to wire up when they were actually rendered.
+    var paystackForm = R.qs('#form-paystack', view);
+    if (paystackForm) {
+      guardedSubmit(paystackForm, async function (form) {
+        var v = R.values(form);
+        var payload = { paystack_public_key: v.paystack_public_key || null };
+        // Blank means "leave the saved key alone" — the field never shows the
+        // real value again once set, so blank cannot mean "clear it".
+        if (v.paystack_secret_key) payload.paystack_secret_key = v.paystack_secret_key;
+        await api.put('/settings/paystack', payload);
+        toast('Paystack settings saved.', 'ok');
+        R.reload();
+      });
+    }
+
+    R.onClick(view, '#btn-test-paystack', async function () {
+      var secretKey = R.qs('#s-pk-secret', view).value.trim();
+      if (!secretKey) { toast('Enter a secret key to test first.', 'err'); return; }
+      var result = await api.post('/settings/paystack/test', { secret_key: secretKey });
+      toast(result.valid ? 'Paystack key is valid.' : (result.reason || 'Paystack rejected this key.'), result.valid ? 'ok' : 'err');
+    });
+
+    var emailForm = R.qs('#form-email', view);
+    if (emailForm) {
+      guardedSubmit(emailForm, async function (form) {
+        var v = R.values(form);
+        var payload = { resend_from_email: v.resend_from_email || null };
+        if (v.resend_api_key) payload.resend_api_key = v.resend_api_key;
+        await api.put('/settings/email', payload);
+        toast('Email settings saved.', 'ok');
+        R.reload();
+      });
+    }
+
+    R.onClick(view, '#btn-test-email', async function () {
+      var apiKey = R.qs('#s-resend-key', view).value.trim();
+      var from = R.qs('#s-resend-from', view).value.trim();
+      if (!apiKey || !from) { toast('Enter both an API key and a From address to test.', 'err'); return; }
+      var result = await api.post('/settings/email/test', { resend_api_key: apiKey, resend_from_email: from });
+      toast(result.valid ? 'Test email sent — check your inbox.' : (result.reason || 'Could not send the test email.'), result.valid ? 'ok' : 'err');
     });
 
     guardedSubmit(R.qs('#form-me', view), async function (form) {
