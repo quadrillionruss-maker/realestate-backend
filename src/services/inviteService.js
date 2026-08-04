@@ -27,7 +27,7 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const notify = require('./notificationService');
 const {
   ROLE_LABELS, canInviteRole, INVITABLE_ROLES,
-  MAX_WORKSPACES_PER_USER, wouldExceedWorkspaceCap,
+  MAX_WORKSPACES_PER_USER, wouldExceedWorkspaceCap, isDowngrade,
 } = require('./permissions');
 
 const INVITE_TTL_DAYS = 7;
@@ -82,7 +82,7 @@ async function workspaceCountFor({ userId, email }) {
 // Returns the row plus how the email went, so the UI can say "invited, but we
 // could not email them — here is the link" rather than implying delivery that
 // did not happen.
-async function createInvite({ orgId, inviterRole, inviterUserId, email, role, teamName }) {
+async function createInvite({ orgId, inviterRole, inviterUserId, inviterEmail, email, role, teamName }) {
   if (!email) throw badRequest('email is required');
 
   if (!INVITABLE_ROLES.includes(role)) {
@@ -95,6 +95,17 @@ async function createInvite({ orgId, inviterRole, inviterUserId, email, role, te
     throw forbidden(role === 'sales_director'
       ? 'Only the workspace owner can invite a Head of Sales.'
       : `${ROLE_LABELS[inviterRole] || 'This role'} cannot invite a ${ROLE_LABELS[role] || role}.`);
+  }
+
+  // Self-invite at a lower role is how somebody would otherwise demote
+  // themselves without another owner's say-so — canInviteRole above already
+  // allows an owner to hand out any role including one beneath their own, so
+  // this is a second, narrower check specifically for the self-referential
+  // case. Checked before the account lookup below: this refusal has nothing
+  // to do with whether the address already has an account.
+  if (inviterEmail && email.toLowerCase() === inviterEmail.toLowerCase() && isDowngrade(inviterRole, role)) {
+    throw forbidden('You cannot invite yourself at a lower role than your current one. '
+      + 'To change your own role, ask another owner to do it.');
   }
 
   const auth = require('./authService');

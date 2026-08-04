@@ -49,6 +49,7 @@ const {
 } = require('../services/rentalService');
 const {
   canAccess, normalizeRole, canInviteRole, wouldExceedWorkspaceCap, actionsFor, ROLES,
+  isDowngrade, capabilitiesLostGoingFrom,
 } = require('../services/permissions');
 const { encrypt, decrypt, last4 } = require('../utils/credentials');
 
@@ -1181,6 +1182,58 @@ test('wouldExceedWorkspaceCap: refuses the 11th workspace, allows up to the 10th
   assert.strictEqual(wouldExceedWorkspaceCap(10), true);
   assert.strictEqual(wouldExceedWorkspaceCap(15), true);
   assert.strictEqual(wouldExceedWorkspaceCap(0), false);
+});
+
+// ── Role-change guards (self-demotion / downgrade confirmation) ─────────
+test('isDowngrade: owner→director and director→operational are downgrades', () => {
+  assert.ok(isDowngrade('owner', 'sales_director'));
+  assert.ok(isDowngrade('owner', 'sales_rep'));
+  assert.ok(isDowngrade('sales_director', 'sales_rep'));
+  assert.ok(isDowngrade('sales_director', 'collections'));
+  assert.ok(isDowngrade('sales_director', 'documentation'));
+});
+
+test('isDowngrade: promotions and lateral moves between operational roles are not downgrades', () => {
+  assert.strictEqual(isDowngrade('sales_rep', 'sales_director'), false);
+  assert.strictEqual(isDowngrade('sales_director', 'owner'), false);
+  // sales_rep, collections and documentation are peers — moving between them
+  // is a different job, not a step down either way.
+  assert.strictEqual(isDowngrade('sales_rep', 'collections'), false);
+  assert.strictEqual(isDowngrade('collections', 'documentation'), false);
+  assert.strictEqual(isDowngrade('documentation', 'sales_rep'), false);
+  assert.strictEqual(isDowngrade('owner', 'owner'), false);
+});
+
+test('capabilitiesLostGoingFrom: owner→sales_director loses only owner-exclusive actions', () => {
+  const lost = capabilitiesLostGoingFrom('owner', 'sales_director');
+  assert.strictEqual(lost.length, 1);
+  assert.match(lost[0], /owner-only actions/);
+});
+
+test('capabilitiesLostGoingFrom: sales_director→sales_rep keeps selling, loses money-in and paperwork', () => {
+  const lost = capabilitiesLostGoingFrom('sales_director', 'sales_rep');
+  assert.ok(lost.some((l) => /director-level access/.test(l)));
+  assert.ok(lost.some((l) => /recording payments/.test(l)));
+  assert.ok(lost.some((l) => /generating, updating and downloading documents/.test(l)));
+  // sales_rep keeps SELLERS access, so that group must not appear as lost.
+  assert.ok(!lost.some((l) => /creating buyers and reservations/.test(l)));
+});
+
+test('capabilitiesLostGoingFrom: sales_director→collections keeps money-in, loses paperwork and selling', () => {
+  const lost = capabilitiesLostGoingFrom('sales_director', 'collections');
+  assert.ok(!lost.some((l) => /recording payments/.test(l)), 'collections keeps money-in access');
+  assert.ok(lost.some((l) => /generating, updating and downloading documents/.test(l)));
+  assert.ok(lost.some((l) => /creating buyers and reservations/.test(l)));
+});
+
+test('capabilitiesLostGoingFrom: a lateral move between operational roles is not empty either way it is asked', () => {
+  // Confirms the function itself is accurate even when isDowngrade() (the
+  // thing that decides whether to call it at all) would say "not a
+  // downgrade" — sales_rep and collections really do have different,
+  // non-overlapping capabilities, which is the whole reason neither ranks
+  // above the other.
+  assert.ok(capabilitiesLostGoingFrom('sales_rep', 'collections').some((l) => /creating buyers and reservations/.test(l)));
+  assert.ok(capabilitiesLostGoingFrom('collections', 'sales_rep').some((l) => /recording payments/.test(l)));
 });
 
 // ── Branding — logo resolution (migrations/015) ─────────────────────────

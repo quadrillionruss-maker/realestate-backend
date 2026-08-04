@@ -56,6 +56,47 @@ const MONEY_IN = ['owner', 'sales_director', 'collections'];
 const PAPERWORK = ['owner', 'sales_director', 'documentation'];
 const SELLERS = ['owner', 'sales_director', 'sales_rep'];
 
+// ── Seniority, for role-CHANGE guards only ──────────────────────────────────
+// A different question from the matrix above: not "what may this role do"
+// but "is moving from role A to role B a step down". sales_rep, collections
+// and documentation sit at the same rank deliberately — each is its own job
+// with its own, non-overlapping slice of the matrix (a rep sells, collections
+// chases money, documentation issues paperwork), so none of the three is
+// "lower" than either of the others. Only owner→director and director→(any
+// of the three) are ever a downgrade; moving between the three is lateral.
+const ROLE_RANK = { owner: 3, sales_director: 2, sales_rep: 1, collections: 1, documentation: 1 };
+
+function isDowngrade(fromRole, toRole) {
+  return ROLE_RANK[normalizeRole(toRole)] < ROLE_RANK[normalizeRole(fromRole)];
+}
+
+// What a downgrade actually costs, in words a person recognises rather than
+// a wall of permission slugs like "reports.readAll". Built from the SAME
+// group constants the matrix above is built from — OWNER, DIRECTORS,
+// MONEY_IN, PAPERWORK, SELLERS — specifically so this can't quietly drift out
+// of sync with what the matrix really grants: a role belongs to a group here
+// exactly when it appears in that same array up above.
+const ROLE_LOSS_GROUPS = [
+  { roles: OWNER, label: "owner-only actions — waiving a buyer's debt, deleting records from the bin, workspace settings and provider keys, the investor report, and marking commission paid out" },
+  { roles: DIRECTORS, label: 'director-level access — the whole sales book, restructuring plans and renewing tenancies, importing and exporting data, approving commissions, the daily brief, and managing the team' },
+  { roles: MONEY_IN, label: 'recording payments, logging payment promises, and sending buyers their portal link' },
+  { roles: PAPERWORK, label: 'generating, updating and downloading documents' },
+  { roles: SELLERS, label: 'creating buyers and reservations' },
+];
+
+// Every group fromRole belongs to that toRole does not — this is why it stays
+// accurate for a director dropping to collections (keeps MONEY_IN, loses
+// PAPERWORK and SELLERS) versus dropping to sales_rep (the opposite), rather
+// than one generic "here is what a lower tier loses" sentence that would be
+// wrong for two of the three operational roles.
+function capabilitiesLostGoingFrom(fromRole, toRole) {
+  const from = normalizeRole(fromRole);
+  const to = normalizeRole(toRole);
+  return ROLE_LOSS_GROUPS
+    .filter((g) => g.roles.includes(from) && !g.roles.includes(to))
+    .map((g) => g.label);
+}
+
 // ── The matrix ─────────────────────────────────────────────────────────────
 // `owner` appears in every list. The role definition says "full access to
 // everything", and relying on an implicit fallthrough would mean the one
@@ -265,4 +306,7 @@ module.exports = {
   canInviteRole,
   wouldExceedWorkspaceCap,
   denialMessage,
+  ROLE_RANK,
+  isDowngrade,
+  capabilitiesLostGoingFrom,
 };

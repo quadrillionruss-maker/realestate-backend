@@ -3386,6 +3386,29 @@
     });
   }
 
+  // ── Role-change guards ────────────────────────────────────────────────
+  // Mirrors src/services/permissions.js's ROLE_RANK and ROLE_LOSS_GROUPS
+  // exactly, so the confirmation shown here — BEFORE any request is sent —
+  // says the same thing the server would answer with if this check were
+  // skipped. The server re-checks independently (PATCH /settings/team/:id
+  // refuses a downgrade without confirm_downgrade:true); this copy exists so
+  // the person deciding sees the cost up front instead of after a round trip.
+  var ROLE_RANK = { owner: 3, sales_director: 2, sales_rep: 1, collections: 1, documentation: 1 };
+  function isRoleDowngrade(fromRole, toRole) { return ROLE_RANK[toRole] < ROLE_RANK[fromRole]; }
+
+  var ROLE_LOSS_GROUPS = [
+    { roles: ['owner'], label: "owner-only actions — waiving a buyer's debt, deleting records from the bin, workspace settings and provider keys, the investor report, and marking commission paid out" },
+    { roles: ['owner', 'sales_director'], label: 'director-level access — the whole sales book, restructuring plans and renewing tenancies, importing and exporting data, approving commissions, the daily brief, and managing the team' },
+    { roles: ['owner', 'sales_director', 'collections'], label: 'recording payments, logging payment promises, and sending buyers their portal link' },
+    { roles: ['owner', 'sales_director', 'documentation'], label: 'generating, updating and downloading documents' },
+    { roles: ['owner', 'sales_director', 'sales_rep'], label: 'creating buyers and reservations' },
+  ];
+  function rolesLostGoingFrom(fromRole, toRole) {
+    return ROLE_LOSS_GROUPS
+      .filter(function (g) { return g.roles.indexOf(fromRole) !== -1 && g.roles.indexOf(toRole) === -1; })
+      .map(function (g) { return g.label; });
+  }
+
   async function teamTab(view, tabs) {
     var results = await Promise.all([
       api('/settings/team'), api('/sales-reps?include_inactive=true'), api('/settings'),
@@ -3441,7 +3464,8 @@
             // confirmation on it.
             '<td class="right nowrap">' + (
               canManage
-                ? '<button class="btn-quiet" data-change-role="' + esc(m.id) + '" data-current="' + esc(m.role) + '" data-name="' +
+                ? '<button class="btn-quiet" data-change-role="' + esc(m.id) + '" data-current="' + esc(m.role) +
+                  '" data-current-label="' + esc(m.role_label || m.role) + '" data-name="' +
                   esc(m.full_name || m.email || 'this person') + '">Change role</button> '
                 : ''
             ) + (
@@ -3551,7 +3575,18 @@
             '<p class="field-hint">If they already have an account they join immediately. If not, we email a link that expires in 7 days.</p>',
           submitLabel: 'Send invite',
           onSubmit: async function (form, close) {
-            var result = await api.post('/settings/team/invite', R.values(form));
+            var v = R.values(form);
+            // Checked here too, not just server-side — inviting your own
+            // address at a role below the one you already hold is how
+            // somebody would otherwise demote themselves with no other
+            // owner's say-so, and this fails before the request is even sent.
+            var meEmail = (R.state.user.email || '').trim().toLowerCase();
+            if (v.email && v.email.trim().toLowerCase() === meEmail && isRoleDowngrade(R.state.user.role, v.role)) {
+              throw new Error('You cannot invite yourself at a lower role than your current one. '
+                + 'To change your own role, ask another owner to do it.');
+            }
+
+            var result = await api.post('/settings/team/invite', v);
             close();
             toast(result.joined_immediately ? 'Added to the workspace.' : 'Invite sent.', 'ok');
             R.reload();
@@ -3574,7 +3609,30 @@
               '</select></div>',
           submitLabel: 'Save',
           onSubmit: async function (form, close) {
-            await api.patch('/settings/team/' + button.dataset.changeRole, R.values(form));
+            var newRole = R.values(form).role;
+            var currentRole = button.dataset.current;
+
+            if (newRole !== currentRole && isRoleDowngrade(currentRole, newRole)) {
+              var target = team.invitable_roles.filter(function (r) { return r.role === newRole; })[0];
+              var lost = rolesLostGoingFrom(currentRole, newRole);
+              var confirmed = await R.confirm({
+                title: 'Change ' + button.dataset.name + '’s role?',
+                message: 'You are about to change ' + button.dataset.name + ' from ' +
+                  button.dataset.currentLabel + ' to ' + (target ? target.label : newRole) + '. ' +
+                  'They will immediately lose access to ' + lost.join('; ') + '. Are you sure?',
+                confirmLabel: 'Change role',
+                danger: true,
+              });
+              // Cancelling leaves the "Change role" modal open on the role
+              // they had already picked, rather than closing the whole flow —
+              // they may just want a different new role, not to give up.
+              if (!confirmed) return;
+            }
+
+            // Sent unconditionally: harmless for a lateral move or a
+            // promotion, and it is what tells the server this specific
+            // downgrade was actually confirmed, not just requested.
+            await api.patch('/settings/team/' + button.dataset.changeRole, { role: newRole, confirm_downgrade: true });
             close();
             toast('Role updated.', 'ok');
             R.reload();
@@ -3625,7 +3683,7 @@
         R.modal({
           title: 'Make ' + button.dataset.name + ' the workspace owner?',
           body:
-            '<div class="notice mb-2">You will no longer be the owner — you move to <b>admin</b> instead. ' +
+            '<div class="notice mb-2">You will no longer be the owner — you move to <b>Head of Sales</b> instead. ' +
               esc(button.dataset.name) + ' becomes the only person who can transfer ownership again.</div>' +
             '<p class="muted">Everything else — projects, buyers, payments — stays exactly as it is.</p>',
           submitLabel: 'Transfer ownership',

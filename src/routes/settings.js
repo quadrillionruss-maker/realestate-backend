@@ -8,7 +8,9 @@ const { requirePermission } = require('../middleware/rbac');
 const { audit } = require('../services/auditService');
 const auth = require('../services/authService');
 const invites = require('../services/inviteService');
-const { ROLE_LABELS, INVITABLE_ROLES, canInviteRole } = require('../services/permissions');
+const {
+  ROLE_LABELS, INVITABLE_ROLES, canInviteRole, isDowngrade, capabilitiesLostGoingFrom,
+} = require('../services/permissions');
 const { uploadTeamLogo } = require('../services/documentStorage');
 const { encrypt, last4 } = require('../utils/credentials');
 const { verifyPaystackKey } = require('../services/paystackService');
@@ -590,6 +592,7 @@ router.post('/team/invite', requirePermission('team.invite'), async (req, res, n
       orgId: req.orgId,
       inviterRole: req.orgRole,
       inviterUserId: req.userId,
+      inviterEmail: req.user.email,
       email,
       role: req.body?.role || 'sales_rep',
       teamName: team?.name || null,
@@ -797,13 +800,49 @@ router.patch('/team/:id', requirePermission('team.manageMembers'), async (req, r
     }
 
     const { data: member } = await supabaseAdmin
-      .from('team_members').select('id, user_id, role')
+      .from('team_members').select('id, user_id, role, users(full_name, email)')
       .eq('id', req.params.id).eq('team_id', req.orgId).maybeSingle();
     if (!member) return res.status(404).json({ error: 'Team member not found' });
 
-    // Removing the owner leaves a workspace nobody can administer.
+    // Removing or demoting the LAST owner leaves a workspace nobody can
+    // administer. Checked as an actual count rather than trusting "there is
+    // only ever one owner" as an invariant — INVITABLE_ROLES excludes 'owner'
+    // and this route's own role-assignment check above only ever accepts a
+    // role FROM that list, so today that invariant always holds, but this is
+    // the one guard in the product where trusting it silently would be worse
+    // than the one extra read confirming it.
     if (member.role === 'owner' && (updates.status === 'removed' || updates.role)) {
-      return res.status(409).json({ error: 'The workspace owner cannot be removed or demoted.' });
+      const { data: activeOwners } = await supabaseAdmin
+        .from('team_members').select('id')
+        .eq('team_id', req.orgId).eq('role', 'owner').eq('status', 'active');
+      if ((activeOwners || []).length <= 1) {
+        return res.status(409).json({
+          error: 'There must always be at least one owner. Transfer ownership first before changing this role.',
+        });
+      }
+    }
+
+    // A role change that is a step DOWN — owner→director, or director→any of
+    // the three operational roles — needs the caller to have actually seen
+    // and accepted what it costs, not just picked an option from a dropdown.
+    // confirm_downgrade is what the confirmation modal sends after the
+    // person clicks through it; a request arriving without it (a stale
+    // client, or something calling this route directly) is answered with
+    // exactly what that modal would have shown, so nothing is ever silently
+    // downgraded.
+    if (updates.role && updates.role !== member.role && isDowngrade(member.role, updates.role)
+      && req.body?.confirm_downgrade !== true) {
+      return res.status(409).json({
+        error: `Changing this role from ${ROLE_LABELS[member.role] || member.role} to `
+          + `${ROLE_LABELS[updates.role] || updates.role} takes away access immediately. Confirm to continue.`,
+        downgrade: true,
+        member_name: member.users?.full_name || member.users?.email || 'this person',
+        current_role: member.role,
+        new_role: updates.role,
+        current_role_label: ROLE_LABELS[member.role] || member.role,
+        new_role_label: ROLE_LABELS[updates.role] || updates.role,
+        loses: capabilitiesLostGoingFrom(member.role, updates.role),
+      });
     }
 
     const { data, error } = await supabaseAdmin
