@@ -31,7 +31,7 @@ function check(name, cond, detail) {
   // ── Apply migrations, twice, to prove idempotency ───────────────────────
   for (const pass of ['first', 'second']) {
     for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql',
-      '017_paystack_org_keys.sql', '018_resend_org_keys.sql']) {
+      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -63,7 +63,7 @@ function check(name, cond, detail) {
   `);
 
   for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql',
-      '017_paystack_org_keys.sql', '018_resend_org_keys.sql']) {
+      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -907,6 +907,27 @@ function check(name, cond, detail) {
       && resend_api_key_last4 === '9c21' && resend_from_email === 'receipts@developer-domain.com';
   } catch (err) { console.log(`       ${err.message}`); }
   check('an org Resend key + from-address round-trips through the row', resendCredentialsStored);
+
+  // ── 019: per-workspace Termii (SMS) credentials ──────────────────────────
+
+  check('re_org_settings has the Termii credential columns',
+    ['termii_api_key_encrypted', 'termii_api_key_last4', 'termii_sender_id']
+      .every((c) => orgSettingsCols.includes(c)),
+    orgSettingsCols.join(', '));
+
+  let termiiCredentialsStored = false;
+  try {
+    const [{ termii_api_key_encrypted, termii_api_key_last4, termii_sender_id }] = await q(
+      `update re_org_settings set
+         termii_api_key_encrypted='ZmFrZS10ZXJtaWkta2V5',
+         termii_api_key_last4='4a1f',
+         termii_sender_id='Adron'
+       where organization_id=$1
+       returning termii_api_key_encrypted, termii_api_key_last4, termii_sender_id`, [userId]);
+    termiiCredentialsStored = termii_api_key_encrypted === 'ZmFrZS10ZXJtaWkta2V5'
+      && termii_api_key_last4 === '4a1f' && termii_sender_id === 'Adron';
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('an org Termii key + sender id round-trips through the row', termiiCredentialsStored);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

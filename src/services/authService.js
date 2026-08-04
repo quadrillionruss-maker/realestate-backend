@@ -123,10 +123,14 @@ async function registerFailedLogin(user) {
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────
-function assertValidCredentials(email, password) {
+function assertValidEmail(email) {
   if (!EMAIL_PATTERN.test(normalizeEmail(email))) {
     throw badRequest('Enter a valid email address.');
   }
+}
+
+function assertValidCredentials(email, password) {
+  assertValidEmail(email);
   if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
     throw badRequest(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
   }
@@ -510,6 +514,7 @@ module.exports = {
   publicUser,
   findUserByEmail,
   normalizeEmail,
+  assertValidEmail,
   verifyGoogleIdToken,
   MIN_PASSWORD_LENGTH,
 };

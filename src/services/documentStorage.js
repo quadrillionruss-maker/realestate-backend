@@ -150,8 +150,34 @@ async function uploadTeamLogo(teamId, buffer, contentType) {
   return { path, url: data.publicUrl };
 }
 
+// ── Personal avatar ──────────────────────────────────────────────────────
+// Same bucket, same type/size rules as a team logo — both are a small public
+// image embedded in an <img>, just keyed by user id instead of team id so two
+// people in the same workspace don't collide on a filename.
+async function uploadUserAvatar(userId, buffer, contentType) {
+  const extension = LOGO_TYPES[contentType];
+  if (!extension) {
+    throw Object.assign(
+      new Error(`Unsupported image type "${contentType}". Use JPEG, PNG or WebP.`),
+      { statusCode: 400 }
+    );
+  }
+  if (buffer.length > MAX_LOGO_BYTES) {
+    throw Object.assign(new Error('That image is larger than 2MB.'), { statusCode: 400 });
+  }
+
+  const path = `avatars/${userId}/avatar-${Date.now()}.${extension}`;
+  const { error } = await supabaseAdmin.storage
+    .from(PUBLIC_ASSETS_BUCKET)
+    .upload(path, buffer, { contentType, upsert: true });
+  if (error) throw error;
+
+  const { data } = supabaseAdmin.storage.from(PUBLIC_ASSETS_BUCKET).getPublicUrl(path);
+  return { path, url: data.publicUrl };
+}
+
 module.exports = {
   BUCKET, SIGNED_URL_TTL_SECONDS, ensureBucket, uploadPdf, createSignedUrl,
   MEDIA_BUCKET, MEDIA_TYPES, MAX_MEDIA_BYTES, uploadMedia,
-  PUBLIC_ASSETS_BUCKET, LOGO_TYPES, MAX_LOGO_BYTES, uploadTeamLogo,
+  PUBLIC_ASSETS_BUCKET, LOGO_TYPES, MAX_LOGO_BYTES, uploadTeamLogo, uploadUserAvatar,
 };

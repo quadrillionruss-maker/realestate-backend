@@ -12,14 +12,15 @@ const { ROLE_LABELS, INVITABLE_ROLES, canInviteRole } = require('../services/per
 const { uploadTeamLogo } = require('../services/documentStorage');
 const { encrypt, last4 } = require('../utils/credentials');
 const { verifyPaystackKey } = require('../services/paystackService');
-const { sendTestEmail } = require('../services/notificationService');
+const { sendTestEmail, sendTestSms } = require('../services/notificationService');
 const router = express.Router();
 
 const SETTINGS_COLUMNS = `organization_id, company_name, logo_url, address, phone, website,
   default_commission_rate, notify_md_email, notify_on_payment, notify_on_overdue,
   notify_payment_reminders, reply_to_email, updated_at,
   paystack_public_key, paystack_secret_key_last4,
-  resend_from_email, resend_api_key_last4`;
+  resend_from_email, resend_api_key_last4,
+  termii_sender_id, termii_api_key_last4`;
 
 // A logo is a handful of uploads a year, not traffic — this just keeps one
 // account from hammering Storage.
@@ -70,6 +71,8 @@ router.get('/', requirePermission('settings.read'), async (req, res, next) => {
       paystack_secret_key_last4: null,
       resend_from_email: null,
       resend_api_key_last4: null,
+      termii_sender_id: null,
+      termii_api_key_last4: null,
     };
 
     // A team's logo upload (POST /logo below) writes to teams.logo_url, not
@@ -91,6 +94,7 @@ router.get('/', requirePermission('settings.read'), async (req, res, next) => {
     // wherever a secret is read back for display rather than for use.
     settings.paystack_configured = !!settings.paystack_secret_key_last4;
     settings.resend_configured = !!settings.resend_api_key_last4;
+    settings.termii_configured = !!settings.termii_api_key_last4;
 
     res.json(settings);
   } catch (e) { next(e); }
@@ -338,6 +342,74 @@ router.post('/email/test', requirePermission('settings.write'), async (req, res,
     const apiKey = String(req.body?.resend_api_key || '').trim();
     const from = String(req.body?.resend_from_email || '').trim();
     res.json(await sendTestEmail({ apiKey, from, to: req.user.email }));
+  } catch (e) { next(e); }
+});
+
+// ── Per-workspace SMS (Termii) ──────────────────────────────────────────
+// Same shape and the same owner-only gate as Paystack and Email above.
+// Configuring this is entirely optional — every text already works against
+// the platform's own Termii account (see notificationService.js); the only
+// thing this changes is which sender ID a buyer sees the text arrive from.
+router.put('/termii', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const updates = { organization_id: req.orgId };
+
+    if (body.termii_sender_id !== undefined) {
+      updates.termii_sender_id = body.termii_sender_id || null;
+    }
+
+    if (body.termii_api_key !== undefined) {
+      const key = String(body.termii_api_key || '').trim();
+      if (key) {
+        updates.termii_api_key_encrypted = encrypt(key);
+        updates.termii_api_key_last4 = last4(key);
+      } else {
+        updates.termii_api_key_encrypted = null;
+        updates.termii_api_key_last4 = null;
+      }
+    }
+
+    if (Object.keys(updates).length === 1) {
+      return res.status(400).json({ error: 'No updatable fields provided' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('re_org_settings')
+      .upsert(updates, { onConflict: 'organization_id' })
+      .select('termii_sender_id, termii_api_key_last4')
+      .single();
+    if (error) throw error;
+
+    audit(req, {
+      action: 'settings.termii_updated',
+      entityType: 're_org_settings',
+      summary: body.termii_api_key !== undefined
+        ? (data.termii_api_key_last4
+          ? 'Workspace SMS (Termii) key updated'
+          : 'Workspace SMS key cleared — reverted to the platform default')
+        : 'Workspace Termii sender ID updated',
+      metadata: { termii_configured: !!data.termii_api_key_last4 },
+    });
+
+    res.json({
+      termii_sender_id: data.termii_sender_id,
+      termii_api_key_last4: data.termii_api_key_last4,
+      termii_configured: !!data.termii_api_key_last4,
+    });
+  } catch (e) { next(e); }
+});
+
+// Sends one real, short text to a phone number the caller provides — unlike
+// Resend's test (which always goes to the signed-in owner's own email),
+// Termii has no account-level phone number to send to, so the form asks for
+// one. Tests the candidate form values, not whatever is already saved.
+router.post('/termii/test', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const apiKey = String(req.body?.termii_api_key || '').trim();
+    const senderId = String(req.body?.termii_sender_id || '').trim();
+    const to = String(req.body?.to || '').trim();
+    res.json(await sendTestSms({ apiKey, senderId, to }));
   } catch (e) { next(e); }
 });
 

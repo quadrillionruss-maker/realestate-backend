@@ -138,6 +138,56 @@ was per-workspace Resend configuration (see "Per-workspace credentials"
 below). What changed is scoped to the two auth-flow senders that used to call
 it: registration's confirmation email and the forgot-password reset email.
 
+## Personal account vs. workspace settings
+
+**Zero overlap, on purpose.** The account button (bottom left of the sidebar,
+`btn-account`) opens `realestate.js`'s `openAccountModal()` — a modal covering
+only what belongs to the *signed-in person*: photo, name, email, password,
+sign out. Settings in the sidebar nav (`R.screens.settings`,
+`screens.js`'s `workspaceTab()`) covers only what belongs to the *workspace*:
+company branding, the three provider keys (Paystack, Resend, Termii),
+notification routing, commission default, and team management under its own
+tab. Neither screen shows a field the other one owns. This used to not be
+true — the account button navigated straight to `#/settings`, and that
+screen's "Your account" and "Sessions" cards edited the caller's own name and
+password right next to the workspace's letterhead. That the same click target
+(the account button) landed on the same screen as the sidebar's own "Settings"
+link was the tell: two different affordances for two different concepts
+converging on one screen is a sign they were never actually separated.
+
+**The modal is a single `<form>` with no submit button, deliberately.**
+`R.modal()`'s body is always one `<form>` element, and this dialog holds three
+independent actions (save profile, change password, sign out) that must not
+share one submit — a nested `<form>` isn't valid HTML, so they can't be three
+separate forms either. Each action is a `type="button"`, wired individually
+with `onClick`, exactly like the Paystack/Email/Termii "test" buttons in
+Settings that already share a form with a `type="submit"` Save button and
+must not trigger it. What's different here is there is no submit button *at
+all* — so `modal()`'s own submit handler, which reads a missing `onSubmit` as
+"close the dialog," would otherwise close this one every time Enter was
+pressed in any field. `openAccountModal()` passes a no-op `onSubmit` for
+exactly that reason: pressing Enter now does nothing, rather than silently
+discarding whatever was being typed.
+
+**Changing email or password bumps `token_version`, same as it always did for
+password alone.** `PATCH /auth/me` (`routes/auth.js`) now accepts `email` as
+well as `full_name`/`company_name`/`password`, gated the same way password
+changes always were — an account with a password on file must supply
+`current_password` to change *either* one, checked once and shared by both,
+since both are ways of taking over who can sign in as this person. A fresh
+token comes back either way, for the same reason a password change always
+returned one: the caller who just made the change should not be the one
+logged out by it.
+
+**Avatar upload mirrors the team logo upload exactly**, one bucket
+(`env.storage.publicAssetsBucket`), one size/type ceiling (2MB,
+JPEG/PNG/WebP), one function shape — `documentStorage.uploadUserAvatar(userId,
+buffer, contentType)` sits right next to `uploadTeamLogo`, keyed by user id
+instead of team id so two people in one workspace never collide on a
+filename. `POST /auth/me/avatar` is its own rate limiter
+(`avatarLimiter`, per-user like the logo's `logoLimiter` is), not the shared
+credential limiter — an upload is not a login attempt.
+
 ## Org scoping
 
 `organization_id = user.team_id ?? user.id`. It points at a team for team
@@ -241,16 +291,18 @@ permission on the request, which it always does.
 
 ## Per-workspace credentials
 
-Two third-party services — Paystack and Resend — started as one platform-wide
-account for every workspace on the deployment. `PAYSTACK_SECRET_KEY` and
-`RESEND_API_KEY`/`RESEND_FROM` (`.env`) are now a **fallback**, not the whole
-story: a workspace can enter its own keys under Settings → Payments and
-Settings → Notifications → Email, and every payment operation and every send
-for that workspace uses them instead (`migrations/017`, `migrations/018`).
-Nothing else in the product needs to know which case it's in —
-`paystackService.resolvePaystackSecretKey(orgId)` and
-`notificationService.resolveResendCredentials(orgId)` are the two places that
-decide, and every caller goes through them.
+Three third-party services — Paystack, Resend and Termii — started as one
+platform-wide account for every workspace on the deployment.
+`PAYSTACK_SECRET_KEY`, `RESEND_API_KEY`/`RESEND_FROM` and
+`TERMII_API_KEY`/`TERMII_SENDER_ID` (`.env`) are now a **fallback**, not the
+whole story: a workspace can enter its own keys under Settings → Payments,
+Settings → Notifications → Email, and Settings → Notifications → SMS, and
+every payment operation and every send for that workspace uses them instead
+(`migrations/017`, `018`, `019`). Nothing else in the product needs to know
+which case it's in — `paystackService.resolvePaystackSecretKey(orgId)`,
+`notificationService.resolveResendCredentials(orgId)` and
+`notificationService.resolveTermiiCredentials(orgId)` are the three places
+that decide, and every caller goes through them.
 
 **A workspace's own secret key is encrypted at rest, never stored plain.**
 `src/utils/credentials.js` — AES-256-GCM, so a tampered or truncated
@@ -259,19 +311,22 @@ to decrypt *loudly* instead of silently handing back garbage that then gets
 used as an API key. `CREDENTIALS_ENCRYPTION_KEY` (32 bytes, 64 hex chars) is a
 separate secret from `JWT_SECRET` — losing it makes every already-stored
 workspace key permanently undecryptable, so it needs the same backup
-discipline. Public values (`paystack_public_key`, `resend_from_email`) are not
-secrets and are stored plain, same reasoning as everything else in
-`re_org_settings`.
+discipline. Public values (`paystack_public_key`, `resend_from_email`,
+`termii_sender_id`) are not secrets and are stored plain, same reasoning as
+everything else in `re_org_settings`.
 
 **Never returned to the browser once saved.** Settings shows `*_last4` (the
 plaintext's last four characters, computed once at save time) plus a
 `*_configured` boolean — enough for someone to recognise their own key,
-nothing worth stealing if the response ever leaked. The two "test" buttons
-(`POST /settings/paystack/test`, `POST /settings/email/test`) test whatever is
-still sitting in the form, not what's already saved, so a typo is caught
-before it's committed — Paystack via a read-only transaction-list call,
-Resend via an actual test send to the workspace owner's own address, because
-Resend has no side-effect-free validity check.
+nothing worth stealing if the response ever leaked. The three "test" buttons
+(`POST /settings/paystack/test`, `/email/test`, `/termii/test`) all test
+whatever is still sitting in the form, not what's already saved, so a typo is
+caught before it's committed — Paystack via a read-only transaction-list
+call, Resend via an actual test send to the workspace owner's own address
+(known — it's `req.user.email`), Termii via an actual test text to a phone
+number the form asks for, because unlike an owner's email there is no
+account-level phone number on file to default to, and neither provider has a
+side-effect-free validity check.
 
 **The webhook is one shared URL, verified against every known key — not the
 key the reference names.** `paystackService.verifyWebhookSignature` tries the
@@ -290,11 +345,11 @@ at the same shared `/api/webhooks/paystack` URL — nothing to reconfigure.
 `resolvePaystackSecretKey` throws rather than silently falling back to the
 platform key — charging a buyer's card through the wrong Paystack account
 because a workspace's key couldn't be read would settle real money into the
-wrong business. `resolveResendCredentials` does not throw — `sendEmail` never
-fails the request that triggered it (the three rules at the top of
-`notificationService.js`) — but it also doesn't silently fall back to sending
-as "Archta"; the send is recorded `failed` with a clear reason, same as any
-other misconfiguration.
+wrong business. `resolveResendCredentials` and `resolveTermiiCredentials`
+neither throw — `sendEmail`/`sendSms` never fail the request that triggered
+them (the three rules at the top of `notificationService.js`) — but neither
+silently falls back to sending as "Archta"; the send is recorded `failed`
+with a clear reason, same as any other misconfiguration.
 
 ## Deployment
 
@@ -344,7 +399,7 @@ a host.
 
 1. Run every file in `migrations/`, in numeric order, in the Supabase SQL
    editor — `001_phase1_schema.sql` through the highest-numbered file present
-   (`018_resend_org_keys.sql` as of this writing). `001` is self-contained — it creates
+   (`019_termii_org_keys.sql` as of this writing). `001` is self-contained — it creates
    the identity tables (`users`, `teams`, `team_members`) as well as the
    domain ones, so an empty project is all it needs. Every migration is
    idempotent, so re-running the whole set after a change is safe and is how

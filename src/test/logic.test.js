@@ -883,6 +883,19 @@ test('renders a missing value as empty rather than "null"', () => {
   assert.ok(!/null|undefined/.test(csv), csv);
 });
 
+// ── Email validation (PATCH /auth/me's email-change path) ────────────────
+section('Email validation');
+
+test('assertValidEmail accepts a normal address', () => {
+  assert.doesNotThrow(() => auth.assertValidEmail('new-address@example.com'));
+});
+
+test('assertValidEmail rejects a string with no @ or domain', () => {
+  assert.throws(() => auth.assertValidEmail('not-an-email'));
+  assert.throws(() => auth.assertValidEmail('missing-domain@'));
+  assert.throws(() => auth.assertValidEmail(''));
+});
+
 // ── Session invalidation ─────────────────────────────────────────────────
 section('Session tokens');
 

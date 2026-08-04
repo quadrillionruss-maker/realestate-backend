@@ -1083,6 +1083,22 @@
     });
   }
 
+  // The sidebar footer's identity block — split out of enterApp() so the
+  // account modal can refresh it in place after an edit, without a full
+  // reload() (which only re-renders #view, not the sidebar chrome around it).
+  function renderWhoBlock(me) {
+    el('who-name').textContent = me.full_name || me.email;
+    el('who-org').textContent = (me.company_name || (me.is_team ? 'Team workspace' : 'Solo workspace'))
+      + (me.role_label ? ' · ' + me.role_label : '');
+
+    var badge = el('who-initials');
+    if (me.avatar_url) {
+      badge.innerHTML = '<img src="' + esc(me.avatar_url) + '" alt="">';
+    } else {
+      badge.textContent = initials(me.full_name, me.email);
+    }
+  }
+
   // ── Enter / leave ─────────────────────────────────────────────────────
   // A stored token is a claim, not proof. /auth/me is what turns it into a
   // session: until the server confirms who this is, the app is not shown at
@@ -1101,11 +1117,8 @@
     RE.state.user = me;
     applyNavForRole(me.role);
     renderWorkspaceSwitcher(me);
+    renderWhoBlock(me);
 
-    el('who-name').textContent = me.full_name || me.email;
-    el('who-org').textContent = (me.company_name || (me.is_team ? 'Team workspace' : 'Solo workspace'))
-      + (me.role_label ? ' · ' + me.role_label : '');
-    el('who-initials').textContent = initials(me.full_name, me.email);
     el('dateline').textContent = new Date().toLocaleDateString('en-NG', {
       weekday: 'long', day: 'numeric', month: 'long',
     });
@@ -1161,6 +1174,171 @@
     if (message) gateError('login-error', message);
   }
 
+  // ── Personal account ─────────────────────────────────────────────────
+  // Everything here is about the SIGNED-IN PERSON, never the workspace —
+  // photo, name, email, password, sign out. Workspace configuration
+  // (branding, payment/SMS/email provider keys, team, commission default,
+  // notification routing) lives under Settings in the sidebar nav instead;
+  // the two are deliberately disjoint, so this modal has zero overlap with
+  // that screen. See CLAUDE.md's "Personal account vs. workspace settings".
+  function openAccountModal() {
+    var me = RE.state.user;
+    if (!me) return;
+
+    var m = modal({
+      title: 'Your account',
+      cancelLabel: 'Close',
+      body:
+        '<div class="logo-upload" id="account-avatar-upload" tabindex="0" role="button" ' +
+            'aria-label="' + (me.avatar_url ? 'Change photo' : 'Add photo') + '">' +
+          (me.avatar_url
+            ? '<img src="' + esc(me.avatar_url) + '" alt="">'
+            : '<div class="logo-upload-empty">Add photo</div>') +
+          '<div class="logo-upload-overlay">' + (me.avatar_url ? 'Change' : 'Add photo') + '</div>' +
+        '</div>' +
+
+        '<div class="field mt-2"><label for="acc-name">Name</label>' +
+          '<input class="input" id="acc-name" value="' + esc(me.full_name || '') + '"></div>' +
+        '<div class="field"><label for="acc-email">Email</label>' +
+          '<input class="input" id="acc-email" type="email" value="' + esc(me.email) + '"></div>' +
+        '<button class="btn primary" type="button" id="btn-save-profile">Save profile</button>' +
+
+        '<div class="divider"></div>' +
+
+        '<div class="field"><label for="acc-current">' + (me.has_password ? 'Current password' : 'No password set') + '</label>' +
+          '<input class="input" id="acc-current" type="password" autocomplete="current-password"' +
+            (me.has_password ? '' : ' disabled placeholder="You sign in with Google"') + '></div>' +
+        '<div class="field"><label for="acc-new">' + (me.has_password ? 'New password' : 'Set a password') + '</label>' +
+          '<input class="input" id="acc-new" type="password" autocomplete="new-password" placeholder="At least 12 characters"></div>' +
+        '<button class="btn" type="button" id="btn-change-password">Change password</button>' +
+
+        '<div class="divider"></div>' +
+
+        '<button class="btn ghost" type="button" id="btn-account-signout">Sign out</button>' +
+        // Last in the DOM on purpose: modal() autofocuses the first
+        // input/select/textarea in the body, and a type=file input would win
+        // that race (it matches :not([type=hidden])) despite being visually
+        // hidden — leaving the Name field, the one someone actually wants
+        // focused on open, skipped.
+        '<input type="file" id="account-avatar-file" accept="image/jpeg,image/png,image/webp" class="hidden">',
+      // No submit-type button lives in here (see below) — but the body is
+      // still one <form>, so pressing Enter in any field fires its submit
+      // event regardless. Without this, modal()'s own handler reads that as
+      // "no onSubmit given" and closes the dialog. Each action below has its
+      // own button and handles its own request; Enter alone does nothing.
+      onSubmit: function () {},
+    });
+
+    var avatarUpload = qs('#account-avatar-upload', m.root);
+    var avatarFile = qs('#account-avatar-file', m.root);
+    var openAvatarPicker = function () { avatarFile.click(); };
+    avatarUpload.addEventListener('click', openAvatarPicker);
+    avatarUpload.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAvatarPicker(); }
+    });
+
+    avatarFile.addEventListener('change', async function () {
+      var file = avatarFile.files && avatarFile.files[0];
+      if (!file) return;
+
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+        toast('Use a JPEG, PNG or WebP image.', 'err');
+        avatarFile.value = '';
+        return;
+      }
+      if (file.size > 2 * 1024 * 1024) {
+        toast('That image is larger than 2MB.', 'err');
+        avatarFile.value = '';
+        return;
+      }
+
+      avatarUpload.classList.add('is-working');
+      try {
+        var base64 = await new Promise(function (resolve, reject) {
+          var reader = new FileReader();
+          reader.onload = function () { resolve(String(reader.result).split(',')[1]); };
+          reader.onerror = function () { reject(new Error('could not be read')); };
+          reader.readAsDataURL(file);
+        });
+
+        var result = await request('/auth/me/avatar', {
+          method: 'POST', body: JSON.stringify({ content: base64, content_type: file.type }),
+        });
+
+        RE.state.user.avatar_url = result.avatar_url;
+        renderWhoBlock(RE.state.user);
+        avatarUpload.innerHTML = '<img src="' + esc(result.avatar_url) + '" alt="">' +
+          '<div class="logo-upload-overlay">Change</div>';
+        avatarUpload.setAttribute('aria-label', 'Change photo');
+        toast('Photo updated.', 'ok');
+      } catch (err) {
+        toast(err.message, 'err');
+      } finally {
+        avatarUpload.classList.remove('is-working');
+        avatarFile.value = '';
+      }
+    });
+
+    onClick(m.root, '#btn-save-profile', async function () {
+      var payload = { full_name: qs('#acc-name', m.root).value.trim() };
+      var email = qs('#acc-email', m.root).value.trim();
+      if (email && email !== RE.state.user.email) {
+        payload.email = email;
+        payload.current_password = qs('#acc-current', m.root).value;
+      }
+
+      var result = await request('/auth/me', { method: 'PATCH', body: JSON.stringify(payload) });
+      if (result.token) {
+        setToken(result.token);
+        toast('Profile updated. Every other signed-in device has been signed out.', 'ok');
+      } else {
+        toast('Profile updated.', 'ok');
+      }
+
+      RE.state.user.full_name = result.full_name;
+      RE.state.user.email = result.email;
+      qs('#acc-email', m.root).value = result.email;
+      renderWhoBlock(RE.state.user);
+    });
+
+    onClick(m.root, '#btn-change-password', async function () {
+      var currentField = qs('#acc-current', m.root);
+      var current = currentField.value;
+      var next = qs('#acc-new', m.root).value;
+      if (!next) throw new Error('Enter a new password.');
+
+      var payload = { password: next };
+      if (current) payload.current_password = current;
+
+      var result = await request('/auth/me', { method: 'PATCH', body: JSON.stringify(payload) });
+      if (result.token) setToken(result.token);
+
+      // A Google-only account (me.has_password was false at render time) has
+      // one now — re-enable the field the labels/disabled-state above were
+      // built from, or setting a SECOND password in the same modal session
+      // would demand a current_password through a field that is still
+      // disabled from the first render, with no way to type into it at all.
+      if (!RE.state.user.has_password) {
+        RE.state.user.has_password = true;
+        currentField.disabled = false;
+        currentField.placeholder = '';
+        var currentLabel = qs('label[for="acc-current"]', m.root);
+        if (currentLabel) currentLabel.textContent = 'Current password';
+        var newLabel = qs('label[for="acc-new"]', m.root);
+        if (newLabel) newLabel.textContent = 'New password';
+      }
+
+      currentField.value = '';
+      qs('#acc-new', m.root).value = '';
+      toast('Password changed. Every other signed-in device has been signed out.', 'ok');
+    });
+
+    onClick(m.root, '#btn-account-signout', async function () {
+      m.close();
+      signOut();
+    });
+  }
+
   // ── Boot ──────────────────────────────────────────────────────────────
   async function boot() {
     wireGate();
@@ -1168,7 +1346,7 @@
 
     el('btn-signout').addEventListener('click', function () { signOut(); });
     el('btn-signout-icon').addEventListener('click', function () { signOut(); });
-    el('btn-account').addEventListener('click', function () { go('#/settings'); });
+    el('btn-account').addEventListener('click', openAccountModal);
 
     el('btn-menu').addEventListener('click', function () {
       var sidebar = el('sidebar');

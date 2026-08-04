@@ -17,6 +17,7 @@ const { authenticate } = require('../middleware/auth');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const auth = require('../services/authService');
 const invites = require('../services/inviteService');
+const { uploadUserAvatar } = require('../services/documentStorage');
 const { ROLE_LABELS, actionsFor, normalizeRole } = require('../services/permissions');
 
 const router = express.Router();
@@ -32,6 +33,17 @@ const credentialLimiter = rateLimit({
   // one NAT would otherwise lock itself out by working normally.
   skipSuccessfulRequests: true,
   message: { success: false, error: 'Too many attempts. Wait fifteen minutes and try again.' },
+});
+
+// An avatar is a handful of uploads a year, not traffic — same ceiling as the
+// team logo upload (routes/settings.js), just keyed by the caller's own id.
+const avatarLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  message: { error: 'Too many uploads. Wait a few minutes and try again.' },
 });
 
 // What the sign-in screen needs to know before anyone types anything: whether
@@ -204,25 +216,44 @@ router.post('/invite/accept', authenticate, async (req, res, next) => {
 
 router.patch('/me', authenticate, async (req, res, next) => {
   try {
-    const { full_name, company_name, password, current_password } = req.body || {};
+    const { full_name, company_name, email, password, current_password } = req.body || {};
     const updates = {};
     if (full_name !== undefined) updates.full_name = full_name || null;
     if (company_name !== undefined) updates.company_name = company_name || null;
 
-    if (password !== undefined) {
-      const existing = await auth.findUserByEmail(req.user.email || '');
-      // Changing a password requires proving you know the current one, so a
-      // borrowed laptop with an open session cannot lock the owner out. An
-      // account with no password yet (Google sign-up) is setting one, not
-      // changing one, and has nothing to prove.
+    const wantsEmailChange = email !== undefined && auth.normalizeEmail(email) !== req.user.email;
+    const wantsPasswordChange = password !== undefined;
+
+    // Changing the address you sign in with, or the password itself, requires
+    // proving you know the current password first — a borrowed laptop with an
+    // open session cannot silently hand the account to a different email or
+    // lock the owner out. Checked once, shared by both: an account with no
+    // password yet (Google sign-up) is setting one, not changing one, and has
+    // nothing to prove either way.
+    let existing = null;
+    if (wantsEmailChange || wantsPasswordChange) {
+      existing = await auth.findUserByEmail(req.user.email || '');
       if (existing?.password_hash) {
         if (!current_password) {
-          return res.status(400).json({ error: 'Enter your current password to change it.' });
+          return res.status(400).json({ error: 'Enter your current password to continue.' });
         }
         if (!(await auth.verifyPassword(current_password, existing.password_hash))) {
           return res.status(401).json({ error: 'Current password is incorrect.' });
         }
       }
+    }
+
+    if (wantsEmailChange) {
+      const normalized = auth.normalizeEmail(email);
+      auth.assertValidEmail(normalized);
+      const dupe = await auth.findUserByEmail(normalized);
+      if (dupe && dupe.id !== req.user.id) {
+        return res.status(409).json({ error: 'An account with that email already exists.' });
+      }
+      updates.email = normalized;
+    }
+
+    if (wantsPasswordChange) {
       if (String(password).length < auth.MIN_PASSWORD_LENGTH) {
         return res.status(400).json({ error: `Password must be at least ${auth.MIN_PASSWORD_LENGTH} characters.` });
       }
@@ -239,16 +270,22 @@ router.patch('/me', authenticate, async (req, res, next) => {
       .eq('id', req.user.id)
       .select('id, email, full_name, company_name, avatar_url')
       .maybeSingle();
+    // 23505 = the email uniqueness check above raced with another request
+    // changing to the same address between the check and this write.
+    if (error?.code === '23505') {
+      return res.status(409).json({ error: 'An account with that email already exists.' });
+    }
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'User not found' });
 
-    // Changing a password ends every other session. Somebody who changes theirs
-    // because they think a device is compromised expects exactly that, and
-    // without it the old token keeps working for the rest of its 30 days.
+    // Changing the sign-in email or password ends every other session.
+    // Somebody who changes either because they think a device is compromised
+    // expects exactly that, and without it the old token keeps working for
+    // the rest of its 30 days.
     //
     // A fresh token is returned so the caller stays signed in — they are the
     // one who asked for this. The browser swaps it in silently.
-    if (updates.password_hash) {
+    if (updates.password_hash || updates.email) {
       const version = await auth.bumpTokenVersion(req.user.id);
       return res.json({
         ...data,
@@ -258,6 +295,34 @@ router.patch('/me', authenticate, async (req, res, next) => {
     }
 
     res.json(data);
+  } catch (e) { next(e); }
+});
+
+// Base64 in a JSON body rather than multipart, same tradeoff as a team logo
+// (routes/settings.js POST /logo) and unit media: no upload middleware, no
+// new dependency, for an image someone changes a handful of times a year.
+router.post('/me/avatar', authenticate, avatarLimiter, async (req, res, next) => {
+  try {
+    const { content, content_type } = req.body || {};
+    if (!content || !content_type) {
+      return res.status(400).json({ error: 'content (base64) and content_type are required' });
+    }
+
+    const base64 = String(content).replace(/^data:[^;]+;base64,/, '');
+    const buffer = Buffer.from(base64, 'base64');
+    if (!buffer.length) return res.status(400).json({ error: 'content is not valid base64' });
+
+    const stored = await uploadUserAvatar(req.user.id, buffer, content_type);
+
+    const { data, error } = await supabaseAdmin
+      .from('users')
+      .update({ avatar_url: stored.url })
+      .eq('id', req.user.id)
+      .select('avatar_url')
+      .single();
+    if (error) throw error;
+
+    res.json({ avatar_url: data.avatar_url });
   } catch (e) { next(e); }
 });
 

@@ -57,6 +57,33 @@ async function resolveResendCredentials(orgId) {
   return { apiKey: env.resend.apiKey || null, from: env.resend.from || null, error: null };
 }
 
+// Same shape again for Termii: a workspace's own account and sender ID send
+// payment reminders and overdue texts as itself; absent, it keeps using the
+// platform's, exactly as before this feature existed. Same non-throwing
+// decrypt-failure handling as Resend above, for the same reason — sendSms
+// below must never fail the request that triggered it.
+async function resolveTermiiCredentials(orgId) {
+  const { data } = await supabaseAdmin
+    .from('re_org_settings')
+    .select('termii_api_key_encrypted, termii_sender_id')
+    .eq('organization_id', orgId)
+    .maybeSingle();
+
+  if (data?.termii_api_key_encrypted) {
+    try {
+      return {
+        apiKey: decrypt(data.termii_api_key_encrypted),
+        senderId: data.termii_sender_id || env.termii.senderId,
+        error: null,
+      };
+    } catch (err) {
+      console.error('[notify] could not decrypt org Termii key:', err.message);
+      return { apiKey: null, senderId: null, error: "This workspace's SMS key could not be read." };
+    }
+  }
+  return { apiKey: env.termii.apiKey || null, senderId: env.termii.senderId || null, error: null };
+}
+
 // ── Phone numbers ──────────────────────────────────────────────────────────
 // Nigerian numbers are written locally as 0803… and internationally as
 // 234803…. Termii wants the second form. Anything already in international
@@ -248,7 +275,14 @@ async function sendSms({ orgId, to, body, template = null, relatedType = null, r
 
   if (!recipient) return { status: 'skipped', reason: 'no recipient' };
 
-  if (!env.termii.apiKey) {
+  const { apiKey, senderId, error } = await resolveTermiiCredentials(orgId);
+
+  if (error) {
+    await record({ ...base, status: 'failed', error });
+    return { status: 'failed', reason: error };
+  }
+
+  if (!apiKey || !senderId) {
     await record({ ...base, status: 'skipped', error: 'TERMII_API_KEY not configured' });
     return { status: 'skipped', reason: 'sms not configured' };
   }
@@ -261,11 +295,11 @@ async function sendSms({ orgId, to, body, template = null, relatedType = null, r
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           to: recipient,
-          from: env.termii.senderId,
+          from: senderId,
           sms: String(body || ''),
           type: 'plain',
           channel: 'generic',
-          api_key: env.termii.apiKey,
+          api_key: apiKey,
         }),
       },
       SEND_TIMEOUT_MS,
@@ -288,6 +322,48 @@ async function sendSms({ orgId, to, body, template = null, relatedType = null, r
     await record({ ...base, status: 'failed', error: err.message });
     return { status: 'failed', reason: err.message };
   }
+}
+
+// The Settings "test these credentials" button. Same reasoning as
+// sendTestEmail — Termii has no read-only "am I valid" check, and a sender ID
+// only actually proves itself by getting a text delivered, so this sends one
+// real, short text to a phone number the caller provides (there is no
+// account-level "the workspace owner's own phone" the way there is an email
+// address), using the CANDIDATE key and sender id, not whatever is saved.
+async function sendTestSms({ apiKey, senderId, to }) {
+  if (!apiKey || !senderId) return { valid: false, reason: 'Both an API key and a sender ID are required.' };
+  const recipient = normalizeNigerianPhone(to);
+  if (!recipient) return { valid: false, reason: 'Enter a valid Nigerian phone number to test.' };
+
+  let response;
+  try {
+    response = await fetchWithTimeout(
+      TERMII_URL,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: recipient,
+          from: senderId,
+          sms: 'Archta: this is a test message. Your Termii sender ID is working.',
+          type: 'plain',
+          channel: 'generic',
+          api_key: apiKey,
+        }),
+      },
+      SEND_TIMEOUT_MS,
+      'Termii'
+    );
+  } catch (err) {
+    return { valid: false, reason: err.message || 'Termii is not responding right now. Try again shortly.' };
+  }
+
+  const json = await response.json().catch(() => ({}));
+  const failed = !response.ok || /error|insufficient/i.test(json.message || '');
+  if (failed) {
+    return { valid: false, reason: json.message || `Termii returned ${response.status}.` };
+  }
+  return { valid: true };
 }
 
 // ── Presentation ───────────────────────────────────────────────────────────
@@ -344,7 +420,9 @@ module.exports = {
   sendEmail,
   sendSms,
   sendTestEmail,
+  sendTestSms,
   resolveResendCredentials,
+  resolveTermiiCredentials,
   emailShell,
   normalizeNigerianPhone,
   naira,

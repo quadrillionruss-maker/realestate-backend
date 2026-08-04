@@ -706,6 +706,7 @@
     return '<div class="draft">' +
       '<div class="record-name"><span class="tag-ai">AI</span>' + esc(draft.customer_name) + '</div>' +
       '<div class="draft-text" data-draft="' + i + '">' + esc(draft.whatsapp_draft) + '</div>' +
+      (draft.email_draft ? '<div class="draft-text hidden" data-draft-email="' + i + '">' + esc(draft.email_draft) + '</div>' : '') +
       '<div class="btn-row">' +
         '<button class="btn-quiet" data-copy="' + i + '">Copy for WhatsApp</button>' +
         (draft.email_draft ? '<button class="btn-quiet" data-copy-email="' + i + '">Copy email</button>' : '') +
@@ -724,6 +725,20 @@
           button.classList.add('is-done');
           setTimeout(function () {
             button.textContent = 'Copy for WhatsApp';
+            button.classList.remove('is-done');
+          }, 1700);
+        }).catch(function () { toast('Could not copy. Select the text instead.', 'err'); });
+      });
+    });
+
+    R.qsa('[data-copy-email]', root).forEach(function (button) {
+      button.addEventListener('click', function () {
+        var text = R.qs('[data-draft-email="' + button.dataset.copyEmail + '"]', root).textContent;
+        R.copyText(text).then(function () {
+          button.textContent = 'Copied ✓';
+          button.classList.add('is-done');
+          setTimeout(function () {
+            button.textContent = 'Copy email';
             button.classList.remove('is-done');
           }, 1700);
         }).catch(function () { toast('Could not copy. Select the text instead.', 'err'); });
@@ -838,16 +853,21 @@
   R.screens.projects = {
     render: async function (view) {
       var projects = await api('/projects');
+      // Inventory is the developer's own book, not a rep's — permissions.js
+      // documents Units/Projects as read-only for sales_rep explicitly. A
+      // writable button in front of a read-only route is not a permission
+      // model (same file's own words), so it's gated here, not just server-side.
+      var canWrite = R.can('inventory.write');
 
       view.innerHTML =
         head('Projects', 'Each development you are selling.',
-          '<button class="btn primary" id="btn-new-project">New project</button>') +
+          canWrite ? '<button class="btn primary" id="btn-new-project">New project</button>' : '') +
         (projects.length
           ? '<div class="grid cols-3">' + projects.map(projectCard).join('') + '</div>'
           : card(null, R.emptyState(
               'No projects yet',
               'A project is one development — "Lekki Gardens Phase 2". Units, buyers and payments all hang off it.',
-              '<button class="btn primary" id="btn-first-project">Create your first project</button>'
+              canWrite ? '<button class="btn primary" id="btn-first-project">Create your first project</button>' : ''
             ), { flush: true }));
 
       R.qsa('#btn-new-project, #btn-first-project', view).forEach(function (b) {
@@ -942,11 +962,17 @@
         return;
       }
 
+      // Inventory is the developer's own book, not a rep's — permissions.js
+      // documents Units/Projects as read-only for sales_rep explicitly.
+      var canWrite = R.can('inventory.write');
+
       view.innerHTML =
         head('Units', R.plural(units.length, 'unit') + ' in view',
-          '<button class="btn" id="btn-import-units">Import CSV</button>' +
-          '<button class="btn" id="btn-bulk-units">Add many</button>' +
-          '<button class="btn primary" id="btn-new-unit">Add unit</button>') +
+          canWrite
+            ? '<button class="btn" id="btn-import-units">Import CSV</button>' +
+              '<button class="btn" id="btn-bulk-units">Add many</button>' +
+              '<button class="btn primary" id="btn-new-unit">Add unit</button>'
+            : '') +
 
         '<div class="filter-row">' +
           '<button class="pill' + (projectFilter ? '' : ' is-on') + '" data-project="">All projects</button>' +
@@ -992,9 +1018,11 @@
         });
       });
 
-      R.qs('#btn-new-unit', view).addEventListener('click', function () { unitModal(projects); });
-      R.qs('#btn-bulk-units', view).addEventListener('click', function () { bulkUnitModal(projects); });
-      R.qs('#btn-import-units', view).addEventListener('click', function () { importUnitsModal(projects); });
+      if (canWrite) {
+        R.qs('#btn-new-unit', view).addEventListener('click', function () { unitModal(projects); });
+        R.qs('#btn-bulk-units', view).addEventListener('click', function () { bulkUnitModal(projects); });
+        R.qs('#btn-import-units', view).addEventListener('click', function () { importUnitsModal(projects); });
+      }
 
       R.qsa('[data-reserve]', view).forEach(function (button) {
         button.addEventListener('click', function () { openReservationModal({ unitId: button.dataset.reserve }); });
@@ -1732,10 +1760,18 @@
     render: async function (view, params, query) {
       var status = query.status || '';
       var reservations = await api('/reservations' + (status ? '?status=' + status : ''));
+      // reports.export, reservations.restructure and reservations.renewTenancy
+      // are all DIRECTORS-only (owner + sales_director) — a sales rep has
+      // none of them, but 'reservations' is still in their nav for their own
+      // book, so each has to be hidden individually rather than the whole
+      // screen gated at the route.
+      var canExport = R.can('reports.export');
+      var canRestructure = R.can('reservations.restructure');
+      var canRenew = R.can('reservations.renewTenancy');
 
       view.innerHTML =
         head('Reservations', 'Unit, buyer, rep and payment plan.',
-          '<button class="btn" id="btn-export-reservations">Export CSV</button>' +
+          (canExport ? '<button class="btn" id="btn-export-reservations">Export CSV</button>' : '') +
           '<button class="btn primary" id="btn-new-res">New reservation</button>') +
 
         '<div class="filter-row">' +
@@ -1772,9 +1808,11 @@
               '<td>' + badge(r.status) + (r.escalation_stage && r.escalation_stage !== 'none' ? ' ' + badge(r.escalation_stage) : '') + '</td>' +
               '<td class="right nowrap">' +
                 (rental
-                  ? '<button class="btn-quiet" data-renew="' + esc(r.id) + '" data-buyer-name="' +
-                    esc((r.re_customers && r.re_customers.full_name) || '') + '">Renew tenancy</button> '
-                  : asArray(r.re_installment_plans).length
+                  ? (canRenew
+                    ? '<button class="btn-quiet" data-renew="' + esc(r.id) + '" data-buyer-name="' +
+                      esc((r.re_customers && r.re_customers.full_name) || '') + '">Renew tenancy</button> '
+                    : '')
+                  : asArray(r.re_installment_plans).length && canRestructure
                     ? '<button class="btn-quiet" data-restructure="' + esc(r.id) + '" data-buyer-name="' +
                       esc((r.re_customers && r.re_customers.full_name) || '') + '">Restructure</button> '
                     : '') +
@@ -2807,7 +2845,12 @@
   /* ══ COMMISSIONS ════════════════════════════════════════════════════════ */
   R.screens.commissions = {
     render: async function (view, params, query) {
-      var tab = query.tab || 'summary';
+      // 'summary' (by rep) and 'performance' need commissions.readAll — a
+      // sales rep only ever has commissions.read (their own entries). Landing
+      // them on the default they cannot open would 403 the whole screen on
+      // the one click most people take to get here (the sidebar link, which
+      // carries no ?tab=).
+      var tab = query.tab || (R.can('commissions.readAll') ? 'summary' : 'entries');
 
       if (tab === 'performance') {
         var performance = await api('/commissions/performance');
@@ -2927,8 +2970,15 @@
   };
 
   function commissionTabs(active) {
+    // 'By rep' and 'Performance' both need commissions.readAll, which a
+    // sales rep never has — offering a tab that always 403s on click is the
+    // same bug as landing on one by default.
+    var canReadAll = R.can('commissions.readAll');
+    var tabs = canReadAll
+      ? [['summary', 'By rep'], ['entries', 'Entries'], ['performance', 'Performance']]
+      : [['entries', 'Entries']];
     return '<div class="filter-row">' +
-      [['summary', 'By rep'], ['entries', 'Entries'], ['performance', 'Performance']].map(function (t) {
+      tabs.map(function (t) {
         return '<a class="pill' + (active === t[0] ? ' is-on' : '') + '" href="#/commissions?tab=' + t[0] + '">' + t[1] + '</a>';
       }).join('') +
     '</div>';
@@ -2938,62 +2988,87 @@
   R.screens.reports = {
     render: async function (view, params, query) {
       var scope = query.project ? '?project_id=' + encodeURIComponent(query.project) : '';
+
+      // 'reports.investor' is owner-only (CLAUDE.md: "only the chairman sees
+      // the investor's view"); 'reports.collections'/'reports.rental' are
+      // owner+sales_director. A single Promise.all over all three used to
+      // reject WHOLE-SCREEN the moment a Sales Director (who is in nav for
+      // 'reports', same as owner — neither is in NAV_BY_ROLE's restricted
+      // list) hit the investor-only endpoint. Each section now fetches only
+      // what its own permission allows, and renders only what it got.
+      var canInvestor = R.can('reports.investor');
+      var canCollections = R.can('reports.collections');
+      var canRental = R.can('reports.rental');
+      var canExport = R.can('reports.export');
+
       var results = await Promise.all([
-        api('/reports/investor' + scope), api('/reports/collections?months=12'), api('/reports/rental'),
+        canInvestor ? api('/reports/investor' + scope) : Promise.resolve(null),
+        canCollections ? api('/reports/collections?months=12') : Promise.resolve(null),
+        canRental ? api('/reports/rental') : Promise.resolve(null),
       ]);
       var report = results[0], collections = results[1], rental = results[2];
-      var t = report.totals;
+      var t = report && report.totals;
       // Only a developer who actually runs a rental portfolio sees this
       // section — nothing to report on is nothing to show.
-      var hasRentals = rental.occupancy.occupied > 0 || rental.upcoming_renewals.length > 0;
+      var hasRentals = rental && (rental.occupancy.occupied > 0 || rental.upcoming_renewals.length > 0);
 
-      var peak = Math.max.apply(null, collections.map(function (m) { return m.amount; }).concat([1]));
+      var peak = collections
+        ? Math.max.apply(null, collections.map(function (m) { return m.amount; }).concat([1]))
+        : 0;
 
       view.innerHTML =
         head('Reports', 'The summary you send to investors, without rebuilding it in PowerPoint.',
-          '<button class="btn" data-export="customers">Export buyers</button>' +
-          '<button class="btn" data-export="schedule">Export schedule</button>' +
-          '<button class="btn" data-export="payments">Export payments</button>' +
-          '<button class="btn primary" id="btn-print">Print / PDF</button>') +
+          canExport
+            ? '<button class="btn" data-export="customers">Export buyers</button>' +
+              '<button class="btn" data-export="schedule">Export schedule</button>' +
+              '<button class="btn" data-export="payments">Export payments</button>' +
+              '<button class="btn primary" id="btn-print">Print / PDF</button>'
+            : '') +
 
-        '<div class="grid cols-4 mb-2">' +
-          stat('Gross development value', nairaShort(t.gross_development_value)) +
-          stat('Contracted', nairaShort(t.contracted_value), { tone: 'gold' }) +
-          stat('Collected to date', nairaShort(t.collected_total), { tone: 'moss', accent: 'moss' }) +
-          stat('Receivables outstanding', nairaShort(t.receivables_outstanding), {
-            sub: t.receivables_overdue ? nairaShort(t.receivables_overdue) + ' overdue' : 'none overdue',
-            accent: t.receivables_overdue ? 'clay' : null,
-          }) +
-        '</div>' +
+        (canInvestor
+          ? '<div class="grid cols-4 mb-2">' +
+              stat('Gross development value', nairaShort(t.gross_development_value)) +
+              stat('Contracted', nairaShort(t.contracted_value), { tone: 'gold' }) +
+              stat('Collected to date', nairaShort(t.collected_total), { tone: 'moss', accent: 'moss' }) +
+              stat('Receivables outstanding', nairaShort(t.receivables_outstanding), {
+                sub: t.receivables_overdue ? nairaShort(t.receivables_overdue) + ' overdue' : 'none overdue',
+                accent: t.receivables_overdue ? 'clay' : null,
+              }) +
+            '</div>'
+          : '') +
 
-        card('Collections, last 12 months',
-          '<div class="bars">' + collections.map(function (m) {
-            var height = Math.max(2, Math.round((m.amount / peak) * 100));
-            return '<div title="' + esc(m.month + ': ' + naira(m.amount)) + '">' +
-              '<div class="bar" data-h="' + height + '"></div>' +
-              '<div class="bar-label">' + esc(m.month.slice(5)) + '</div></div>';
-          }).join('') + '</div>' +
-          '<div class="page-sub mt-1">Peak month ' + naira(peak) + '</div>') +
+        (canCollections
+          ? card('Collections, last 12 months',
+              '<div class="bars">' + collections.map(function (m) {
+                var height = Math.max(2, Math.round((m.amount / peak) * 100));
+                return '<div title="' + esc(m.month + ': ' + naira(m.amount)) + '">' +
+                  '<div class="bar" data-h="' + height + '"></div>' +
+                  '<div class="bar-label">' + esc(m.month.slice(5)) + '</div></div>';
+              }).join('') + '</div>' +
+              '<div class="page-sub mt-1">Peak month ' + naira(peak) + '</div>')
+          : '') +
 
-        card('By project', table(
-          [{ label: 'Project' }, { label: 'Units' }, { label: 'Sold', num: true }, { label: 'Sell-through', num: true },
-            { label: 'Contracted', num: true }, { label: 'Collected', num: true }, { label: 'Collection rate', num: true },
-            { label: 'Overdue', num: true }],
-          report.projects,
-          function (p) {
-            return '<tr>' +
-              '<td class="cell-primary">' + esc(p.name) + '<div class="cell-meta">' + esc(p.location || '') + '</div></td>' +
-              '<td class="muted">' + p.units.total + '</td>' +
-              '<td class="num">' + p.units.sold + '</td>' +
-              '<td class="num muted">' + p.sell_through_rate + '%</td>' +
-              '<td class="num">' + nairaShort(p.contracted_value) + '</td>' +
-              '<td class="num moss">' + nairaShort(p.collected_total) + '</td>' +
-              '<td class="num ' + (p.collection_rate >= 70 ? 'moss' : p.collection_rate < 40 ? 'clay' : '') + '">' + p.collection_rate + '%</td>' +
-              '<td class="num ' + (p.receivables_overdue ? 'clay' : 'muted') + '">' + nairaShort(p.receivables_overdue) + '</td>' +
-            '</tr>';
-          },
-          { emptyTitle: 'No projects to report on yet' }
-        ), { flush: true }) +
+        (canInvestor
+          ? card('By project', table(
+              [{ label: 'Project' }, { label: 'Units' }, { label: 'Sold', num: true }, { label: 'Sell-through', num: true },
+                { label: 'Contracted', num: true }, { label: 'Collected', num: true }, { label: 'Collection rate', num: true },
+                { label: 'Overdue', num: true }],
+              report.projects,
+              function (p) {
+                return '<tr>' +
+                  '<td class="cell-primary">' + esc(p.name) + '<div class="cell-meta">' + esc(p.location || '') + '</div></td>' +
+                  '<td class="muted">' + p.units.total + '</td>' +
+                  '<td class="num">' + p.units.sold + '</td>' +
+                  '<td class="num muted">' + p.sell_through_rate + '%</td>' +
+                  '<td class="num">' + nairaShort(p.contracted_value) + '</td>' +
+                  '<td class="num moss">' + nairaShort(p.collected_total) + '</td>' +
+                  '<td class="num ' + (p.collection_rate >= 70 ? 'moss' : p.collection_rate < 40 ? 'clay' : '') + '">' + p.collection_rate + '%</td>' +
+                  '<td class="num ' + (p.receivables_overdue ? 'clay' : 'muted') + '">' + nairaShort(p.receivables_overdue) + '</td>' +
+                '</tr>';
+              },
+              { emptyTitle: 'No projects to report on yet' }
+            ), { flush: true })
+          : '') +
 
         // "How full is the building" and "how much sold" are different
         // questions with different answers — folding rental units into the
@@ -3028,7 +3103,11 @@
             ), { flush: true })
           : '');
 
-      R.qs('#btn-print', view).addEventListener('click', function () { window.print(); });
+      // Only rendered when canExport — absent from the DOM entirely for a
+      // Sales Director, who has reports.collections/reports.rental but not
+      // reports.export.
+      var printButton = R.qs('#btn-print', view);
+      if (printButton) printButton.addEventListener('click', function () { window.print(); });
 
       R.onClick(view, '[data-renew]', async function (button) {
         await renewTenancyModal(button.dataset.renew, button.dataset.buyerName);
@@ -3066,7 +3145,7 @@
     var settings = await api('/settings');
     var me = R.state.user;
 
-    view.innerHTML = head('Settings', 'Letterhead, commission default and who gets told what.') + tabs +
+    view.innerHTML = head('Settings', 'Workspace configuration — letterhead, provider keys, commission default and who gets told what. Your own profile and password are under your name, bottom left of the sidebar.') + tabs +
       '<div class="grid cols-2">' +
         '<div>' +
           card('Company', '<form id="form-org">' +
@@ -3152,24 +3231,30 @@
                   : 'Not configured — email sends from Archta\'s default address.') +
                 ' Only the workspace owner can change this.</p>')) +
 
-          card('Your account', '<form id="form-me">' +
-            '<div class="field"><label for="s-name">Your name</label>' +
-              '<input class="input" id="s-name" name="full_name" value="' + esc(me.full_name || '') + '"></div>' +
-            '<div class="field"><label>Email</label>' +
-              '<input class="input" value="' + esc(me.email) + '" disabled></div>' +
-            '<div class="field"><label for="s-current">' + (me.has_password ? 'Current password' : 'No password set') + '</label>' +
-              '<input class="input" id="s-current" name="current_password" type="password" autocomplete="current-password"' +
-                (me.has_password ? '' : ' disabled placeholder="You sign in with Google"') + '></div>' +
-            '<div class="field"><label for="s-new">' + (me.has_password ? 'New password' : 'Set a password') + '</label>' +
-              '<input class="input" id="s-new" name="password" type="password" autocomplete="new-password" placeholder="At least 12 characters"></div>' +
-            '<button class="btn mt-1" type="submit">Update account</button>' +
-          '</form>') +
-
-          card('Sessions',
-            '<p class="muted mb-2">Ends every signed-in session for your account — this tab included, ' +
-              'though it stays signed in with a fresh session. Use this if a device you signed in on ' +
-              'is lost, stolen, or no longer yours.</p>' +
-            '<button class="btn" id="btn-sign-out-everywhere">Sign out everywhere</button>') +
+          card('SMS — Termii',
+            (me.role === 'owner'
+              ? '<p class="field-hint mb-2">Optional. Without this, payment reminders and overdue texts still send — they just arrive from Archta\'s registered sender ID rather than your own.</p>' +
+                '<form id="form-termii">' +
+                  '<div class="field"><label for="s-termii-sender">Sender ID</label>' +
+                    '<input class="input" id="s-termii-sender" name="termii_sender_id" value="' + esc(settings.termii_sender_id || '') + '" placeholder="AdronHomes" maxlength="11">' +
+                    '<p class="field-hint">Must already be registered with Termii — an unregistered sender ID is rejected at send time, not here.</p></div>' +
+                  '<div class="field"><label for="s-termii-key">Termii API key</label>' +
+                    '<input class="input" id="s-termii-key" name="termii_api_key" type="password" autocomplete="off" placeholder="' +
+                      (settings.termii_configured ? 'Configured, ending in ' + esc(settings.termii_api_key_last4) + ' — leave blank to keep' : 'TLxxxxxxxxxxxxxxxxxxxxxxxxxxxx') + '">' +
+                    '<p class="field-hint">Never shown again once saved. Leave blank to keep the current key.</p></div>' +
+                  '<div class="field"><label for="s-termii-test-to">Test number</label>' +
+                    '<input class="input" id="s-termii-test-to" type="tel" placeholder="0803…" autocomplete="off">' +
+                    '<p class="field-hint">Where the test button below sends a real text.</p></div>' +
+                  '<div class="field-row">' +
+                    '<button class="btn primary" type="submit">Save</button>' +
+                    '<button class="btn" type="button" id="btn-test-termii">Send test text</button>' +
+                  '</div>' +
+                '</form>'
+              : '<p class="muted">' +
+                (settings.termii_configured
+                  ? 'Configured, sender ID ' + esc(settings.termii_sender_id || '—') + '.'
+                  : 'Not configured — texts send from Archta\'s default sender ID.') +
+                ' Only the workspace owner can change this.</p>')) +
         '</div>' +
       '</div>';
 
@@ -3226,28 +3311,26 @@
       toast(result.valid ? 'Test email sent — check your inbox.' : (result.reason || 'Could not send the test email.'), result.valid ? 'ok' : 'err');
     });
 
-    guardedSubmit(R.qs('#form-me', view), async function (form) {
-      var v = R.values(form);
-      var payload = { full_name: v.full_name };
-      if (v.password) { payload.password = v.password; payload.current_password = v.current_password; }
-      var result = await R.request('/auth/me', { method: 'PATCH', body: JSON.stringify(payload) });
+    var termiiForm = R.qs('#form-termii', view);
+    if (termiiForm) {
+      guardedSubmit(termiiForm, async function (form) {
+        var v = R.values(form);
+        var payload = { termii_sender_id: v.termii_sender_id || null };
+        if (v.termii_api_key) payload.termii_api_key = v.termii_api_key;
+        await api.put('/settings/termii', payload);
+        toast('SMS settings saved.', 'ok');
+        R.reload();
+      });
+    }
 
-      // Changing the password invalidates every token, including the one this
-      // tab is holding. The server returns a replacement so the person who
-      // made the change is not signed out by making it.
-      if (result && result.token) {
-        R.adoptToken(result.token);
-        toast('Password changed. Every other signed-in device has been signed out.', 'ok');
-      } else {
-        toast('Account updated.', 'ok');
-      }
-      R.reload();
-    });
-
-    R.onClick(view, '#btn-sign-out-everywhere', async function () {
-      var result = await R.request('/auth/logout', { method: 'POST' });
-      if (result && result.token) R.adoptToken(result.token);
-      toast('Signed out everywhere. This tab stays signed in.', 'ok');
+    R.onClick(view, '#btn-test-termii', async function () {
+      var apiKey = R.qs('#s-termii-key', view).value.trim();
+      var senderId = R.qs('#s-termii-sender', view).value.trim();
+      var to = R.qs('#s-termii-test-to', view).value.trim();
+      if (!apiKey || !senderId) { toast('Enter both a sender ID and an API key to test.', 'err'); return; }
+      if (!to) { toast('Enter a phone number to send the test to.', 'err'); return; }
+      var result = await api.post('/settings/termii/test', { termii_api_key: apiKey, termii_sender_id: senderId, to: to });
+      toast(result.valid ? 'Test text sent — check your phone.' : (result.reason || 'Could not send the test text.'), result.valid ? 'ok' : 'err');
     });
   }
 
