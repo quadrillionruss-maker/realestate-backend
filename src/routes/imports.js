@@ -252,17 +252,25 @@ router.post('/customers', requirePermission('imports.write'), async (req, res, n
       }
 
       if (entry.unit_number) {
-        const projectName = (record.project || '').trim().toLowerCase();
-        const resolved = project_id
-          ? (projects || []).find((p) => p.id === project_id)
-          : projectByName.get(projectName);
+        // A row's own "project" column overrides the dropdown for that row
+        // alone — the dropdown (project_id) is only the default for rows
+        // that leave it blank, same priority as /imports/units above.
+        const projectName = (record.project || '').trim();
+        let resolved = null;
+        if (projectName) {
+          resolved = projectByName.get(projectName.toLowerCase());
+          if (!resolved) {
+            errors.push({ row: record.__row, error: `no project named "${record.project}" in this workspace` });
+            continue;
+          }
+        } else if (project_id) {
+          resolved = (projects || []).find((p) => p.id === project_id);
+        }
 
         if (!resolved) {
           errors.push({
             row: record.__row,
-            error: projectName
-              ? `no project named "${record.project}" in this workspace`
-              : 'unit_number given without a project — add a "project" column or pass project_id',
+            error: 'unit_number given without a project — add a "project" column to the CSV, or select a project from the dropdown above.',
           });
           continue;
         }

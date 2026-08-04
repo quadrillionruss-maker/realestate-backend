@@ -170,7 +170,7 @@
       phone: ['phone', 'Phone', 'Phone Number', 'mobile'],
       email: ['email', 'Email'],
       source: ['source'],
-      project: ['project'],
+      project: ['project', 'Project', 'Project Name', 'project name'],
       unit_number: ['unit_number', 'Unit No.', 'Unit Number', 'unit no', 'unit'],
       unit_type: ['unit_type', 'Type', 'type'],
       size_sqm: ['size_sqm', 'Size', 'size', 'sqm'],
@@ -1441,7 +1441,10 @@
         });
 
         R.qs('#btn-new-buyer', view).addEventListener('click', customerModal);
-        R.qs('#btn-import-buyers', view).addEventListener('click', importCustomersModal);
+        // importCustomersModal now fetches its own Project list before
+        // opening — R.onClick gives that fetch a spinner and a toast if it
+        // fails, which a bare addEventListener wouldn't for an async handler.
+        R.onClick(view, '#btn-import-buyers', importCustomersModal);
         R.onClick(view, '#btn-export-buyers', async function () {
           await R.downloadCsv('/reports/export/customers', 'archta-buyers.csv');
           toast('Exported. Check your downloads.', 'ok');
@@ -1495,7 +1498,11 @@
     buyer_and_plan: 'buyer + reservation + payment plan',
   };
 
-  function importCustomersModal() {
+  async function importCustomersModal() {
+    // Only needed for the Project dropdown below, and the common case (a
+    // buyer-only file with no unit_number column at all) never opens it —
+    // fetched lazily here rather than by the Buyers screen on every load.
+    var projects = await api('/projects');
     var mapping = {};
     var missing = REQUIRED_IMPORT_FIELDS.customers;
 
@@ -1512,6 +1519,13 @@
         '<div class="notice info compact">' +
           'Imported payments settle the schedule silently — no receipts are emailed for money that arrived months ago.' +
         '</div>' +
+        '<div class="field"><label for="ic-project">Project</label>' +
+          '<select class="select" id="ic-project" name="project_id">' +
+            '<option value="">No default — every row with a unit_number needs its own "project" column</option>' +
+            options(projects, 'id', 'name') +
+          '</select>' +
+          '<p class="field-hint">Only matters for a row that has a <code>unit_number</code>. A row\'s own ' +
+            '"project" column overrides this; a row with neither is skipped with an error, not silently guessed.</p></div>' +
         '<div class="field"><label for="ic-file">CSV file</label>' +
           '<input class="input" id="ic-file" type="file" accept=".csv,text/csv"></div>' +
         '<div class="field"><label for="ic-csv">…or paste it</label>' +
@@ -1526,7 +1540,9 @@
 
         var previewed = form.dataset.previewed === 'true';
         var remapped = R.remapCsv(v.csv, mapping);
-        var result = await api.post('/imports/customers', { csv: remapped, dry_run: !previewed });
+        var result = await api.post('/imports/customers', {
+          csv: remapped, project_id: v.project_id || null, dry_run: !previewed,
+        });
 
         if (!previewed) {
           form.dataset.previewed = 'true';
