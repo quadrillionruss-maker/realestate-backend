@@ -230,10 +230,11 @@ async function register({ email, password, full_name, company_name }) {
     throw Object.assign(new Error('An account with that email already exists. Sign in instead.'), { statusCode: 409 });
   }
 
-  // Verified immediately when verification is switched off (no Resend key, or
-  // explicitly disabled) — otherwise the account could never be used, because
-  // the link that unlocks it would never arrive.
-  const verifiedNow = env.auth.requireEmailVerification ? null : new Date().toISOString();
+  // No email-verification step: this deployment's Resend account is
+  // sandboxed to send only to its own owner, so a confirmation link would
+  // never reach an actual user. Every account is usable the instant it is
+  // created — see CLAUDE.md's "Sign-up and sign-in" for the reasoning.
+  const now = new Date().toISOString();
 
   const { data, error } = await supabaseAdmin
     .from('users')
@@ -242,8 +243,8 @@ async function register({ email, password, full_name, company_name }) {
       password_hash: await hashPassword(password),
       full_name: (full_name || '').trim() || null,
       company_name: (company_name || '').trim() || null,
-      last_login_at: new Date().toISOString(),
-      email_verified_at: verifiedNow,
+      last_login_at: now,
+      email_verified_at: now,
     })
     .select(PUBLIC_USER_COLUMNS)
     .single();
@@ -257,8 +258,7 @@ async function register({ email, password, full_name, company_name }) {
   return {
     token: issueToken(data),
     user: publicUser(data),
-    email_verified: Boolean(verifiedNow),
-    verification_required: env.auth.requireEmailVerification,
+    email_verified: true,
   };
 }
 
@@ -294,62 +294,14 @@ async function login({ email, password }) {
     .update({ last_login_at: new Date().toISOString(), failed_login_count: 0, locked_until: null })
     .eq('id', user.id);
 
-  // Login SUCCEEDS for an unverified address, and the API is what refuses them
-  // (orgContext). Blocking here instead would leave the browser with no token
-  // and therefore no way to call the resend endpoint — the person would be
-  // stuck at a form that tells them to check an email they never received.
+  // email_verified_at is read here only for accounts that predate this
+  // deployment's removal of the verification gate — nothing in the app
+  // branches on it any more, but it stays true to what the column says.
   return {
     token: issueToken(user),
     user: publicUser(user),
     email_verified: Boolean(user.email_verified_at),
   };
-}
-
-// ── Email verification ─────────────────────────────────────────────────────
-// Same construction as the reset token: random, single-use, time-boxed, and
-// only its SHA-256 is stored, so a leaked row cannot be replayed as a
-// verification link.
-async function issueVerificationToken(userId) {
-  const token = crypto.randomBytes(32).toString('hex');
-  const expiresAt = new Date(Date.now() + env.auth.verifyTokenTtlHours * 3_600_000).toISOString();
-
-  const { error } = await supabaseAdmin
-    .from('users')
-    .update({ verify_token_hash: hashResetToken(token), verify_token_expires_at: expiresAt })
-    .eq('id', userId);
-  if (error) throw error;
-
-  return { token, expiresAt, url: `${env.appUrl || ''}/index.html#/verify?token=${token}` };
-}
-
-async function verifyEmail(token) {
-  if (!token) throw badRequest('Verification token is required.');
-
-  const { data: user, error } = await supabaseAdmin
-    .from('users')
-    .select('id, email, full_name, company_name, avatar_url, token_version, verify_token_expires_at, email_verified_at')
-    .eq('verify_token_hash', hashResetToken(token))
-    .maybeSingle();
-  if (error) throw error;
-
-  if (!user || !user.verify_token_expires_at || new Date(user.verify_token_expires_at) < new Date()) {
-    throw badRequest('That verification link has expired or already been used. Ask for a new one.');
-  }
-
-  const { error: updateError } = await supabaseAdmin
-    .from('users')
-    .update({
-      email_verified_at: user.email_verified_at || new Date().toISOString(),
-      verify_token_hash: null,        // single use
-      verify_token_expires_at: null,
-    })
-    .eq('id', user.id);
-  if (updateError) throw updateError;
-
-  // A fresh token so verifying signs them straight in — a second trip through
-  // the login form right after proving they own the address is friction for
-  // nothing.
-  return { token: issueToken(user), user: publicUser(user) };
 }
 
 // ── Password reset ─────────────────────────────────────────────────────────

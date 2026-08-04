@@ -63,7 +63,6 @@ helmet → cors → rate limit
       → /api/auth       (no auth — these are the endpoints you call to get a token)
       → /api/portal     (portal token, aud:'re-portal')
       → /api/re         authenticate → orgContext → routes
-                          (orgContext also gates on a confirmed email address)
       → frontend/       static
       → 404 → errorHandler
 ```
@@ -100,6 +99,44 @@ deploying the migration does not sign the company out.
 The check costs one primary-key read per request. If that ever matters, cache
 it — do not remove it. On a database that has not run 004 it fails **open**
 with a warning, because a deploy that locks out every user is worse.
+
+## Sign-up and sign-in
+
+**There is no email-verification step, and self-service password reset is
+disabled.** Both existed once and both sent mail through Resend; both are off
+because this deployment's Resend account is sandboxed to deliver only to its
+own owner's address — a confirmation link or a reset link emailed to an actual
+buyer or developer would simply never arrive, silently locking them out of an
+account they just created or turning "forgot password" into a dead end. Gating
+account access on mail that cannot be delivered is worse than not gating it at
+all, so `POST /register` (`authService.register`) marks every account
+`email_verified_at` immediately and returns a token — the person is signed in
+and on the dashboard in the same request, no link to click. `POST
+/forgot-password` (`routes/auth.js`) does no work at all: it neither generates
+a token nor calls Resend, and answers every request with "Please contact
+support to reset your password," which is also what the frontend shows the
+moment "Forgot your password?" is clicked, before any request is made.
+
+**This is reversible, not deleted.** `authService.requestPasswordReset` and
+`resetPassword`, and `POST /reset-password`, are untouched and still work end
+to end — only the route that used to call the first one and email its result
+was gutted. Once Resend is on a plan that can actually deliver to a buyer,
+restoring self-service reset is rewriting `POST /forgot-password` back to call
+`requestPasswordReset` and send the email, not rebuilding the feature. The
+email-verification machinery (`issueVerificationToken`, `verifyEmail`, `POST
+/verify-email`, `POST /resend-verification`) was removed outright rather than
+parked the same way — CLAUDE.md's "Nothing is ever deleted" is about buyer
+data, not about every code path a product ever had, and a confirmation flow
+with no live caller is a maintenance liability, not a paused feature.
+`users.verify_token_hash`/`verify_token_expires_at` remain in the schema,
+unused; no migration removed them.
+
+**Every other use of Resend is untouched.** Payment receipts and buyer portal
+links (`receiptService`, `portalService`) still send exactly as before —
+`notificationService.sendEmail` was not touched by any of this, and neither
+was per-workspace Resend configuration (see "Per-workspace credentials"
+below). What changed is scoped to the two auth-flow senders that used to call
+it: registration's confirmation email and the forgot-password reset email.
 
 ## Org scoping
 
@@ -317,11 +354,9 @@ a host.
    tables exist but `service_role` holds no privileges on them — re-run the
    whole set. See the Grants section in `docs/DATABASE.md`.
 
-2. Open the app and **create an account**, then click the link in the
-   confirmation email. Verification is required only when email is actually
-   configured (`RESEND_API_KEY` + `RESEND_FROM`) — otherwise nobody could ever
-   receive the link, so new accounts are marked verified on creation.
-   `REQUIRE_EMAIL_VERIFICATION` overrides either way.
+2. Open the app and **create an account** — you are signed in immediately and
+   land on the dashboard. See "Sign-up and sign-in" below for why there is no
+   confirmation email to click.
 
 `npm run token -- <uuid> <email>` still exists. It is a debugging tool now
 rather than the way in — useful for the smoke test, or for signing in as a

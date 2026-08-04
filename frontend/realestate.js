@@ -213,6 +213,21 @@
   function qs(sel, root) { return (root || document).querySelector(sel); }
   function qsa(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
 
+  // A computed bar/meter width (or chart bar height) used to be baked
+  // straight into the generated markup as style="width:37%" — the one thing
+  // a CSS class cannot express, since the number comes from the data. A
+  // strict Content-Security-Policy with no 'unsafe-inline' in style-src
+  // blocks every such attribute silently; it does NOT block setting an
+  // individual CSSOM property from JS after the element already exists, so
+  // that's the only place a computed size can still live. Screens render
+  // `data-w`/`data-h` (a plain percentage number, no unit) instead of an
+  // inline style; call this once against the container right after that
+  // markup lands in the DOM.
+  function applyDynamicStyles(root) {
+    qsa('[data-w]', root).forEach(function (n) { n.style.width = n.dataset.w + '%'; });
+    qsa('[data-h]', root).forEach(function (n) { n.style.height = n.dataset.h + '%'; });
+  }
+
   function badge(value) {
     if (!value) return '';
     return '<span class="badge ' + esc(value) + '">' + esc(String(value).replace(/_/g, ' ')) + '</span>';
@@ -259,15 +274,6 @@
     var body = null;
     var text = await res.text().catch(function () { return ''; });
     if (text) { try { body = JSON.parse(text); } catch (e) { body = null; } }
-
-    // The token is fine; the address is not confirmed. 403 rather than 401
-    // precisely so this does not look like an expired session — sending them
-    // back to the password form would be a loop, since signing in again
-    // succeeds and the next request fails the same way.
-    if (res.status === 403 && body && body.code === 'email_unverified' && !opts.noAuthRedirect) {
-      showVerifyGate(body.error);
-      throw Object.assign(new Error(body.error), { status: 403, code: 'email_unverified' });
-    }
 
     if (!res.ok) {
       throw Object.assign(
@@ -343,7 +349,7 @@
       '<div class="modal ' + (opts.wide ? 'wide' : '') + '" role="dialog" aria-modal="true">' +
         '<div class="modal-head">' +
           '<div class="modal-title">' + esc(opts.title || '') + '</div>' +
-          '<div class="spacer" style="flex:1"></div>' +
+          '<div class="spacer"></div>' +
           '<button class="icon-btn" data-close aria-label="Close">×</button>' +
         '</div>' +
         '<form class="modal-body" id="' + formId + '">' + (opts.body || '') + '</form>' +
@@ -356,6 +362,7 @@
       '</div>';
 
     overlay.appendChild(scrim);
+    applyDynamicStyles(scrim);
 
     var form = scrim.querySelector('form');
     var submit = scrim.querySelector('[type="submit"]');
@@ -412,7 +419,7 @@
     return new Promise(function (resolve) {
       var m = modal({
         title: options.title,
-        body: '<p class="muted" style="line-height:1.6">' + esc(options.message) + '</p>',
+        body: '<p class="muted lh-loose">' + esc(options.message) + '</p>',
         submitLabel: options.confirmLabel || 'Confirm',
         onSubmit: function (form, close) { close(); resolve(true); },
       });
@@ -441,9 +448,9 @@
     panel.setAttribute('aria-modal', 'true');
     panel.innerHTML =
       '<div class="drawer-head">' +
-        '<div style="flex:1;min-width:0">' +
+        '<div class="drawer-head-text">' +
           '<div class="eyebrow">' + esc(options.eyebrow || '') + '</div>' +
-          '<div class="page-title" style="font-size:20px;margin-top:3px">' + esc(options.title || '') + '</div>' +
+          '<div class="page-title">' + esc(options.title || '') + '</div>' +
           (options.sub ? '<div class="page-sub">' + esc(options.sub) + '</div>' : '') +
         '</div>' +
         '<button class="icon-btn" data-close aria-label="Close">×</button>' +
@@ -452,6 +459,7 @@
 
     scrim.appendChild(panel);
     overlay.appendChild(scrim);
+    applyDynamicStyles(panel);
 
     function close() {
       if (scrim.parentNode) scrim.parentNode.removeChild(scrim);
@@ -495,7 +503,7 @@
   function skeleton(rows) {
     var out = '<div class="card-body">';
     for (var i = 0; i < (rows || 4); i++) {
-      out += '<div class="skeleton" style="width:' + (94 - i * 9) + '%"></div>';
+      out += '<div class="skeleton" data-w="' + (94 - i * 9) + '"></div>';
     }
     return out + '</div>';
   }
@@ -614,6 +622,7 @@
     if (!isSameScreen) {
       view.className = 'page screen-enter';
       view.innerHTML = '<div class="card">' + skeleton(5) + '</div>';
+      applyDynamicStyles(view);
       window.scrollTo(0, 0);
     } else {
       // No screen-enter animation on a re-render either — the content
@@ -624,6 +633,7 @@
 
     try {
       await screen.render(view, route.params, route.query);
+      applyDynamicStyles(view);
       if (isSameScreen) {
         // After the DOM is replaced the document may briefly be shorter than it
         // was, which clamps the scroll. Restore on the next frame, once layout
@@ -795,7 +805,7 @@
           }).join('');
         }
 
-        panel.innerHTML = html || '<div class="empty" style="padding:22px">Nothing matched “' + esc(q) + '”.</div>';
+        panel.innerHTML = html || '<div class="empty">Nothing matched “' + esc(q) + '”.</div>';
         panel.classList.remove('hidden');
 
         qsa('[data-go]', panel).forEach(function (hit) {
@@ -806,14 +816,14 @@
           });
         });
       } catch (err) {
-        panel.innerHTML = '<div class="empty" style="padding:22px">' + esc(err.message) + '</div>';
+        panel.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
         panel.classList.remove('hidden');
       }
     }
   }
 
   // ── Gate ──────────────────────────────────────────────────────────────
-  var gateForms = ['form-login', 'form-register', 'form-forgot', 'form-reset', 'form-verify'];
+  var gateForms = ['form-login', 'form-register', 'form-forgot', 'form-reset'];
 
   function showGateForm(id) {
     gateForms.forEach(function (formId) { el(formId).hidden = formId !== id; });
@@ -841,41 +851,6 @@
     el('link-reset-cancel').addEventListener('click', function () {
       window.location.hash = '';
       showGateForm('form-login');
-    });
-
-    el('link-verify-signin').addEventListener('click', function () {
-      window.location.hash = '';
-      showGateForm('form-login');
-    });
-
-    // Resend needs the token from the half-signed-in session: login succeeds
-    // for an unverified address, the API refuses, and this is how the person
-    // gets another link without having to remember a password again.
-    el('btn-resend-verify').addEventListener('click', async function () {
-      var button = this;
-      button.classList.add('is-working');
-      try {
-        var result = await request('/auth/resend-verification', {
-          method: 'POST', body: '{}', noAuthRedirect: true,
-        });
-        var ok = el('verify-ok');
-        ok.textContent = result.message || 'Sent.';
-        if (result.dev_url) {
-          ok.innerHTML = esc(result.message) +
-            '<br><br><b>Email is not configured on this server.</b><br>' +
-            '<a class="link-quiet" href="' + esc(result.dev_url) + '">Open the confirmation link</a>';
-        }
-        ok.classList.remove('hidden');
-        el('verify-error').classList.add('hidden');
-      } catch (err) {
-        var error = el('verify-error');
-        error.textContent = err.status === 401
-          ? 'Sign in first, then ask for a new link.'
-          : err.message;
-        error.classList.remove('hidden');
-      } finally {
-        button.classList.remove('is-working');
-      }
     });
 
     // A double-tap on "Sign in" — a slow network, a keyboard user's stray
@@ -938,41 +913,12 @@
         });
         setToken(result.token);
         el('reg-password').value = '';
+        // No verification step — registration signs them straight in.
         await enterApp();
-        toast('Welcome. Start by creating your first project.', 'ok');
-        go('#/projects');
+        toast('Welcome to Archta.', 'ok');
+        go('#/dashboard');
       } catch (err) {
         gateError('reg-error', err.message);
-      } finally {
-        button.disabled = false;
-        button.classList.remove('is-working');
-      }
-    });
-
-    el('form-forgot').addEventListener('submit', async function (e) {
-      e.preventDefault();
-      var button = el('forgot-submit');
-      if (button.disabled) return;
-      gateError('forgot-error', '');
-      el('forgot-ok').classList.add('hidden');
-      button.disabled = true;
-      button.classList.add('is-working');
-
-      try {
-        var result = await authApi.post('/forgot-password', { email: el('forgot-email').value.trim() });
-        var ok = el('forgot-ok');
-        ok.textContent = result.message;
-        ok.classList.remove('hidden');
-
-        // Only ever present outside production, and only when email is not
-        // configured — otherwise the reset flow is untestable locally.
-        if (result.dev_reset_url) {
-          ok.innerHTML = esc(result.message) +
-            '<br><br><b>Email is not configured on this server.</b><br>' +
-            '<a class="link-quiet" href="' + esc(result.dev_reset_url) + '">Open the reset link</a>';
-        }
-      } catch (err) {
-        gateError('forgot-error', err.message);
       } finally {
         button.disabled = false;
         button.classList.remove('is-working');
@@ -1152,16 +1098,6 @@
       return;
     }
 
-    // /auth/me answers for an unverified user on purpose — it is how the app
-    // finds out to show this screen instead of the dashboard. Every /api/re
-    // endpoint would 403 with code:'email_unverified', so there is nothing to
-    // show behind the gate until they confirm.
-    if (me.verification_required && !me.email_verified) {
-      showVerifyGate('Confirm ' + me.email + ' to start using Archta. '
-        + 'We sent you a link — check your inbox, and your spam folder.');
-      return;
-    }
-
     RE.state.user = me;
     applyNavForRole(me.role);
     renderWorkspaceSwitcher(me);
@@ -1192,26 +1128,6 @@
 
     await renderRoute();
     refreshCounts();
-  }
-
-  // The "confirm your email" holding screen. The token is KEPT — it is what
-  // authorises the resend — but the app is not shown, because everything behind
-  // it would 403.
-  function showVerifyGate(message) {
-    RE.state.user = null;
-    el('app').hidden = true;
-    el('gate').hidden = false;
-    el('overlay').innerHTML = '';
-    showGateForm('form-verify');
-
-    el('verify-sub').textContent = 'Almost there.';
-    el('verify-ok').classList.add('hidden');
-
-    var pending = el('verify-error');
-    pending.textContent = message || 'Confirm your email address to continue.';
-    pending.classList.remove('hidden');
-
-    el('btn-resend-verify').classList.remove('hidden');
   }
 
   function showGate() {
@@ -1280,13 +1196,6 @@
       // The API being unreachable at boot is worth saying out loud, because
       // otherwise the sign-in form looks fine and fails on submit.
       gateError('login-error', 'Cannot reach the server at ' + API_BASE + '.');
-    }
-
-    // #/verify?token=… is the emailed confirmation link. Consumed before
-    // anything else, because it both confirms the address and signs them in.
-    if (window.location.hash.indexOf('#/verify') === 0) {
-      await consumeVerificationLink();
-      return;
     }
 
     // #/accept-invite?token=… is the emailed team-invite link.
@@ -1370,35 +1279,6 @@
     }
   }
 
-  async function consumeVerificationLink() {
-    el('gate').hidden = false;
-    showGateForm('form-verify');
-
-    var verifyToken = (/[?&#]token=([^&]+)/.exec(window.location.hash) || [])[1];
-
-    if (!verifyToken) {
-      el('verify-sub').textContent = '';
-      el('verify-error').textContent = 'This confirmation link is incomplete. Sign in and ask for a new one.';
-      el('verify-error').classList.remove('hidden');
-      return;
-    }
-
-    try {
-      var result = await authApi.post('/verify-email', { token: decodeURIComponent(verifyToken) });
-      setToken(result.token);
-      window.location.hash = '#/dashboard';
-      await enterApp();
-      toast('Email confirmed. Welcome to Archta.', 'ok');
-    } catch (err) {
-      el('verify-sub').textContent = '';
-      el('verify-error').textContent = err.message;
-      el('verify-error').classList.remove('hidden');
-      // Resend only helps if they can prove who they are, and an expired link
-      // proves nothing.
-      el('btn-resend-verify').classList.toggle('hidden', !token);
-    }
-  }
-
   // ── Public surface ────────────────────────────────────────────────────
   var RE = window.RE = {
     API_BASE: API_BASE,
@@ -1440,6 +1320,7 @@
     values: values,
     onClick: onClick,
     copyText: copyText,
+    applyDynamicStyles: applyDynamicStyles,
 
     toast: toast,
     modal: modal,

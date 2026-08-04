@@ -31,22 +31,22 @@
      The access token arrives in the URL FRAGMENT, not the query string: a
      fragment is never sent to a server, so the link cannot leak through
      access logs or a referrer header. -->
-<body style="background:var(--ink)">
+<body class="portal-body">
 
-<div style="max-width:640px;margin:0 auto;padding:26px 18px 70px">
+<div class="portal-wrap">
 
-  <header style="display:flex;align-items:center;gap:10px;padding-bottom:18px;border-bottom:1px solid var(--line);margin-bottom:26px">
-    <span style="width:24px;height:24px;display:grid;place-items:center;border:1px solid var(--line-gold);border-radius:5px;color:var(--gold);font-size:11px">◆</span>
-    <span class="serif" style="font-size:16px;letter-spacing:.03em" id="developer-name">Your account</span>
+  <header class="portal-header">
+    <span class="portal-mark">◆</span>
+    <span class="serif portal-brand" id="developer-name">Your account</span>
   </header>
 
   <div id="portal-view">
-    <div class="skeleton" style="width:60%;height:26px"></div>
-    <div class="skeleton" style="width:85%"></div>
-    <div class="skeleton" style="width:70%"></div>
+    <div class="skeleton portal-skeleton-title"></div>
+    <div class="skeleton portal-skeleton-line-1"></div>
+    <div class="skeleton portal-skeleton-line-2"></div>
   </div>
 
-  <footer style="margin-top:44px;padding-top:18px;border-top:1px solid var(--line);font-size:11.5px;color:var(--text-faint)" id="portal-foot"></footer>
+  <footer class="portal-footer" id="portal-foot"></footer>
 </div>
 
 <div class="toasts" id="toasts"></div>

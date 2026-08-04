@@ -611,6 +611,10 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   padding: 6px;
 }
 
+/* Smaller than the default .empty padding (34px 20px) — this one sits inside
+   an already-compact dropdown, not a full card. */
+.search-results .empty { padding: 22px; }
+
 .search-section {
   padding: 8px 10px 4px;
   font-size: 9.5px;
@@ -661,7 +665,9 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 }
 
 .card-title { font-size: 13.5px; font-weight: 600; }
-.card-head .spacer { flex: 1; }
+/* Unscoped: used inside .card-head, .modal-head and .toast alike — always
+   the same job, pushing whatever follows it to the far edge of a flex row. */
+.spacer { flex: 1; }
 .card-body { padding: 18px; }
 .card-body.flush { padding: 0; }
 
@@ -1160,6 +1166,11 @@ table.data td.num, table.data th.num {
   gap: 12px;
 }
 
+/* The title/eyebrow/sub column, sized so the close button never gets
+   squeezed and long titles wrap instead of overflowing. */
+.drawer-head-text { flex: 1; min-width: 0; }
+.drawer-head .page-title { font-size: 20px; margin-top: 3px; }
+
 .drawer-body { padding: 20px 22px 40px; overflow-y: auto; flex: 1; }
 .drawer-section + .drawer-section { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
 
@@ -1251,6 +1262,9 @@ table.data td.num, table.data th.num {
 
 .brief-meta { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
 .brief-actions { display: flex; align-items: center; gap: 11px; margin-top: 18px; flex-wrap: wrap; }
+
+/* A project card's own name, bolder than the page-sub location line under it. */
+.project-card-title { font-size: 15px; font-weight: 600; }
 
 /* Unit mix bar. */
 .units-bar {
@@ -1414,6 +1428,17 @@ table.data td.num, table.data th.num {
 .bars > div:hover .bar { background: var(--gold); }
 .bars .bar-label { font-family: var(--mono); font-size: 9px; color: var(--text-faint); white-space: nowrap; }
 
+/* Unit floor plan / photo thumbnails, in the media modal. */
+.media-card { text-decoration: none; overflow: hidden; }
+.media-card-body { padding: 9px 11px; }
+.media-thumb-icon { height: 96px; display: grid; place-items: center; background: var(--panel-2); font-size: 22px; opacity: .4; }
+.media-thumb-img { width: 100%; height: 96px; object-fit: cover; display: block; }
+
+/* CSV import preview — errors and the row-by-row outcome list, both
+   independently scrollable so a long CSV doesn't blow out the modal. */
+.import-errors { font-size: 12px; max-height: 130px; overflow: auto; }
+.import-preview { font-size: 12px; max-height: 170px; overflow: auto; color: var(--text-dim); }
+
 /* Team logo — a square preview with a "Change" overlay that only appears on
    hover, so the logo itself is what a workspace sees day to day rather than
    a permanently-visible upload control. */
@@ -1478,6 +1503,8 @@ table.data td.num, table.data th.num {
 .empty { padding: 34px 20px; text-align: center; color: var(--text-faint); font-size: 13px; }
 .empty-icon { font-size: 22px; opacity: 0.32; display: block; margin-bottom: 9px; }
 .empty strong { display: block; color: var(--text-dim); font-weight: 500; margin-bottom: 4px; font-size: 14px; }
+/* A one-line empty state folded into a widget rather than its own card. */
+.empty.compact { padding: 14px; }
 
 .notice {
   padding: 11px 14px;
@@ -1491,6 +1518,8 @@ table.data td.num, table.data th.num {
 
 .notice.info { background: var(--steel-wash); border-color: rgba(127, 158, 198, 0.3); color: var(--steel); }
 .notice.ok { background: var(--moss-wash); border-color: rgba(116, 171, 132, 0.3); color: var(--moss); }
+/* A secondary, explanatory note rather than the primary message on screen. */
+.notice.compact { font-size: 12px; }
 /* Unresolved but not urgent — an unallocated credit needs a decision, not a
    fire drill. The only gold notice, and clickable rather than merely read. */
 .notice.warn { background: var(--gold-wash); border-color: rgba(201, 164, 92, 0.35); color: var(--gold-soft); cursor: pointer; }
@@ -1521,6 +1550,39 @@ table.data td.num, table.data th.num {
 .mb-2 { margin-bottom: 18px; }
 .hidden { display: none !important; }
 .divider { height: 1px; background: var(--line); margin: 18px 0; }
+
+/* ── CSP-safe layout/text utilities ──────────────────────────────────────
+   Cover what used to be one-off style="" attributes on generated markup —
+   a strict style-src with no 'unsafe-inline' refuses to apply those at all,
+   silently, so every value that used to live inline now lives here instead.
+   Gap/align variants are the small set actually used, not a full scale. */
+.mt-0 { margin-top: 0; }
+.mt-2px { margin-top: 2px; }
+.mt-8px { margin-top: 8px; }
+.mb-0 { margin-bottom: 0; }
+.mb-3px { margin-bottom: 3px; }
+.opacity-60 { opacity: .6; }
+.lh-loose { line-height: 1.6; }
+.cursor-pointer { cursor: pointer; }
+.center-pad { padding: 20px; text-align: center; }
+.mono-input { font-family: var(--mono); font-size: 12px; }
+.label-caps { text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
+
+.fs-11-5 { font-size: 11.5px; }
+.fs-12 { font-size: 12px; }
+.fs-13 { font-size: 13px; }
+.fs-13-5 { font-size: 13.5px; }
+.fs-14 { font-size: 14px; }
+.fs-21 { font-size: 21px; }
+
+.flex-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.flex-row.justify-between { justify-content: space-between; }
+.flex-row.align-start { align-items: flex-start; }
+.flex-row.align-end { align-items: flex-end; }
+.flex-row.gap-10 { gap: 10px; }
+.flex-row.gap-14 { gap: 14px; }
+.flex-row.gap-16 { gap: 16px; }
+.flex-row.gap-18 { gap: 18px; }
 
 /* Screens fade in one step. Nothing staggers, nothing bounces — this is a
    tool people have open eight hours a day. */
@@ -1615,6 +1677,45 @@ table.data td.num, table.data th.num {
   .icon-btn { width: 44px; height: 44px; font-size: 17px; }
   .btn-quiet { height: 36px; padding: 0 12px; }
 }
+
+/* ── Buyer portal (portal.html/portal.js) ─────────────────────────────── */
+.portal-body { background: var(--ink); }
+.portal-wrap { max-width: 640px; margin: 0 auto; padding: 26px 18px 70px; }
+.portal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 26px;
+}
+.portal-mark {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-gold);
+  border-radius: 5px;
+  color: var(--gold);
+  font-size: 11px;
+}
+.portal-brand { font-size: 16px; letter-spacing: .03em; }
+.portal-skeleton-title { width: 60%; height: 26px; }
+.portal-skeleton-line-1 { width: 85%; }
+.portal-skeleton-line-2 { width: 70%; }
+.portal-footer {
+  margin-top: 44px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.portal-greeting { font-size: 27px; letter-spacing: -.02em; }
+.portal-empty-body { text-align: center; padding: 44px 22px; }
+.portal-empty-body.sm { padding: 30px 20px; }
+.portal-empty-icon { font-size: 26px; opacity: .3; margin-bottom: 12px; }
+.portal-empty-title { font-size: 20px; margin-bottom: 8px; }
 
 /* Below this the search bar is squeezed between the hamburger and "Sign
    out" until there is no usable width left to type a search into. The text

@@ -451,7 +451,7 @@
               // rule-based brief reads as the AI's work, and nobody knows to look
               // at it more carefully or to try again.
               (brief && brief.payload && brief.payload.model_error
-                ? '<div class="notice info mt-1" style="margin-bottom:0">' +
+                ? '<div class="notice info mt-1 mb-0">' +
                     'The AI was unavailable this morning, so this brief was built from the rules. ' +
                     'The figures are correct; only the wording is plainer.' +
                   '</div>'
@@ -576,7 +576,7 @@
       '</div>' +
 
       '<div class="mt-2">' +
-        card(null, '<div style="padding:20px;text-align:center">' +
+        card(null, '<div class="center-pad">' +
           '<a class="btn brass" href="#/documents">Go to Documents</a>' +
         '</div>') +
       '</div>';
@@ -584,12 +584,12 @@
 
   function inventoryHtml(units) {
     var total = units.available + units.reserved + units.sold;
-    if (!total) return '<div class="empty" style="padding:14px">No units yet. <a class="link-quiet" href="#/projects">Create a project</a> to add some.</div>';
-    var pct = function (n) { return (n / total) * 100 + '%'; };
+    if (!total) return '<div class="empty compact">No units yet. <a class="link-quiet" href="#/projects">Create a project</a> to add some.</div>';
+    var pct = function (n) { return (n / total) * 100; };
     return '<div class="units-bar">' +
-        '<div class="seg-sold" style="width:' + pct(units.sold) + '"></div>' +
-        '<div class="seg-reserved" style="width:' + pct(units.reserved) + '"></div>' +
-        '<div class="seg-available" style="width:' + pct(units.available) + '"></div>' +
+        '<div class="seg-sold" data-w="' + pct(units.sold) + '"></div>' +
+        '<div class="seg-reserved" data-w="' + pct(units.reserved) + '"></div>' +
+        '<div class="seg-available" data-w="' + pct(units.available) + '"></div>' +
       '</div>' +
       '<div class="units-legend">' +
         '<span><i class="swatch sold"></i>Sold ' + units.sold + '</span>' +
@@ -868,15 +868,15 @@
     var taken = (p.units_sold || 0) + (p.units_reserved || 0);
     var pct = total ? Math.round((taken / total) * 100) : 0;
 
-    return '<div class="card" style="cursor:pointer" data-project-open="' + esc(p.id) + '">' +
+    return '<div class="card cursor-pointer" data-project-open="' + esc(p.id) + '">' +
       '<div class="card-body">' +
-        '<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">' +
-          '<div><div style="font-size:15px;font-weight:600">' + esc(p.name) + '</div>' +
+        '<div class="flex-row justify-between align-start">' +
+          '<div><div class="project-card-title">' + esc(p.name) + '</div>' +
           '<div class="page-sub">' + esc(p.location || 'No location set') + '</div></div>' +
           badge(p.status) +
         '</div>' +
-        '<div class="mt-2"><div class="meter gold"><i style="width:' + pct + '%"></i></div>' +
-          '<div class="units-legend mt-1" style="font-size:11.5px">' +
+        '<div class="mt-2"><div class="meter gold"><i data-w="' + pct + '"></i></div>' +
+          '<div class="units-legend mt-1 fs-11-5">' +
             '<span>' + (p.units_sold || 0) + ' sold</span>' +
             '<span>' + (p.units_reserved || 0) + ' reserved</span>' +
             '<span>' + (p.units_available || 0) + ' available</span>' +
@@ -1065,12 +1065,12 @@
         (media.length
           ? '<div class="grid cols-3 mb-2">' + media.map(function (m) {
               var isPdf = /\.pdf$/i.test(m.url);
-              return '<a class="card" style="text-decoration:none;overflow:hidden" href="' + esc(m.url) + '" target="_blank" rel="noopener">' +
+              return '<a class="card media-card" href="' + esc(m.url) + '" target="_blank" rel="noopener">' +
                 (isPdf
-                  ? '<div style="height:96px;display:grid;place-items:center;background:var(--panel-2);font-size:22px;opacity:.4">▤</div>'
-                  : '<img src="' + esc(m.url) + '" alt="' + esc(m.label || m.kind) + '" style="width:100%;height:96px;object-fit:cover;display:block">') +
-                '<div class="card-body" style="padding:9px 11px">' +
-                  '<div style="font-size:12px">' + esc(m.label || String(m.kind).replace(/_/g, ' ')) + '</div>' +
+                  ? '<div class="media-thumb-icon">▤</div>'
+                  : '<img src="' + esc(m.url) + '" alt="' + esc(m.label || m.kind) + '" class="media-thumb-img">') +
+                '<div class="card-body media-card-body">' +
+                  '<div class="fs-12">' + esc(m.label || String(m.kind).replace(/_/g, ' ')) + '</div>' +
                   '<div class="cell-meta">' + esc(fmtDate(m.uploaded_at)) + '</div>' +
                 '</div></a>';
             }).join('') + '</div>'
@@ -1270,7 +1270,7 @@
         '<div class="field"><label for="i-file">CSV file</label>' +
           '<input class="input" id="i-file" type="file" accept=".csv,text/csv"></div>' +
         '<div class="field"><label for="i-csv">…or paste it</label>' +
-          '<textarea class="textarea" id="i-csv" name="csv" rows="7" style="font-family:var(--mono);font-size:12px" placeholder="unit_number,unit_type,size_sqm,list_price&#10;B12,3-bed terrace,145,45000000"></textarea></div>' +
+          '<textarea class="textarea mono-input" id="i-csv" name="csv" rows="7" placeholder="unit_number,unit_type,size_sqm,list_price&#10;B12,3-bed terrace,145,45000000"></textarea></div>' +
         '<div id="i-mapping" class="hidden mt-2"></div>' +
         '<div id="i-result"></div>',
       submitLabel: 'Preview import',
@@ -1292,7 +1292,7 @@
               esc(result.would_create + ' units will be created' +
                 (result.errors.length ? '; ' + result.errors.length + ' rows will be skipped' : '') + '.') +
               (result.errors.length
-                ? '<div class="mt-1" style="font-size:12px">' + result.errors.slice(0, 6).map(function (e) {
+                ? '<div class="mt-1 fs-12">' + result.errors.slice(0, 6).map(function (e) {
                     return 'Row ' + e.row + ': ' + esc(e.error);
                   }).join('<br>') + '</div>'
                 : '') +
@@ -1467,13 +1467,13 @@
         'pass. Everything beyond the buyer\'s name is optional; a <code>unit_number</code> with no plan columns just ' +
         'reserves the unit with no schedule attached. Map your own column headings below. ' +
         '<a class="link-quiet" href="' + R.API_BASE + '/re/imports/template/customers" target="_blank" rel="noopener">Download the template</a></p>' +
-        '<div class="notice info" style="font-size:12px">' +
+        '<div class="notice info compact">' +
           'Imported payments settle the schedule silently — no receipts are emailed for money that arrived months ago.' +
         '</div>' +
         '<div class="field"><label for="ic-file">CSV file</label>' +
           '<input class="input" id="ic-file" type="file" accept=".csv,text/csv"></div>' +
         '<div class="field"><label for="ic-csv">…or paste it</label>' +
-          '<textarea class="textarea" id="ic-csv" name="csv" rows="7" style="font-family:var(--mono);font-size:12px" placeholder="full_name,phone,email,project,unit_number,list_price,total_amount,number_of_installments,start_date,amount_paid_to_date"></textarea></div>' +
+          '<textarea class="textarea mono-input" id="ic-csv" name="csv" rows="7" placeholder="full_name,phone,email,project,unit_number,list_price,total_amount,number_of_installments,start_date,amount_paid_to_date"></textarea></div>' +
         '<div id="ic-mapping" class="hidden mt-2"></div>' +
         '<div id="ic-result"></div>',
       submitLabel: 'Preview import',
@@ -1493,13 +1493,13 @@
               esc(result.rows + ' rows ready' + (result.errors.length ? ', ' + result.errors.length + ' with problems' : '') + '.') +
             '</div>' +
             (result.errors.length
-              ? '<div class="mt-1" style="font-size:12px;max-height:130px;overflow:auto">' +
+              ? '<div class="mt-1 import-errors">' +
                   result.errors.map(function (e) { return 'Row ' + e.row + ': ' + esc(e.error); }).join('<br>') + '</div>'
               : '') +
-            '<div class="mt-1" style="font-size:12px;max-height:170px;overflow:auto;color:var(--text-dim)">' +
+            '<div class="mt-1 import-preview">' +
               result.preview.slice(0, 25).map(function (p) {
                 var outcome = IMPORT_OUTCOME_LABEL[p.outcome] || 'buyer only';
-                return '<b>' + esc(p.full_name) + '</b> <span class="mono" style="opacity:.6">[' + esc(outcome) + ']</span>' +
+                return '<b>' + esc(p.full_name) + '</b> <span class="mono opacity-60">[' + esc(outcome) + ']</span>' +
                   (p.conflict ? ' <b class="clay">⚠ conflict</b>' : '') +
                   ' — ' + esc(p.actions.join('; '));
               }).join('<br>') +
@@ -1585,7 +1585,7 @@
           stat('Paid', nairaShort(totalPaid), { tone: 'moss' }) +
           stat('Overdue', nairaShort(overdue), { tone: overdue ? 'clay' : null }) +
         '</div>' +
-        '<div class="mt-2"><div class="meter"><i style="width:' + pct + '%"></i></div>' +
+        '<div class="mt-2"><div class="meter"><i data-w="' + pct + '"></i></div>' +
         '<div class="page-sub">' + pct + '% of the plan settled</div></div>' +
 
         '<div class="btn-row mt-2">' +
@@ -1618,7 +1618,7 @@
           var paidTotal = paidRows.reduce(function (sum, s) { return sum + Number(s.amount_due || 0); }, 0);
 
           return '<div class="drawer-section">' +
-            '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center">' +
+            '<div class="flex-row justify-between gap-10">' +
               '<div><b>' + esc(unit.unit_number ? 'Unit ' + unit.unit_number : 'Reservation') + '</b>' +
               '<div class="page-sub">' + esc([project.name, project.location].filter(Boolean).join(', ')) + '</div></div>' +
               badge(r.status) +
@@ -1641,6 +1641,7 @@
         (reservations.length ? '' : '<div class="drawer-section">' +
           R.emptyState('No reservations yet', 'This buyer has not been allocated a unit.',
             '<button class="btn primary" id="d-reserve">Create a reservation</button>') + '</div>');
+      R.applyDynamicStyles(panel.body);
 
       var reserveButton = R.qs('#d-reserve', panel.body);
       if (reserveButton) {
@@ -1827,7 +1828,7 @@
           stat('Current tenancy ends', fmtDate(state.current_tenancy_end_date), { tone: 'clay' }) +
         '</div>' +
 
-        '<div class="notice info" style="font-size:12px">' +
+        '<div class="notice info compact">' +
           'The current plan and its payment history are kept exactly as they are. A new rent schedule is ' +
           'created for the renewal period, and the tenancy end date moves forward to match.' +
         '</div>' +
@@ -1912,7 +1913,7 @@
           state.paid_rows + ' paid, ' + state.unpaid_rows + ' unpaid.' +
         '</p>' +
 
-        '<div class="notice info" style="font-size:12px">' +
+        '<div class="notice info compact">' +
           'The old plan is kept and marked superseded. Paid installments and their receipts are untouched; ' +
           'the ' + state.unpaid_rows + ' unpaid one(s) are waived and replaced by the schedule below.' +
         '</div>' +
@@ -2969,7 +2970,7 @@
           '<div class="bars">' + collections.map(function (m) {
             var height = Math.max(2, Math.round((m.amount / peak) * 100));
             return '<div title="' + esc(m.month + ': ' + naira(m.amount)) + '">' +
-              '<div class="bar" style="height:' + height + '%"></div>' +
+              '<div class="bar" data-h="' + height + '"></div>' +
               '<div class="bar-label">' + esc(m.month.slice(5)) + '</div></div>';
           }).join('') + '</div>' +
           '<div class="page-sub mt-1">Peak month ' + naira(peak) + '</div>') +
@@ -3121,7 +3122,7 @@
               '<span>Alert the sales rep each morning when their buyer misses a payment</span></label>' +
             '<label class="check"><input type="checkbox" name="notify_payment_reminders"' + (settings.notify_payment_reminders ? ' checked' : '') + '>' +
               '<span>Text buyers automatically — 3 days before a payment is due, and the morning after one is missed' +
-              '<br><span class="field-hint" style="margin-top:2px">Goes to your customers and costs per SMS, so this one is off until you turn it on. ' +
+              '<br><span class="field-hint mt-2px">Goes to your customers and costs per SMS, so this one is off until you turn it on. ' +
               'Buyers past a gentle reminder are skipped — those are conversations, not texts.</span></span></label>' +
             '<div class="field mt-2"><label for="s-rate">Default commission rate</label>' +
               '<input class="input" id="s-rate" name="default_commission_rate" type="number" min="0" max="100" step="0.1" value="' + esc(settings.default_commission_rate || 0) + '">' +
@@ -3291,7 +3292,7 @@
     // what has to stay out of their way rather than 403 on click.
     var canEditLogo = R.can('settings.write');
     var logoBlock = canEditLogo
-      ? '<div class="card mb-2"><div class="card-body" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">' +
+      ? '<div class="card mb-2"><div class="card-body flex-row gap-16">' +
           '<div class="logo-upload" id="logo-upload" tabindex="0" role="button" ' +
               'aria-label="' + (logoUrl ? 'Change workspace logo' : 'Add workspace logo') + '">' +
             (logoUrl
@@ -3299,9 +3300,9 @@
               : '<div class="logo-upload-empty">Add logo</div>') +
             '<div class="logo-upload-overlay">' + (logoUrl ? 'Change' : 'Add logo') + '</div>' +
           '</div>' +
-          '<input type="file" id="logo-file" accept="image/jpeg,image/png,image/webp" style="display:none">' +
-          '<div><div class="cell-primary" style="margin-bottom:3px">Workspace logo</div>' +
-            '<p class="page-sub" style="margin-top:0">JPEG, PNG or WebP, up to 2MB. Shown here and on allocation letters and receipts.</p></div>' +
+          '<input type="file" id="logo-file" accept="image/jpeg,image/png,image/webp" class="hidden">' +
+          '<div><div class="cell-primary mb-3px">Workspace logo</div>' +
+            '<p class="page-sub mt-0">JPEG, PNG or WebP, up to 2MB. Shown here and on allocation letters and receipts.</p></div>' +
         '</div></div>'
       : '';
 
@@ -3664,7 +3665,7 @@
               '</p></div>'
           : '') +
 
-        '<p class="muted" style="font-size:13px">' +
+        '<p class="muted fs-13">' +
           'Their sign-in stops working immediately, every session they have open ends, and their sales-rep ' +
           'record is deactivated rather than deleted so past sales still show who made them.' +
         '</p>',
@@ -3708,7 +3709,7 @@
           return '<tr>' +
             '<td class="muted nowrap">' + esc(R.fmtDateTime(e.created_at)) + '</td>' +
             '<td class="muted">' + esc(e.actor_email || e.actor_kind) + '</td>' +
-            '<td><span class="mono" style="font-size:11.5px">' + esc(e.action) + '</span></td>' +
+            '<td><span class="mono fs-11-5">' + esc(e.action) + '</span></td>' +
             '<td class="muted">' + esc(e.summary || '') + '</td>' +
           '</tr>';
         },

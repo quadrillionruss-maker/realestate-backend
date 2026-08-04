@@ -72,7 +72,7 @@
       </ul>
     </div>
 
-    <div class="faint" style="font-size:12px">Paystack, bank transfer, cash and POS.</div>
+    <div class="faint fs-12">Paystack, bank transfer, cash and POS.</div>
   </section>
 
   <section class="gate-form-wrap">
@@ -159,43 +159,16 @@
         </div>
       </form>
 
-      <!-- Forgot password -->
-      <form id="form-forgot" autocomplete="on" novalidate hidden>
+      <!-- Forgot password — support-assisted for now, not self-service.
+           Self-service reset emails would only ever reach this deployment's
+           own Resend account owner, not the buyer or developer asking, so
+           there is no form here to submit. -->
+      <form id="form-forgot" novalidate hidden>
         <h1 class="gate-title">Reset your password</h1>
-        <p class="gate-sub">We will email you a link. It works once and expires within the hour.</p>
-
-        <div class="field">
-          <label for="forgot-email">Email</label>
-          <input class="input" id="forgot-email" type="email" required autocomplete="username"
-                 placeholder="you@company.com" spellcheck="false">
-        </div>
-
-        <p class="notice ok hidden" id="forgot-ok"></p>
-        <p class="field-error hidden" id="forgot-error" role="alert"></p>
-
-        <button class="btn primary block lg mt-1" type="submit" id="forgot-submit">Send reset link</button>
+        <p class="gate-sub">Please contact support to reset your password.</p>
 
         <div class="gate-foot">
           <button class="link-quiet" type="button" id="link-back-login">Back to sign in</button>
-        </div>
-      </form>
-
-      <!-- Confirm your email. Not a form the user fills in — the token comes
-           from the emailed link, so this is a status screen with a resend
-           button on it. -->
-      <form id="form-verify" novalidate hidden>
-        <h1 class="gate-title">Confirm your email</h1>
-        <p class="gate-sub" id="verify-sub">Checking your link…</p>
-
-        <p class="notice ok hidden" id="verify-ok"></p>
-        <p class="notice hidden" id="verify-error" role="alert"></p>
-
-        <button class="btn primary block lg mt-1 hidden" type="button" id="btn-resend-verify">
-          Send me a new link
-        </button>
-
-        <div class="gate-foot">
-          <button class="link-quiet" type="button" id="link-verify-signin">Back to sign in</button>
         </div>
       </form>
 

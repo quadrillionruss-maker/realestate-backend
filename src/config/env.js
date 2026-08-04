@@ -39,22 +39,6 @@ const env = {
     // when verifying the ID token here. Absent → the button is not rendered.
     googleClientId: process.env.GOOGLE_CLIENT_ID || '',
     resetTokenTtlMinutes: parseInt(process.env.RESET_TOKEN_TTL_MINUTES || '60', 10),
-
-    // Registration used to accept any address, so anyone could sign up as
-    // ceo@somedeveloper.com and be inside the product immediately. In a market
-    // where a developer's name is the whole asset, that is an impersonation
-    // problem before it is a security one.
-    //
-    // DEFAULTS TO WHETHER EMAIL CAN ACTUALLY BE SENT. Requiring verification on
-    // a deployment with no RESEND_API_KEY would brick the product: nobody could
-    // ever receive the link, so nobody could ever get in — a self-inflicted
-    // outage dressed as a security feature. Set REQUIRE_EMAIL_VERIFICATION
-    // explicitly to override in either direction.
-    requireEmailVerification: process.env.REQUIRE_EMAIL_VERIFICATION
-      ? process.env.REQUIRE_EMAIL_VERIFICATION === 'true'
-      : Boolean(process.env.RESEND_API_KEY && process.env.RESEND_FROM),
-
-    verifyTokenTtlHours: parseInt(process.env.VERIFY_TOKEN_TTL_HOURS || '48', 10),
   },
 
   // Where the browser app lives. Used to build password-reset and buyer-portal

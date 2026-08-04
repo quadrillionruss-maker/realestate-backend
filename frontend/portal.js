@@ -99,6 +99,19 @@
 
   function el(id) { return document.getElementById(id); }
 
+  // A computed value (the payment progress meter's width) cannot live in a
+  // CSS class — the number comes from the data. It also can't live in a
+  // style="" attribute: this page is served under a Content-Security-Policy
+  // with no 'unsafe-inline' in style-src, which silently refuses to apply
+  // any inline style attribute. Setting the CSSOM property directly from JS,
+  // after the element already exists, is unaffected by that — so markup
+  // carries `data-w="37"` instead, and this runs once against it.
+  function applyDynamicStyles(root) {
+    Array.prototype.slice.call(root.querySelectorAll('[data-w]')).forEach(function (n) {
+      n.style.width = n.dataset.w + '%';
+    });
+  }
+
   function toast(message, kind) {
     var node = document.createElement('div');
     node.className = 'toast ' + (kind || '');
@@ -151,10 +164,10 @@
   // for a new link" is an instruction they can act on.
   function fail(message, detail) {
     el('portal-view').innerHTML =
-      '<div class="card"><div class="card-body" style="text-align:center;padding:44px 22px">' +
-        '<div style="font-size:26px;opacity:.3;margin-bottom:12px">◇</div>' +
-        '<div class="serif" style="font-size:20px;margin-bottom:8px">' + esc(message) + '</div>' +
-        '<p class="muted" style="font-size:13.5px;line-height:1.6">' +
+      '<div class="card"><div class="card-body portal-empty-body">' +
+        '<div class="portal-empty-icon">◇</div>' +
+        '<div class="serif portal-empty-title">' + esc(message) + '</div>' +
+        '<p class="muted fs-13-5 lh-loose">' +
           esc(detail || 'Please contact your developer\'s sales office and ask them to send you a fresh link.') +
         '</p>' +
       '</div></div>';
@@ -199,20 +212,20 @@
     var isRental = Boolean(tenancy) || (nextDue && nextDue.property_type === 'rental');
 
     el('portal-view').innerHTML =
-      '<h1 class="serif" style="font-size:27px;font-weight:400;letter-spacing:-.02em">' +
+      '<h1 class="serif portal-greeting">' +
         'Hello, ' + esc(String(account.customer.full_name).split(' ')[0]) + '.' +
       '</h1>' +
-      '<p class="muted mt-1" style="font-size:14px">Here is where your payments stand.</p>' +
+      '<p class="muted mt-1 fs-14">Here is where your payments stand.</p>' +
 
       // Headline: paid, balance, and the meter between them.
       '<div class="card mt-2"><div class="card-body">' +
-        '<div style="display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap">' +
+        '<div class="flex-row justify-between gap-18">' +
           '<div><div class="stat-label">Paid so far</div>' +
             '<div class="stat-value moss">' + esc(naira(s.total_paid)) + '</div></div>' +
-          '<div style="text-align:right"><div class="stat-label">Balance</div>' +
+          '<div class="right"><div class="stat-label">Balance</div>' +
             '<div class="stat-value">' + esc(naira(s.balance)) + '</div></div>' +
         '</div>' +
-        '<div class="meter mt-2"><i style="width:' + s.progress_percent + '%"></i></div>' +
+        '<div class="meter mt-2"><i data-w="' + s.progress_percent + '"></i></div>' +
         '<div class="page-sub mt-1">' + s.progress_percent + '% of ' + esc(naira(s.total_contracted)) + ' settled</div>' +
       '</div></div>' +
 
@@ -221,11 +234,11 @@
       // first thing a tenant opens this page to answer.
       (tenancy
         ? '<div class="card mt-2"><div class="card-body">' +
-            '<div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-end;flex-wrap:wrap">' +
+            '<div class="flex-row justify-between gap-14 align-end">' +
               '<div><div class="stat-label">Tenancy ends</div>' +
                 '<div class="stat-value">' + esc(fmtDate(tenancy.tenancy_end_date)) + '</div></div>' +
               (tenancy.unit_number
-                ? '<div class="page-sub" style="text-align:right">Unit ' + esc(tenancy.unit_number) +
+                ? '<div class="page-sub right">Unit ' + esc(tenancy.unit_number) +
                   (tenancy.project_name ? '<br>' + esc(tenancy.project_name) : '') + '</div>'
                 : '') +
             '</div>' +
@@ -256,8 +269,8 @@
       (nextDue
         ? '<div class="card mt-2"><div class="card-body">' +
             '<div class="stat-label">' + (nextDue.property_type === 'rental' ? 'Next rent due' : 'Next payment') + '</div>' +
-            '<div style="display:flex;justify-content:space-between;gap:14px;align-items:flex-end;margin-top:8px;flex-wrap:wrap">' +
-              '<div><div class="mono" style="font-size:21px">' + esc(naira(nextDue.amount_due)) + '</div>' +
+            '<div class="flex-row justify-between gap-14 align-end mt-8px">' +
+              '<div><div class="mono fs-21">' + esc(naira(nextDue.amount_due)) + '</div>' +
                 '<div class="page-sub">due ' + esc(fmtDate(nextDue.due_date)) +
                   (nextDue.unit_number ? ' · Unit ' + esc(nextDue.unit_number) : '') + '</div></div>' +
               '<button class="btn brass" id="btn-pay" data-schedule="' + esc(nextDue.schedule_id) + '">Pay now</button>' +
@@ -267,8 +280,8 @@
 
       (account.reservations.length
         ? account.reservations.map(reservationBlock).join('')
-        : '<div class="card mt-2"><div class="card-body" style="text-align:center;padding:30px 20px">' +
-            '<p class="muted" style="font-size:13.5px;line-height:1.6">' +
+        : '<div class="card mt-2"><div class="card-body portal-empty-body sm">' +
+            '<p class="muted fs-13-5 lh-loose">' +
               'Nothing is on your account yet. Once your sales office records a reservation, it will show up here.' +
             '</p>' +
           '</div></div>') +
@@ -289,6 +302,7 @@
           '</div>'
         : '');
 
+    applyDynamicStyles(el('portal-view'));
     wire();
     if (justPaidSchedule) watchForConfirmation(account);
   }
@@ -360,12 +374,12 @@
         '<span class="badge ' + esc(r.status) + '">' + esc(r.status) + '</span>' +
       '</div>' +
       '<div class="card-body">' +
-        '<div class="page-sub" style="margin-top:0">' +
+        '<div class="page-sub mt-0">' +
           esc([project.name, project.location].filter(Boolean).join(', ')) +
           (unit.unit_type ? ' · ' + esc(unit.unit_type) : '') +
         '</div>' +
         (schedule.length
-          ? '<div class="page-sub mt-2" style="text-transform:uppercase;letter-spacing:.04em;font-size:11px">' +
+          ? '<div class="page-sub mt-2 label-caps">' +
               (rental ? 'Monthly rent' : 'Payment plan') +
             '</div>' +
             '<div class="mt-1">' + schedule.map(function (row) {

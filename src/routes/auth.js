@@ -16,7 +16,6 @@ const env = require('../config/env');
 const { authenticate } = require('../middleware/auth');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const auth = require('../services/authService');
-const notify = require('../services/notificationService');
 const invites = require('../services/inviteService');
 const { ROLE_LABELS, actionsFor, normalizeRole } = require('../services/permissions');
 
@@ -42,40 +41,8 @@ router.get('/config', (_req, res) => {
     google_client_id: env.auth.googleClientId || null,
     allow_registration: env.auth.allowRegistration,
     min_password_length: auth.MIN_PASSWORD_LENGTH,
-    // The sign-up form tells people to expect an email only when one is
-    // actually going to be sent.
-    require_email_verification: env.auth.requireEmailVerification,
   });
 });
-
-// Sends (or re-sends) the confirmation link. Shared by registration and by the
-// "didn't get it?" button on the verify screen, so there is one place that
-// decides what that email says.
-async function sendVerificationEmail(user) {
-  const link = await auth.issueVerificationToken(user.id);
-
-  const result = await notify.sendEmail({
-    orgId: user.id,
-    to: user.email,
-    subject: 'Confirm your email address',
-    html: notify.emailShell({
-      heading: 'Confirm your email address',
-      intro: `Click below to confirm ${user.email} and start using Archta. The link expires in ${env.auth.verifyTokenTtlHours} hours.`,
-      ctaLabel: 'Confirm my email',
-      ctaUrl: link.url,
-      footer: 'If you did not create an Archta account, ignore this email — nothing will happen.',
-    }),
-    text: `Confirm your email address: ${link.url}`,
-    template: 'email_verification',
-  });
-
-  // Returned only outside production and only when email is unconfigured, so
-  // the flow stays testable locally without a Resend key.
-  return {
-    status: result.status,
-    dev_url: env.isDev && !env.resend.apiKey ? link.url : undefined,
-  };
-}
 
 router.post('/register', credentialLimiter, async (req, res, next) => {
   try {
@@ -100,51 +67,9 @@ router.post('/register', credentialLimiter, async (req, res, next) => {
       email: result.user.email,
     });
 
-    // The account exists either way. If the email fails to send they can ask
-    // for another from the verify screen — failing the registration over an
-    // unreachable mail provider would lose the account entirely.
-    let verification = null;
-    if (!result.email_verified) {
-      verification = await sendVerificationEmail(result.user).catch((err) => {
-        console.warn('[auth] verification email failed:', err.message);
-        return { status: 'failed' };
-      });
-    }
-
-    res.status(201).json({ ...result, verification, joined_workspaces: joinedWorkspaces });
-  } catch (e) { next(e); }
-});
-
-// Confirms the address and signs them in — a second trip through the login form
-// immediately after proving they own the email is friction for nothing.
-router.post('/verify-email', credentialLimiter, async (req, res, next) => {
-  try {
-    res.json(await auth.verifyEmail(req.body?.token));
-  } catch (e) { next(e); }
-});
-
-// "Didn't get the email?" Requires a valid token, so it can only ever resend to
-// the address on the caller's own account — otherwise it would be a way to have
-// this server mail an arbitrary stranger on demand.
-router.post('/resend-verification', credentialLimiter, authenticate, async (req, res, next) => {
-  try {
-    const { data: user, error } = await supabaseAdmin
-      .from('users')
-      .select('id, email, email_verified_at')
-      .eq('id', req.user.id)
-      .maybeSingle();
-    if (error) throw error;
-    if (!user) return res.status(404).json({ error: 'User not found' });
-
-    if (user.email_verified_at) {
-      return res.json({ already_verified: true, message: 'That address is already confirmed.' });
-    }
-
-    const verification = await sendVerificationEmail(user);
-    res.json({
-      message: `A new confirmation link is on its way to ${user.email}.`,
-      ...verification,
-    });
+    // No confirmation email — see authService.register. The account is
+    // immediately usable; the browser signs in with the token below.
+    res.status(201).json({ ...result, joined_workspaces: joinedWorkspaces });
   } catch (e) { next(e); }
 });
 
@@ -171,47 +96,16 @@ router.post('/google', credentialLimiter, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-// Always answers the same way. Whether an address has an account here is not
-// something a form should be willing to confirm to a stranger.
-router.post('/forgot-password', credentialLimiter, async (req, res, next) => {
-  try {
-    const { email } = req.body || {};
-    const result = await auth.requestPasswordReset(email);
-
-    if (result.sent) {
-      const html = notify.emailShell({
-        heading: 'Reset your password',
-        intro: `Someone asked to reset the password for ${result.user.email}. This link works once and expires in ${env.auth.resetTokenTtlMinutes} minutes.`,
-        ctaLabel: 'Choose a new password',
-        ctaUrl: result.resetUrl,
-        footer: 'If this was not you, ignore this email — your password has not changed.',
-      });
-
-      await notify.sendEmail({
-        orgId: result.user.id,
-        to: result.user.email,
-        subject: 'Reset your Archta password',
-        html,
-        text: `Reset your password: ${result.resetUrl}`,
-        template: 'password_reset',
-      });
-    }
-
-    const response = {
-      message: 'If an account exists for that address, a reset link is on its way.',
-    };
-
-    // Without Resend configured the email is recorded as 'skipped' and nobody
-    // receives anything, which would make this endpoint quietly useless. In
-    // development the link is returned directly so the flow is still testable;
-    // in production it never is.
-    if (env.isDev && result.sent && !env.resend.apiKey) {
-      response.dev_reset_url = result.resetUrl;
-      response.note = 'RESEND_API_KEY is not set, so no email was sent. This field only appears outside production.';
-    }
-
-    res.json(response);
-  } catch (e) { next(e); }
+// Disabled for now: this deployment's Resend account can only deliver to its
+// own owner, so a self-service reset email would never reach an actual buyer
+// or developer. No token is generated and nothing is emailed — the frontend
+// shows this same message without ever calling the endpoint, but it answers
+// identically if called directly, so there is no working path around it
+// either. authService.requestPasswordReset/resetPassword are left intact
+// (unused for now) to make turning this back on later a small change rather
+// than a rebuild, once Resend is on a paid plan.
+router.post('/forgot-password', credentialLimiter, (_req, res) => {
+  res.json({ message: 'Please contact support to reset your password.' });
 });
 
 router.post('/reset-password', credentialLimiter, async (req, res, next) => {
@@ -282,10 +176,8 @@ router.get('/me', authenticate, async (req, res, next) => {
       // rules maintained by hand in screens.js.
       permissions: actionsFor(role),
       workspaces,
-      // /auth/me deliberately works for an UNVERIFIED user — it is the endpoint
-      // the app calls to discover that it should show the verify screen.
+      // Informational only — nothing in the app gates on this any more.
       email_verified: Boolean(req.user.email_verified_at),
-      verification_required: env.auth.requireEmailVerification,
       // A password-less account signed up with Google and has nothing to
       // "change"; the Settings screen shows "Set a password" instead.
       has_password: Boolean((await auth.findUserByEmail(data.email))?.password_hash),

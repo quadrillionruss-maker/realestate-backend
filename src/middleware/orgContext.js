@@ -95,24 +95,6 @@ function orgContext(req, res, next) {
     return res.status(401).json({ success: false, error: 'Not authenticated.' });
   }
 
-  // ── Email verification gate ──────────────────────────────────────────────
-  // Enforced HERE rather than in authenticate, and the placement is the design:
-  // orgContext guards /api/re only, so an unverified user can still reach
-  // /api/auth/me and /api/auth/resend-verification — which is exactly what the
-  // app needs to show them a "check your email" screen and let them ask for
-  // another link. Gating in authenticate would lock them out of the two
-  // endpoints that let them fix it.
-  //
-  // 403 rather than 401 on purpose: the token is perfectly valid, so a 401
-  // would send the browser back to the sign-in form in a loop. `code` is what
-  // the frontend switches on — messages get reworded, codes do not.
-  if (env.auth.requireEmailVerification && !req.user.email_verified_at) {
-    return res.status(403).json({
-      success: false,
-      code: 'email_unverified',
-      error: 'Confirm your email address to start using Archta. Check your inbox for the link.',
-    });
-  }
   req.orgId = orgId;
   req.userId = req.user.id;
   // Solo accounts own their workspace outright; team accounts carry the role
