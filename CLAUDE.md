@@ -45,7 +45,8 @@ src/
   test/                    syntax + logic + schema (offline), smoke.js (live)
 migrations/                eight idempotent SQL files, applied in order
 frontend/
-  config.js                sets window.__API_BASE__  ← the one file with a host in it
+  config.js                sets window.__API_BASE__
+  vercel.json              security headers; CSP connect-src names the same host as config.js
   index.html               shell: sign-in gate + app
   realestate.css           the whole design system
   realestate.js            session, API, router, UI primitives
@@ -390,10 +391,20 @@ Three deployment gotchas, all covered in `render.yaml`:
 The Storage bucket needs no setup — `re-documents` is created privately on
 first document generation.
 
-**The frontend's API host lives in exactly one place: `frontend/config.js`.**
-Localhost keeps pointing at a local server; everything else uses the
-production constant at the top of that file. Nothing else in the app hardcodes
-a host.
+**The frontend's API host lives in `frontend/config.js`.** Localhost keeps
+pointing at a local server; everything else uses the production constant at
+the top of that file.
+
+**`frontend/vercel.json` also names that same backend origin**, in the
+Content-Security-Policy header's `connect-src` (the frontend is deployed on
+Vercel separately from the API, hence its own header config rather than
+`server.js`'s helmet setup). A CSP that doesn't list the API's real origin
+there blocks every fetch to it outright — the browser refuses the request
+before it leaves the page, which reads as "the app is broken" with nothing
+useful in the Network tab pointing at *why*. When the production domain
+changes, `connect-src` in `frontend/vercel.json` needs the same update
+`frontend/config.js` does — JSON has no comment syntax to leave a note
+in-file, which is why this paragraph is where that note lives instead.
 
 ## Before first use
 

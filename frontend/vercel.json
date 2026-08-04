@@ -29,6 +29,5 @@
         }
       ]
     }
-  ],
-  "UPDATE_ON_DOMAIN_CHANGE": "The Content-Security-Policy value above hardcodes the current Render backend origin in connect-src: https://realestate-backend-e55w.onrender.com. When the app moves to archta.io, update that origin here (and in frontend/config.js — the one file with a host in it per CLAUDE.md), then redeploy. This key is not a Vercel directive — it exists only so the note survives being read later. Safe to delete."
+  ]
 }

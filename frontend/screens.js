@@ -161,6 +161,9 @@
       list_price: ['list_price', 'Price', 'Price (₦)', 'price', 'amount'],
       unit_type: ['unit_type', 'Type', 'type'],
       size_sqm: ['size_sqm', 'Size', 'size', 'sqm'],
+      // Optional — a row that has one overrides the Project dropdown for
+      // itself alone; every other row still falls back to the dropdown.
+      project: ['project', 'Project', 'Project Name', 'project name'],
     },
     customers: {
       full_name: ['full_name', 'Name', 'name', 'Full Name', 'buyer name'],
@@ -1294,7 +1297,10 @@
         '<p class="muted mb-2">Any column headings — map them below. The first row must be the header. ' +
         '<a class="link-quiet" href="' + R.API_BASE + '/re/imports/template/units" target="_blank" rel="noopener">Download the template</a></p>' +
         '<div class="field"><label for="i-project">Project</label>' +
-          '<select class="select" id="i-project" name="project_id" required>' + options(projects, 'id', 'name', projectFilter) + '</select></div>' +
+          '<select class="select" id="i-project" name="project_id" required>' + options(projects, 'id', 'name', projectFilter) + '</select>' +
+          '<p class="field-hint">Every unit is imported into this project, unless the CSV has its own "Project" ' +
+            'column — then that row goes into whichever project it names instead, and this is just the default ' +
+            'for rows that leave it blank.</p></div>' +
         '<div class="field"><label for="i-file">CSV file</label>' +
           '<input class="input" id="i-file" type="file" accept=".csv,text/csv"></div>' +
         '<div class="field"><label for="i-csv">…or paste it</label>' +
@@ -1319,6 +1325,14 @@
             '<div class="notice ' + (result.errors.length ? '' : 'ok') + '">' +
               esc(result.would_create + ' units will be created' +
                 (result.errors.length ? '; ' + result.errors.length + ' rows will be skipped' : '') + '.') +
+              // Only shown once a "Project" column actually split the file
+              // across more than one project — the common case (everything
+              // under the dropdown default) has nothing worth breaking down.
+              (result.by_project && result.by_project.length > 1
+                ? '<div class="mt-1 fs-12">' + result.by_project.map(function (p) {
+                    return esc(p.project_name) + ': ' + p.count;
+                  }).join('<br>') + '</div>'
+                : '') +
               (result.errors.length
                 ? '<div class="mt-1 fs-12">' + result.errors.slice(0, 6).map(function (e) {
                     return 'Row ' + e.row + ': ' + esc(e.error);

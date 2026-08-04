@@ -62,17 +62,26 @@ router.get('/template/:kind', (req, res) => {
 
 const quote = (value) => /[",\n]/.test(String(value)) ? `"${String(value).replace(/"/g, '""')}"` : String(value);
 
-// ── Units into one project ────────────────────────────────────────────────
+// ── Units, into a default project unless a row names its own ───────────────
+// project_id (the dropdown in the import modal) is REQUIRED and is the
+// default every row gets — but a row carrying its own "project" column
+// overrides that default for itself alone, exactly the way the customers
+// import already lets a row's own project name route it, just inverted: here
+// the dropdown wins only when a row is silent, not the other way round.
 router.post('/units', requirePermission('imports.write'), async (req, res, next) => {
   try {
     const { project_id, csv, dry_run } = req.body || {};
     if (!project_id) return res.status(400).json({ error: 'project_id is required' });
     if (!csv) return res.status(400).json({ error: 'csv is required' });
 
-    const { data: project } = await supabaseAdmin
+    const { data: projects } = await supabaseAdmin
       .from('re_projects').select('id, name')
-      .eq('id', project_id).eq('organization_id', req.orgId).maybeSingle();
-    if (!project) return res.status(404).json({ error: 'Project not found' });
+      .eq('organization_id', req.orgId);
+
+    const defaultProject = (projects || []).find((p) => p.id === project_id);
+    if (!defaultProject) return res.status(404).json({ error: 'Project not found' });
+
+    const projectByName = new Map((projects || []).map((p) => [p.name.trim().toLowerCase(), p]));
 
     const { records } = parseCsvToObjects(csv);
     if (!records.length) return res.status(400).json({ error: 'The file has no data rows.' });
@@ -82,6 +91,10 @@ router.post('/units', requirePermission('imports.write'), async (req, res, next)
 
     const rows = [];
     const errors = [];
+    // Keyed by project too, not just unit_number — two different projects can
+    // legitimately share a unit number ("A1" in both Lekki Gardens and Ikeja
+    // Heights), which a plain unit_number Set would have wrongly flagged as a
+    // duplicate the moment rows could span more than one project.
     const seen = new Set();
 
     for (const record of records) {
@@ -90,12 +103,28 @@ router.post('/units', requirePermission('imports.write'), async (req, res, next)
 
       if (!unitNumber) { errors.push({ row: record.__row, error: 'unit_number is required' }); continue; }
       if (price == null || price < 0) { errors.push({ row: record.__row, error: 'list_price must be a number' }); continue; }
-      if (seen.has(unitNumber)) { errors.push({ row: record.__row, error: `duplicate unit_number "${unitNumber}" in this file` }); continue; }
 
-      seen.add(unitNumber);
+      const projectName = (record.project || '').trim();
+      let project = defaultProject;
+      if (projectName) {
+        const resolved = projectByName.get(projectName.toLowerCase());
+        if (!resolved) {
+          errors.push({ row: record.__row, error: `no project named "${projectName}" in this workspace` });
+          continue;
+        }
+        project = resolved;
+      }
+
+      const dedupeKey = `${project.id}|${unitNumber.toLowerCase()}`;
+      if (seen.has(dedupeKey)) {
+        errors.push({ row: record.__row, error: `duplicate unit_number "${unitNumber}" for ${project.name} in this file` });
+        continue;
+      }
+
+      seen.add(dedupeKey);
       rows.push({
         organization_id: req.orgId,
-        project_id,
+        project_id: project.id,
         unit_number: unitNumber,
         unit_type: record.unit_type || null,
         size_sqm: parseAmount(record.size_sqm),
@@ -103,12 +132,22 @@ router.post('/units', requirePermission('imports.write'), async (req, res, next)
       });
     }
 
-    if (dry_run) return res.json({ dry_run: true, would_create: rows.length, errors, sample: rows.slice(0, 5) });
+    // Per-project counts, so the preview can show a "project" column's
+    // override actually took effect rather than trusting it silently — the
+    // common case (no project column at all) still resolves to one entry.
+    const byProject = [...rows.reduce((map, r) => map.set(r.project_id, (map.get(r.project_id) || 0) + 1), new Map())]
+      .map(([id, count]) => ({
+        project_id: id,
+        project_name: (projects || []).find((p) => p.id === id)?.name || '—',
+        count,
+      }));
+
+    if (dry_run) return res.json({ dry_run: true, would_create: rows.length, errors, by_project: byProject, sample: rows.slice(0, 5) });
     if (!rows.length) return res.status(400).json({ error: 'Nothing valid to import.', errors });
 
     const { data, error } = await supabaseAdmin.from('re_units').insert(rows).select();
     if (error?.code === '23505') {
-      return res.status(409).json({ error: 'One or more unit numbers already exist in this project.', errors });
+      return res.status(409).json({ error: 'One or more unit numbers already exist in their project.', errors });
     }
     if (error) throw error;
 
@@ -116,11 +155,13 @@ router.post('/units', requirePermission('imports.write'), async (req, res, next)
       action: 'import.units',
       entityType: 're_units',
       entityId: project_id,
-      summary: `Imported ${data.length} units into ${project.name}`,
-      metadata: { project_id, created: data.length, skipped: errors.length },
+      summary: byProject.length > 1
+        ? `Imported ${data.length} units across ${byProject.length} projects (default: ${defaultProject.name})`
+        : `Imported ${data.length} units into ${defaultProject.name}`,
+      metadata: { project_id, by_project: byProject, created: data.length, skipped: errors.length },
     });
 
-    res.status(201).json({ created: data.length, errors, units: data });
+    res.status(201).json({ created: data.length, errors, by_project: byProject, units: data });
   } catch (e) { next(e); }
 });
 
