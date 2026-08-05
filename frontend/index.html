@@ -3,20 +3,21 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
   <meta name="description" content="Archta — installment sales, allocations, collections and a daily AI brief for property developers.">
   <title>Archta — Real Estate Intelligence</title>
 
   <!-- Favicon as an inline SVG data URI: no extra file, no extra request, and
        no 404 in the console. The gold lozenge is the same mark as the sidebar. -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23090909'/%3E%3Cpath d='M16 7l7 9-7 9-7-9z' fill='%23c9a45c'/%3E%3C/svg%3E">
-  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23090909'/%3E%3Cpath d='M16 7l7 9-7 9-7-9z' fill='%23c9a45c'/%3E%3C/svg%3E">
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png">
 
   <!-- This URL gets pasted into WhatsApp constantly. Without these it previews
        as a blank card; with them every share is a small advertisement.
        og:image must be an absolute URL on a public host — a data URI is not
        fetched by WhatsApp or Twitter, so point this at a real file once you
-       have one. -->
+       have one. realestate-frontend-pi.vercel.app is the confirmed frontend
+       domain. -->
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Archta">
   <meta property="og:title" content="Archta — Real Estate Intelligence">
@@ -24,9 +25,17 @@
   <meta property="og:image" content="https://realestate-frontend-pi.vercel.app/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
+  <!-- Placeholder — archta.io is not live yet. Update once it is. -->
+  <meta property="og:url" content="https://archta.io">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="theme-color" content="#090909">
+  <meta name="theme-color" content="#0A5C42">
 
+  <!-- Fraunces is still live: realestate.css's --serif custom property
+       (line 70) is built on it and is used by the .serif class plus a dozen
+       heading/title selectors across this shell (.gate-mark, .gate-headline,
+       .modal-title, and others) — every editorial-serif heading in the app,
+       per CLAUDE.md's design system. portal.html imports it separately for
+       the same reason. Confirmed still referenced; not removed. -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -72,7 +81,7 @@
       </ul>
     </div>
 
-    <div class="faint fs-12">Paystack, bank transfer, cash and POS.</div>
+    <div class="faint fs-12">Paystack and bank transfer.</div>
   </section>
 
   <section class="gate-form-wrap">
