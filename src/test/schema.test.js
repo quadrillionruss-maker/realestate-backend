@@ -31,7 +31,7 @@ function check(name, cond, detail) {
   // ── Apply migrations, twice, to prove idempotency ───────────────────────
   for (const pass of ['first', 'second']) {
     for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql',
-      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql']) {
+      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -63,7 +63,7 @@ function check(name, cond, detail) {
   `);
 
   for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql',
-      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql']) {
+      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -928,6 +928,74 @@ function check(name, cond, detail) {
       && termii_api_key_last4 === '4a1f' && termii_sender_id === 'Adron';
   } catch (err) { console.log(`       ${err.message}`); }
   check('an org Termii key + sender id round-trips through the row', termiiCredentialsStored);
+
+  // ── 020: commission rate snapshotted onto the reservation ────────────────
+  const reservationCols = (await q(
+    `select column_name from information_schema.columns where table_name='re_reservations'`
+  )).map((r) => r.column_name);
+  check('re_reservations has commission_rate', reservationCols.includes('commission_rate'), reservationCols.join(', '));
+
+  let commissionSnapshotSurvivesRateChange = false;
+  try {
+    const [{ id: rateProjectId }] = await q(
+      `insert into re_projects (organization_id, name) values ($1,'Rate Snapshot Estate') returning id`, [userId]);
+    const [{ id: rateUnitId }] = await q(
+      `insert into re_units (organization_id, project_id, unit_number, list_price)
+       values ($1,$2,'RS-1',9000000) returning id`, [userId, rateProjectId]);
+    const [{ id: rateCustomerId }] = await q(
+      `insert into re_customers (organization_id, full_name) values ($1,'Rate Snapshot Buyer') returning id`, [userId]);
+    const [{ id: rateRepUserId }] = await q(
+      `insert into users (email, full_name) values ('rate-snapshot-rep@example.com','Rate Rep') returning id`);
+    const [{ id: rateRepId }] = await q(
+      `insert into re_sales_reps (organization_id, user_id, commission_rate)
+       values ($1,$2,5) returning id`, [userId, rateRepUserId]);
+
+    // Sold while the rep was on 5% — routes/reservations.js copies the rep's
+    // rate at creation, which this simulates directly.
+    const [{ id: rateReservationId }] = await q(
+      `insert into re_reservations (organization_id, unit_id, customer_id, sales_rep_id, commission_rate)
+       values ($1,$2,$3,$4,5) returning id`, [userId, rateUnitId, rateCustomerId, rateRepId]);
+
+    // The rep's rate moves after the sale — commission on installments still
+    // to come on THIS reservation must not follow it.
+    await q(`update re_sales_reps set commission_rate=8 where id=$1`, [rateRepId]);
+
+    const [{ commission_rate: survivingRate }] = await q(
+      `select commission_rate from re_reservations where id=$1`, [rateReservationId]);
+    commissionSnapshotSurvivesRateChange = Number(survivingRate) === 5;
+  } catch (err) { console.log(`       ${err.message}`); }
+  check("a reservation's commission rate does not follow a later change to the rep's rate",
+    commissionSnapshotSurvivesRateChange);
+
+  let commissionRateBackfilled = false;
+  try {
+    const [{ id: backfillRepUserId }] = await q(
+      `insert into users (email, full_name) values ('backfill-rep@example.com','Backfill Rep') returning id`);
+    const [{ id: backfillRepId }] = await q(
+      `insert into re_sales_reps (organization_id, user_id, commission_rate)
+       values ($1,$2,3.5) returning id`, [userId, backfillRepUserId]);
+    const [{ id: backfillUnitId }] = await q(
+      `insert into re_units (organization_id, project_id, unit_number, list_price)
+       values ($1,(select id from re_projects where organization_id=$1 limit 1),'RS-2',6000000) returning id`, [userId]);
+    const [{ id: backfillCustomerId }] = await q(
+      `insert into re_customers (organization_id, full_name) values ($1,'Backfill Buyer') returning id`, [userId]);
+    // No commission_rate given — simulates a row written before 020 existed.
+    const [{ id: backfillReservationId }] = await q(
+      `insert into re_reservations (organization_id, unit_id, customer_id, sales_rep_id)
+       values ($1,$2,$3,$4) returning id`, [userId, backfillUnitId, backfillCustomerId, backfillRepId]);
+
+    // The exact backfill statement from migrations/020, re-run the way a
+    // re-applied migration would — idempotent, so this must be safe to do.
+    await q(
+      `update re_reservations r set commission_rate = rs.commission_rate
+       from re_sales_reps rs where r.sales_rep_id = rs.id and r.commission_rate is null`);
+
+    const [{ commission_rate: backfilledRate }] = await q(
+      `select commission_rate from re_reservations where id=$1`, [backfillReservationId]);
+    commissionRateBackfilled = Number(backfilledRate) === 3.5;
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('re-running the 020 backfill fills a pre-existing reservation\'s rate from its rep',
+    commissionRateBackfilled);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

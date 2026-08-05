@@ -293,8 +293,16 @@ router.get('/collections', requirePermission('reports.collections'), async (req,
   try {
     const months = Math.min(Number(req.query.months) || 12, 36);
     const since = new Date();
-    since.setUTCMonth(since.getUTCMonth() - (months - 1));
+    // Clamp to the 1st BEFORE subtracting months, not after. setUTCMonth
+    // overflows silently when the current day-of-month doesn't exist in the
+    // target month (e.g. today the 31st, target month has 30 days) — it
+    // rolls into the following month instead, shifting the whole range (and
+    // every bucket built from it below) one month late, which both drops the
+    // oldest real month from the query and adds a bogus not-yet-happened one
+    // at the end. Every month has a 1st, so subtracting from a date already
+    // pinned there can never overflow.
     since.setUTCDate(1);
+    since.setUTCMonth(since.getUTCMonth() - (months - 1));
 
     const { data, error } = await supabaseAdmin
       .from('re_payments')

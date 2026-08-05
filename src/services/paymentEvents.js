@@ -150,7 +150,7 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
 
     // If nothing is overdue on this reservation any more, the buyer is back in
     // good standing and should stop receiving formal-notice wording.
-    await maybeDeescalate(orgId, reservation.id, plan.id);
+    await maybeDeescalate(orgId, reservation.id);
   }
 
   // ── History ──────────────────────────────────────────────────────────────
@@ -216,13 +216,25 @@ async function orgSettings(orgId) {
 // Escalation only ever winds DOWN here. Winding it up is the morning sweep's
 // job (escalationService), which sees the whole picture rather than one
 // payment's worth of it.
-async function maybeDeescalate(orgId, reservationId, planId) {
+//
+// Scoped to the RESERVATION, not the one plan the just-recorded payment
+// landed on — matching escalationService.sweepEscalations's own scope
+// exactly. A rental renewal deliberately leaves the OLD plan's unpaid rows
+// untouched (rentalService.renewTenancy — "carries forward nothing... paid
+// rows and the whole prior schedule are left exactly as they were"), so a
+// genuinely still-overdue rent installment on a now-superseded plan must
+// still block de-escalation here; checking only the current plan would let
+// paying the first installment of a fresh lease term silently clear an
+// escalation that real arrears on the old term still justify. Restructuring
+// costs this nothing in the other direction — it WAIVES the old plan's
+// unpaid rows, and a waived row is never 'overdue'.
+async function maybeDeescalate(orgId, reservationId) {
   try {
     const { data: stillOverdue } = await supabaseAdmin
       .from('re_installment_schedule')
-      .select('id')
+      .select('id, re_installment_plans!inner(reservation_id)')
       .eq('organization_id', orgId)
-      .eq('plan_id', planId)
+      .eq('re_installment_plans.reservation_id', reservationId)
       .eq('status', 'overdue')
       .limit(1);
 

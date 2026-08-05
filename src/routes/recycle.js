@@ -25,7 +25,7 @@
 
 const express = require('express');
 const { requirePermission } = require('../middleware/rbac');
-const { softDelete, restore, listDeleted } = require('../services/softDelete');
+const { softDelete, restore, listDeleted, previewImpact } = require('../services/softDelete');
 const router = express.Router();
 
 // Only these are reachable. Notably absent: payments and commissions.
@@ -74,8 +74,13 @@ router.get('/:resource/:id/impact', requirePermission('recycle.read'), async (re
     const table = resolve(req, res);
     if (!table) return;
 
+    const result = await previewImpact(req.orgId, table, req.params.id);
+    if (result.notFound) return res.status(404).json({ error: 'Not found, or already deleted.' });
+
     res.json({
       resource: req.params.resource,
+      counted: result.counted,
+      total: result.total,
       takes_with_it: CONSEQUENCES[req.params.resource],
       recoverable: true,
       note: 'Nothing is permanently removed. A deleted record can be restored from the bin.',

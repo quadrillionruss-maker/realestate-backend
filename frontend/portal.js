@@ -177,7 +177,23 @@
     if (!API_BASE) {
       return fail('This page could not start up', 'A configuration file did not load. Please refresh, or ask your developer to send the link again.');
     }
-    if (!token) return fail('This link is incomplete');
+    if (!token) {
+      // An operator-generated payment link (routes/payments.js's own /init,
+      // as opposed to the portal's own "pay" button) sends a buyer straight
+      // to Paystack — they were never on this page before, so there is no
+      // session token to come back to. Paystack's callback_url still points
+      // here so they land somewhere after paying rather than a generic
+      // Paystack page; without this branch that visit hit the same wall as a
+      // genuinely broken link, right after a successful payment.
+      if (justPaidSchedule) {
+        return fail(
+          'Payment received',
+          'Thank you — we are confirming it now. You will get a receipt by email, '
+            + 'and your developer\'s sales office can also confirm from their end.'
+        );
+      }
+      return fail('This link is incomplete');
+    }
 
     var account;
     try {

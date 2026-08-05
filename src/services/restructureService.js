@@ -79,14 +79,23 @@ async function assess(orgId, reservationId) {
 
   // Paid is read from the PAYMENTS, not from row status: a part-paid row is
   // still 'pending' but its money is real and must be carried forward.
+  //
+  // reallocated_from_payment_id rows are excluded — same reasoning as
+  // receiptService and portalService's identical calculation. A reallocated
+  // row is the SAME money as its source payment, just moved onto a different
+  // schedule row; counting both would double the credit whenever the source
+  // and its reallocation target both fall on the plan being restructured,
+  // understating exactly how much the buyer still owes by the moved amount.
   let paidKobo = 0;
   if (scheduleIds.length) {
     const { data: payments } = await supabaseAdmin
       .from('re_payments')
-      .select('amount')
+      .select('amount, reallocated_from_payment_id')
       .in('schedule_id', scheduleIds)
       .is('voided_at', null);
-    paidKobo = (payments || []).reduce((sum, p) => sum + toKobo(p.amount), 0);
+    paidKobo = (payments || [])
+      .filter((p) => !p.reallocated_from_payment_id)
+      .reduce((sum, p) => sum + toKobo(p.amount), 0);
   }
 
   const contractKobo = toKobo(contractValue(current));
@@ -186,13 +195,28 @@ async function restructure(req, reservationId, {
   if (supersedeError) throw supersedeError;
 
   // Unpaid rows stop being owed. Paid rows and their payments are untouched.
-  const { data: waived } = await supabaseAdmin
+  //
+  // Fetched WITH each row's own current status, not just its id — a rollback
+  // below needs to restore each row to what it actually was. Blanket-setting
+  // every waived row back to 'pending' would relabel one that was genuinely
+  // 'overdue' before this attempt as merely pending, until the next sweep (up
+  // to ~12 hours) quietly re-marks it — a real, if temporary, data regression
+  // on the one path (a failed restructure) that is supposed to leave nothing
+  // changed at all.
+  const { data: toWaive } = await supabaseAdmin
     .from('re_installment_schedule')
-    .update({ status: 'waived' })
+    .select('id, status')
     .eq('plan_id', old.id)
     .eq('organization_id', orgId)
-    .in('status', ['pending', 'overdue'])
-    .select('id');
+    .in('status', ['pending', 'overdue']);
+
+  if (toWaive?.length) {
+    const { error: waiveError } = await supabaseAdmin
+      .from('re_installment_schedule')
+      .update({ status: 'waived' })
+      .in('id', toWaive.map((r) => r.id));
+    if (waiveError) throw waiveError;
+  }
 
   let created;
   try {
@@ -211,11 +235,11 @@ async function restructure(req, reservationId, {
       .update({ status: 'active', restructured_at: null, restructure_reason: null })
       .eq('id', old.id);
 
-    if (waived?.length) {
-      await supabaseAdmin
-        .from('re_installment_schedule')
-        .update({ status: 'pending' })
-        .in('id', waived.map((r) => r.id));
+    if (toWaive?.length) {
+      // Each row back to its OWN prior status — not a blanket 'pending'.
+      await Promise.all(toWaive.map((row) =>
+        supabaseAdmin.from('re_installment_schedule').update({ status: row.status }).eq('id', row.id)
+      ));
     }
     throw err;
   }
@@ -257,7 +281,7 @@ async function restructure(req, reservationId, {
       contract_value: state.contract_value,
       already_paid: state.total_paid,
       rescheduled: state.remaining,
-      waived_rows: waived?.length || 0,
+      waived_rows: toWaive?.length || 0,
       previous_terms: {
         number_of_installments: old.number_of_installments,
         frequency: old.frequency,
@@ -273,7 +297,7 @@ async function restructure(req, reservationId, {
     superseded_plan_id: old.id,
     carried_amount_paid: state.total_paid,
     contract_value: state.contract_value,
-    waived_rows: waived?.length || 0,
+    waived_rows: toWaive?.length || 0,
   };
 }
 

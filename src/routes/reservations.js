@@ -1,11 +1,26 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
+const { canAccess } = require('../services/permissions');
 const { createPlanWithSchedule } = require('../services/installmentService');
 const { assess, preview, restructure } = require('../services/restructureService');
 const { assessTenancy, renewTenancy } = require('../services/rentalService');
 const { audit } = require('../services/auditService');
 const router = express.Router();
+
+// Documentation has reservations.read (permissions.js) — "which unit, which
+// installment, its status and date, no naira figure" — but this list route
+// never applied financial.view's strip, unlike the identical rule
+// routes/customers.js already enforces on the single-buyer view. Mutates in
+// place; matches customers.js's stripFinancials exactly, just applied per
+// row of a list instead of once per buyer.
+function stripFinancials(reservation) {
+  if (reservation.re_units) reservation.re_units.list_price = null;
+  const plans = Array.isArray(reservation.re_installment_plans)
+    ? reservation.re_installment_plans
+    : [reservation.re_installment_plans].filter(Boolean);
+  for (const plan of plans) plan.total_amount = null;
+}
 
 const RESERVATION_STATUSES = ['reserved', 'confirmed', 'cancelled', 'completed'];
 
@@ -41,6 +56,11 @@ router.get('/', requirePermission('reservations.read'), async (req, res, next) =
 
     const { data, error } = await query;
     if (error) throw error;
+
+    if (!canAccess(req.orgRole, 'financial.view')) {
+      for (const reservation of data || []) stripFinancials(reservation);
+    }
+
     res.json(data);
   } catch (e) { next(e); }
 });
@@ -112,10 +132,17 @@ router.post('/', requirePermission('reservations.create'), async (req, res, next
     if (!unit) return res.status(404).json({ error: 'Unit not found' });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
 
+    // Fetched WITH commission_rate, not just id — the rate is snapshotted onto
+    // the reservation below (migrations/020) so a later change to this rep's
+    // rate does not change what THIS deal pays out on installments still to
+    // come, same reasoning as commissionService's per-payment copy, just at
+    // the reservation instead of the payment.
+    let repCommissionRate = null;
     if (sales_rep_id) {
-      const { data: rep } = await supabaseAdmin.from('re_sales_reps').select('id')
+      const { data: rep } = await supabaseAdmin.from('re_sales_reps').select('id, commission_rate')
         .eq('id', sales_rep_id).eq('organization_id', req.orgId).maybeSingle();
       if (!rep) return res.status(404).json({ error: 'Sales rep not found' });
+      repCommissionRate = rep.commission_rate;
     }
 
     // Reject bad plan input before touching the unit, so a validation error
@@ -153,6 +180,7 @@ router.post('/', requirePermission('reservations.create'), async (req, res, next
         .from('re_reservations')
         .insert({
           organization_id: req.orgId, unit_id, customer_id, sales_rep_id: sales_rep_id || null,
+          commission_rate: repCommissionRate,
           property_type, tenancy_start_date, tenancy_end_date,
         })
         .select()

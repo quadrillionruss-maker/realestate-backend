@@ -2,6 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission } = require('../middleware/rbac');
+const { canAccess } = require('../services/permissions');
 const { uploadMedia, MEDIA_TYPES, MAX_MEDIA_BYTES } = require('../services/documentStorage');
 const { audit } = require('../services/auditService');
 const router = express.Router();
@@ -83,6 +84,17 @@ router.get('/', requirePermission('inventory.read'), async (req, res, next) => {
 
     const { data, error } = await query;
     if (error) throw error;
+
+    // inventory.read is granted to every role, including documentation, who
+    // must never see a naira figure (permissions.js's financial.view) — the
+    // same rule routes/customers.js and routes/reservations.js already
+    // enforce on their own list views. Nulled rather than the field being
+    // omitted, so the response shape stays identical for every role and the
+    // frontend doesn't need to branch on who's asking.
+    if (!canAccess(req.orgRole, 'financial.view')) {
+      for (const unit of data || []) unit.list_price = null;
+    }
+
     res.json(data);
   } catch (e) { next(e); }
 });

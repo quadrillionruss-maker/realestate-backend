@@ -47,7 +47,7 @@ async function loadPaymentContext(orgId, paymentId) {
         re_installment_plans(
           id, total_amount, number_of_installments,
           re_reservations(
-            id,
+            id, commission_rate,
             re_customers(id, full_name, email, phone),
             re_units(unit_number, unit_type, list_price, re_projects(name, location)),
             re_sales_reps(id, commission_rate, users(full_name))

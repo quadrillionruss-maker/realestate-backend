@@ -309,12 +309,16 @@ async function clearToken(memberId) {
 // registration would lose the account entirely.
 async function claimPendingInvites({ userId, email }) {
   try {
+    // team_members has no created_at, so invite_expires_at stands in for it —
+    // every invite gets the same fixed INVITE_TTL_DAYS offset at creation, so
+    // it is monotonic with when the invite was actually sent.
     const { data: pending, error } = await supabaseAdmin
       .from('team_members')
       .select('id, team_id, role, invited_role')
       .eq('invited_email', email)
       .eq('status', 'invited')
-      .is('user_id', null);
+      .is('user_id', null)
+      .order('invite_expires_at', { ascending: true });
     if (error) throw error;
     if (!pending?.length) return [];
 

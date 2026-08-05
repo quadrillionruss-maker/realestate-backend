@@ -9,7 +9,7 @@ const { audit } = require('../services/auditService');
 const auth = require('../services/authService');
 const invites = require('../services/inviteService');
 const {
-  ROLE_LABELS, INVITABLE_ROLES, canInviteRole, isDowngrade, capabilitiesLostGoingFrom,
+  ROLE_LABELS, INVITABLE_ROLES, canInviteRole, isDowngrade, capabilitiesLostGoingFrom, normalizeRole,
 } = require('../services/permissions');
 const { uploadTeamLogo } = require('../services/documentStorage');
 const { encrypt, last4 } = require('../utils/credentials');
@@ -307,6 +307,36 @@ router.put('/email', requirePermission('settings.write'), async (req, res, next)
 
     if (Object.keys(updates).length === 1) {
       return res.status(400).json({ error: 'No updatable fields provided' });
+    }
+
+    // Resend rejects a send whose From-domain isn't verified under the
+    // account the API key belongs to — so a workspace's own key with no own
+    // From-address isn't "half configured", it fails on every single send,
+    // silently (rule 1 in notificationService.js: a send never fails the
+    // request that triggered it, so nothing surfaces this beyond the
+    // notification log). Checked against the row this update would leave
+    // behind, not just this request's body, since the key and the address
+    // are often set on separate requests.
+    if ('resend_api_key_encrypted' in updates || 'resend_from_email' in updates) {
+      const { data: existing } = await supabaseAdmin
+        .from('re_org_settings')
+        .select('resend_from_email, resend_api_key_encrypted')
+        .eq('organization_id', req.orgId)
+        .maybeSingle();
+
+      const willHaveKey = 'resend_api_key_encrypted' in updates
+        ? Boolean(updates.resend_api_key_encrypted)
+        : Boolean(existing?.resend_api_key_encrypted);
+      const willHaveFrom = 'resend_from_email' in updates
+        ? Boolean(updates.resend_from_email)
+        : Boolean(existing?.resend_from_email);
+
+      if (willHaveKey && !willHaveFrom) {
+        return res.status(400).json({
+          error: 'A From-email address is required alongside your own Resend key — '
+            + 'Resend will refuse to send otherwise, since the From-domain has to be verified under that same account.',
+        });
+      }
     }
 
     const { data, error } = await supabaseAdmin
@@ -803,6 +833,19 @@ router.patch('/team/:id', requirePermission('team.manageMembers'), async (req, r
       .from('team_members').select('id, user_id, role, users(full_name, email)')
       .eq('id', req.params.id).eq('team_id', req.orgId).maybeSingle();
     if (!member) return res.status(404).json({ error: 'Team member not found' });
+
+    // canInviteRole above only checks the role being GRANTED, never the
+    // target row's current one — so on its own it would let one director
+    // demote or remove a peer director with nothing but their own
+    // confirm_downgrade click. Only the owner may invite a director
+    // (canInviteRole), so only the owner may re-role or remove one, for the
+    // same reason: that is the role that can see the whole book.
+    if (member.role === 'sales_director' && normalizeRole(req.orgRole) !== 'owner'
+      && ((updates.role && updates.role !== 'sales_director') || updates.status === 'removed')) {
+      return res.status(403).json({
+        error: 'Only the workspace owner can change or remove a Head of Sales.',
+      });
+    }
 
     // Removing or demoting the LAST owner leaves a workspace nobody can
     // administer. Checked as an actual count rather than trusting "there is

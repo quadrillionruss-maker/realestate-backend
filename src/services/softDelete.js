@@ -144,6 +144,49 @@ async function cascade(table, ids, orgId, stamp, tally) {
   tally[table] = (tally[table] || 0) + (data?.length || 0);
 }
 
+// ── Impact preview ─────────────────────────────────────────────────────────
+// Same walk as cascade(), but read-only — no update, no audit entry — so a
+// delete's confirmation dialog can say "this removes 1 buyer, 1 reservation,
+// 12 installments and 4 payments" instead of the generic, id-blind text it
+// used to fall back to.
+async function previewImpact(orgId, table, id) {
+  if (!DELETABLE.has(table)) {
+    throw Object.assign(new Error(`${table} cannot be deleted.`), { statusCode: 400 });
+  }
+
+  const { data: row, error } = await supabaseAdmin
+    .from(table)
+    .select('id')
+    .eq('id', id)
+    .eq('organization_id', orgId)
+    .is('deleted_at', null)
+    .maybeSingle();
+  if (error) throw error;
+  if (!row) return { notFound: true };
+
+  const counted = {};
+  await countCascade(table, [id], orgId, counted);
+
+  return { counted, total: Object.values(counted).reduce((sum, n) => sum + n, 0) };
+}
+
+async function countCascade(table, ids, orgId, tally) {
+  if (!ids.length) return;
+
+  tally[table] = (tally[table] || 0) + ids.length;
+
+  for (const [childTable, foreignKey] of CHILDREN[table] || []) {
+    const { data: children } = await supabaseAdmin
+      .from(childTable)
+      .select('id')
+      .in(foreignKey, ids)
+      .eq('organization_id', orgId)
+      .is('deleted_at', null);
+
+    await countCascade(childTable, (children || []).map((c) => c.id), orgId, tally);
+  }
+}
+
 // ── Restore ────────────────────────────────────────────────────────────────
 // The reason soft delete is worth having. Restores the row and everything that
 // went down with it, matched on the same deleted_at instant — so restoring a
@@ -223,4 +266,4 @@ async function listDeleted(orgId, table, limit = 100) {
   return data || [];
 }
 
-module.exports = { live, softDelete, restore, listDeleted, DELETABLE, CHILDREN };
+module.exports = { live, softDelete, restore, listDeleted, previewImpact, DELETABLE, CHILDREN };

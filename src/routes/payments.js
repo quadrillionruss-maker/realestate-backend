@@ -26,7 +26,20 @@ router.get('/', requirePermission('payments.read'), async (req, res, next) => {
 
     if (req.query.method) query = query.eq('method', req.query.method);
     if (req.query.from) query = query.gte('paid_at', req.query.from);
-    if (req.query.to) query = query.lte('paid_at', req.query.to);
+    if (req.query.to) {
+      // paid_at is a timestamptz. A bare "YYYY-MM-DD" is a calendar day, not
+      // an instant — lte against it means <= midnight, which excludes every
+      // payment made later that same day, i.e. nearly all of them. Advance to
+      // the start of the next day and use lt so "to 30 Jul" actually includes
+      // 30 Jul. A caller that already passed a full timestamp is trusted as-is.
+      if (/^\d{4}-\d{2}-\d{2}$/.test(req.query.to)) {
+        const nextDay = new Date(`${req.query.to}T00:00:00.000Z`);
+        nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+        query = query.lt('paid_at', nextDay.toISOString());
+      } else {
+        query = query.lte('paid_at', req.query.to);
+      }
+    }
 
     const { data, error } = await query;
     if (error) throw error;
@@ -106,7 +119,16 @@ router.post('/:scheduleId/init', requirePermission('payments.init'), async (req,
     const { customer_email } = req.body || {};
     if (!customer_email) return res.status(400).json({ error: 'customer_email is required' });
 
-    const result = await initInstallmentPayment(req.orgId, req.params.scheduleId, customer_email);
+    // Same as routes/portal.js's own init call — without it, Paystack sends
+    // the buyer to its own generic success page instead of back to their
+    // portal, which is how a buyer talks themselves into paying twice on a
+    // schedule row that still visually reads as unpaid.
+    const env = require('../config/env');
+    const callbackUrl = env.appUrl
+      ? `${env.appUrl}/portal.html?paid=${encodeURIComponent(req.params.scheduleId)}`
+      : null;
+
+    const result = await initInstallmentPayment(req.orgId, req.params.scheduleId, customer_email, { callbackUrl });
 
     audit(req, {
       action: 'payment.initiated',

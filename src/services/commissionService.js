@@ -7,12 +7,23 @@
 // has paid out money that never arrived. So the unit of accrual here is the
 // PAYMENT, not the reservation.
 //
-// TWO DECISIONS WORTH KNOWING:
+// THREE DECISIONS WORTH KNOWING:
 //
 // 1. The rate is COPIED onto the commission row at accrual time. Raising a
 //    rep's rate must not silently rewrite what they earned last quarter.
 //
-// 2. `unique (payment_id)` in migrations/003 is the idempotency lock. The
+// 2. The rate itself comes from the RESERVATION (re_reservations.commission_rate,
+//    migrations/020), not the rep's current re_sales_reps.commission_rate — it is
+//    snapshotted once, when the reservation is created (routes/reservations.js),
+//    so a rate change made between a reservation's creation and one of its later
+//    installments does not change what that installment pays out. A deal sold at
+//    5% keeps paying 5% for its whole life, restructures and rental renewals
+//    included, since both keep the same reservation row. A reservation created
+//    before migrations/020 (or with no snapshot for any other reason) falls back
+//    to the rep's current rate, matching exactly what accrual did before this
+//    existed.
+//
+// 3. `unique (payment_id)` in migrations/003 is the idempotency lock. The
 //    payment path can be re-entered — a replayed Paystack webhook, a manual
 //    re-record — without a rep being paid twice for the same money.
 
@@ -36,7 +47,7 @@ async function accrueForPayment({ orgId, payment, reservation, salesRep }) {
       return { accrued: false, reason: 'reallocated credit — already accrued on the original payment' };
     }
 
-    const rate = Number(salesRep.commission_rate || 0);
+    const rate = Number(reservation.commission_rate ?? salesRep.commission_rate ?? 0);
     if (!(rate > 0)) return { accrued: false, reason: 'rep has no commission rate set' };
 
     // Capped at what was actually due, not the full amount transferred — a
