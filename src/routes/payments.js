@@ -58,7 +58,7 @@ router.get('/schedule', requirePermission('payments.schedule'), async (req, res,
       .select(`
         id, installment_number, due_date, amount_due, status, paid_at, plan_id,
         re_installment_plans!inner(
-          id, reservation_id, total_amount, number_of_installments,
+          id, status, reservation_id, total_amount, number_of_installments,
           re_reservations!inner(
             id, status, escalation_stage,
             re_customers(id, full_name, phone, email),
@@ -66,6 +66,14 @@ router.get('/schedule', requirePermission('payments.schedule'), async (req, res,
           )
         )`)
       .eq('organization_id', req.orgId)
+      // A restructured reservation's OLD plan is 'superseded', not deleted —
+      // its rows (some paid, some waived by the restructure) still exist and
+      // would otherwise sit right alongside the new plan's rows under the
+      // same reservation. Every caller of this route reasons about "what is
+      // currently owed", which is exactly what the superseded plan's rows
+      // are not, so they are excluded here rather than by every caller
+      // separately.
+      .eq('re_installment_plans.status', 'active')
       .order('due_date', { ascending: true })
       .limit(Math.min(Number(req.query.limit) || 200, 1000));
 

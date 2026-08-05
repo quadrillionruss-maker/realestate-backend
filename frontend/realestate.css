@@ -1417,6 +1417,24 @@ table.data td.num, table.data th.num {
 }
 .sched-paid-summary:last-child { border-bottom: none; }
 
+/* Payments → Schedule: one row per buyer, expanding inline to their full
+   installment list. The caret rotates via a class on the row (set in JS when
+   it is the expanded one), not a CSS :has() — this app's minimum supported
+   browser predates it. */
+.expand-caret {
+  display: inline-block;
+  width: 12px;
+  margin-right: 2px;
+  color: var(--text-faint);
+  transition: transform .15s var(--ease);
+}
+tr.is-open .expand-caret { transform: rotate(90deg); }
+
+table.data td.sched-detail-cell {
+  background: var(--panel-2);
+  padding: 4px 16px 12px 34px;
+}
+
 /* Progress meter — how much of a plan the buyer has paid. */
 .meter { height: 5px; border-radius: 3px; background: var(--panel-3); overflow: hidden; }
 .meter > i { display: block; height: 100%; background: var(--moss); border-radius: 3px; transition: width .5s var(--ease); }

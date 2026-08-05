@@ -2355,11 +2355,19 @@
 
   /* ══ PAYMENTS ═══════════════════════════════════════════════════════════ */
   var PAYMENTS_HISTORY_PER_PAGE = 50;
-  var PAYMENTS_SCHEDULE_PER_PAGE = 100;
+  var PAYMENTS_SCHEDULE_PER_PAGE = 50; // buyers per page, not installment rows
+
+  // Which buyer's row is expanded on the Schedule tab. Module-level, not a
+  // closure var inside render(), so it survives R.reload() — recording a
+  // payment from inside the expanded row reloads the whole route, and the
+  // rep should still be looking at the buyer they were just working on, not
+  // back at a fully collapsed list.
+  var expandedScheduleBuyerId = null;
 
   R.screens.payments = {
     render: async function (view, params, query) {
-      var tab = query.tab || 'due';
+      var tab = query.tab || 'all';
+      if (tab === 'due') tab = 'all'; // pre-redesign bookmark or link
 
       if (tab === 'history') {
         var payments = await api('/payments?limit=200');
@@ -2402,7 +2410,7 @@
               {
                 emptyTitle: 'No payments recorded yet',
                 emptyHint: 'Record one against a due installment, or wait for the next Paystack payment to settle.',
-                emptyAction: '<a class="btn-quiet" href="#/payments?tab=due">Go to Due</a>',
+                emptyAction: '<a class="btn-quiet" href="#/payments?tab=all">Go to Schedule</a>',
               }
             ), { flush: true }) +
             paginationControls(p);
@@ -2435,95 +2443,69 @@
         return;
       }
 
-      var status = tab === 'overdue' ? 'overdue' : 'pending';
-      var schedule = await api('/payments/schedule?status=' + status + '&limit=400');
+      if (['all', 'overdue', 'due_week'].indexOf(tab) === -1) tab = 'all';
+
+      // Fetched once, ungrouped and unfiltered by status — "X of Y paid" and
+      // "remaining balance" per buyer need the buyer's WHOLE plan, not just
+      // whichever slice the active tab cares about, so grouping and tab
+      // filtering both happen client-side against this one fetch.
+      var schedule = await api('/payments/schedule?limit=1000');
+      var buyers = groupScheduleByBuyer(schedule);
+      var filtered = filterBuyersForTab(buyers, tab).sort(function (a, b) {
+        // Most urgent first: earliest still-open due date, buyers with
+        // nothing open (shouldn't happen once filtered, but guarded anyway)
+        // sort last.
+        var ea = a.earliestOpenDue || '9999-99-99';
+        var eb = b.earliestOpenDue || '9999-99-99';
+        return ea < eb ? -1 : ea > eb ? 1 : 0;
+      });
       var schedulePage = 1;
 
-      var due = schedule.reduce(function (sum, s) { return sum + Number(s.amount_outstanding || 0); }, 0);
-      var buyerCount = new Set(schedule.map(function (s) {
-        var r = s.re_installment_plans.re_reservations;
-        return r.re_customers && r.re_customers.id;
-      })).size;
+      var totalOutstanding = filtered.reduce(function (sum, b) { return sum + b.remaining; }, 0);
+      var openRowCount = filtered.reduce(function (sum, b) {
+        if (tab === 'overdue') return sum + b.rows.filter(function (r) { return r.status === 'overdue'; }).length;
+        if (tab === 'due_week') return sum + b.dueThisWeekRows.length;
+        return sum + b.rows.filter(function (r) { return r.status === 'pending' || r.status === 'overdue'; }).length;
+      }, 0);
+      var thirdStatLabel = tab === 'overdue' ? 'Overdue installments' : tab === 'due_week' ? 'Due this week' : 'Open installments';
 
       var renderSchedule = function () {
-        var p = paginate(schedule, PAYMENTS_SCHEDULE_PER_PAGE, schedulePage);
+        var p = paginate(filtered, PAYMENTS_SCHEDULE_PER_PAGE, schedulePage);
         schedulePage = p.page;
 
         view.innerHTML =
-          head('Payments', tab === 'overdue' ? 'Installments past their due date.' : 'What is scheduled and not yet settled.') +
+          head('Payments', tab === 'overdue' ? 'Buyers with an installment past its due date.'
+            : tab === 'due_week' ? 'Buyers with an installment due in the next 7 days.'
+            : 'Every buyer who still owes something.') +
           paymentTabs(tab) +
           '<div class="grid cols-3 mb-2">' +
-            stat(tab === 'overdue' ? 'Overdue installments' : 'Open installments', String(schedule.length)) +
-            stat('Outstanding', naira(due), { tone: tab === 'overdue' ? 'clay' : null }) +
-            stat('Buyers', String(buyerCount)) +
+            stat('Buyers', String(filtered.length)) +
+            stat('Outstanding', naira(totalOutstanding), { tone: tab === 'overdue' ? 'clay' : null }) +
+            stat(thirdStatLabel, String(openRowCount)) +
           '</div>' +
 
           card(null, table(
-            [{ label: 'Due' }, { label: 'Buyer' }, { label: 'Unit' }, { label: 'No.' },
-              { label: 'Due', num: true }, { label: 'Outstanding', num: true }, { label: '' }],
+            [{ label: 'Buyer' }, { label: 'Unit' }, { label: 'Paid' }, { label: 'Remaining', num: true }],
             p.slice,
-            function (s) {
-              var reservation = s.re_installment_plans.re_reservations;
-              var customer = reservation.re_customers || {};
-              var unit = reservation.re_units || {};
-              return '<tr>' +
-                '<td class="muted nowrap">' + esc(fmtDate(s.due_date)) + '</td>' +
-                '<td class="cell-primary">' + esc(customer.full_name || '—') + '</td>' +
-                '<td class="muted">' + esc(unit.unit_number || '—') +
-                  '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
-                '<td class="muted">' + s.installment_number + '/' + s.re_installment_plans.number_of_installments + '</td>' +
-                '<td class="num muted">' + naira(s.amount_due) + '</td>' +
-                '<td class="num">' + naira(s.amount_outstanding) + '</td>' +
-                '<td class="right nowrap">' +
-                  '<button class="btn-quiet" data-record="' + esc(s.id) + '" data-outstanding="' + esc(s.amount_outstanding) +
-                    '" data-name="' + esc(customer.full_name || '') + '" data-customer="' + esc(customer.id || '') + '">Record</button> ' +
-                  (customer.email
-                    ? '<button class="btn-quiet" data-link="' + esc(s.id) + '">Link</button>' +
-                      // Hidden until the button above is clicked — generating and
-                      // copying a payment link used to fire the instant it was
-                      // clicked, with no way to back out of a misclick.
-                      '<span class="hidden" data-link-confirm="' + esc(s.id) + '">' +
-                        '<span class="page-sub">Send Paystack link to ' + esc(customer.full_name || 'this buyer') +
-                          ' for ' + esc(naira(s.amount_outstanding)) + '?</span> ' +
-                        '<button class="btn-quiet" data-link-yes="' + esc(s.id) + '" data-email="' + esc(customer.email) + '">Confirm</button> ' +
-                        '<button class="btn-quiet" data-link-no="' + esc(s.id) + '">Cancel</button>' +
-                      '</span>'
-                    : '') +
-                '</td>' +
-              '</tr>';
-            },
-            { emptyTitle: tab === 'overdue' ? 'Nothing is overdue' : 'Nothing is scheduled', emptyHint: 'Reservations with a payment plan appear here.' }
+            buyerRow,
+            {
+              emptyTitle: tab === 'overdue' ? 'Nothing is overdue' : tab === 'due_week' ? 'Nothing due this week' : 'Nothing outstanding',
+              emptyHint: 'Reservations with an open payment plan appear here.',
+            }
           ), { flush: true }) +
           paginationControls(p);
 
-        R.qsa('[data-record]', view).forEach(function (button) {
-          button.addEventListener('click', function () {
-            recordPaymentModal(button.dataset.record, button.dataset.outstanding, button.dataset.name, button.dataset.customer);
-          });
-        });
+        wireScheduleRowActions(view);
 
-        R.qsa('[data-link]', view).forEach(function (button) {
-          button.addEventListener('click', function () {
-            button.classList.add('hidden');
-            R.qs('[data-link-confirm="' + button.dataset.link + '"]', view).classList.remove('hidden');
+        // Only one buyer open at a time — expanding another collapses
+        // whichever was open, same as it would in a plain accordion.
+        R.qsa('[data-expand]', view).forEach(function (row) {
+          row.addEventListener('click', function (event) {
+            if (event.target.closest('[data-stop]')) return;
+            var id = row.dataset.expand;
+            expandedScheduleBuyerId = expandedScheduleBuyerId === id ? null : id;
+            renderSchedule();
           });
-        });
-
-        R.qsa('[data-link-no]', view).forEach(function (button) {
-          button.addEventListener('click', function () {
-            var id = button.dataset.linkNo;
-            R.qs('[data-link-confirm="' + id + '"]', view).classList.add('hidden');
-            R.qs('[data-link="' + id + '"]', view).classList.remove('hidden');
-          });
-        });
-
-        R.onClick(view, '[data-link-yes]', async function (button) {
-          var id = button.dataset.linkYes;
-          var result = await api.post('/payments/' + id + '/init', { customer_email: button.dataset.email });
-          await R.copyText(result.authorization_url);
-          toast('Paystack link for ' + naira(result.amount) + ' copied to your clipboard.', 'ok');
-          R.qs('[data-link-confirm="' + id + '"]', view).classList.add('hidden');
-          R.qs('[data-link="' + id + '"]', view).classList.remove('hidden');
         });
 
         var prev = R.qs('[data-page-prev]', view);
@@ -2538,10 +2520,155 @@
 
   function paymentTabs(active) {
     return '<div class="filter-row">' +
-      [['due', 'Due'], ['overdue', 'Overdue'], ['history', 'History']].map(function (t) {
+      [['all', 'All'], ['overdue', 'Overdue'], ['due_week', 'Due this week'], ['history', 'History']].map(function (t) {
         return '<a class="pill' + (active === t[0] ? ' is-on' : '') + '" href="#/payments?tab=' + t[0] + '">' + t[1] + '</a>';
       }).join('') +
     '</div>';
+  }
+
+  // One row per installment plan (== one row per buyer — a reservation has
+  // at most one active plan). /payments/schedule already excludes a
+  // restructured reservation's superseded plan server-side, so grouping by
+  // plan_id here can never mix two different "number_of_installments"
+  // totals for the same buyer together.
+  function groupScheduleByBuyer(schedule) {
+    var byPlan = {};
+    var todayStr = new Date().toISOString().slice(0, 10);
+    var weekAheadStr = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
+
+    schedule.forEach(function (row) {
+      var plan = row.re_installment_plans;
+      var reservation = plan.re_reservations;
+      if (!byPlan[plan.id]) {
+        byPlan[plan.id] = {
+          reservationId: reservation.id,
+          customer: reservation.re_customers || {},
+          unit: reservation.re_units || {},
+          project: (reservation.re_units && reservation.re_units.re_projects) || {},
+          numberOfInstallments: plan.number_of_installments,
+          rows: [],
+        };
+      }
+      byPlan[plan.id].rows.push(row);
+    });
+
+    return Object.keys(byPlan).map(function (planId) {
+      var b = byPlan[planId];
+      b.rows.sort(function (x, y) { return x.installment_number - y.installment_number; });
+      b.paidCount = b.rows.filter(function (r) { return r.status === 'paid'; }).length;
+      // A waived row's amount_outstanding is still computed as due-minus-paid
+      // server-side (the column does not know about waiving) — excluded here
+      // the same way receiptService/portalService exclude a reallocated
+      // payment from a "how much is owed" total: it is not real debt any more.
+      b.remaining = b.rows.reduce(function (sum, r) {
+        return sum + (r.status === 'waived' ? 0 : Number(r.amount_outstanding || 0));
+      }, 0);
+      b.hasOverdue = b.rows.some(function (r) { return r.status === 'overdue'; });
+      b.dueThisWeekRows = b.rows.filter(function (r) {
+        return r.status === 'pending' && r.due_date >= todayStr && r.due_date <= weekAheadStr;
+      });
+      var openRows = b.rows.filter(function (r) { return r.status === 'pending' || r.status === 'overdue'; });
+      b.earliestOpenDue = openRows.length
+        ? openRows.reduce(function (min, r) { return r.due_date < min ? r.due_date : min; }, openRows[0].due_date)
+        : null;
+      return b;
+    });
+  }
+
+  function filterBuyersForTab(buyers, tab) {
+    if (tab === 'overdue') return buyers.filter(function (b) { return b.hasOverdue; });
+    if (tab === 'due_week') return buyers.filter(function (b) { return b.dueThisWeekRows.length > 0; });
+    return buyers.filter(function (b) { return b.remaining > 0; });
+  }
+
+  // The collapsed summary row plus its detail row, always rendered as a pair
+  // — table()'s rowFn just needs to return a string, and a <tbody> does not
+  // care whether that string is one <tr> or two.
+  function buyerRow(b) {
+    var isOpen = expandedScheduleBuyerId === b.reservationId;
+    return (
+      '<tr class="is-clickable' + (isOpen ? ' is-open' : '') + '" data-expand="' + esc(b.reservationId) + '">' +
+        '<td class="cell-primary">' +
+          '<span class="expand-caret">▸</span>' + esc(b.customer.full_name || '—') +
+          (b.hasOverdue ? ' ' + badge('overdue') : '') +
+        '</td>' +
+        '<td class="muted">' + esc(b.unit.unit_number || '—') +
+          '<div class="cell-meta">' + esc(b.project.name || '') + '</div></td>' +
+        '<td class="muted">' + b.paidCount + ' of ' + b.numberOfInstallments + ' paid</td>' +
+        '<td class="num">' + naira(b.remaining) + '</td>' +
+      '</tr>' +
+      '<tr class="' + (isOpen ? '' : 'hidden') + '" data-buyer-detail="' + esc(b.reservationId) + '">' +
+        '<td class="sched-detail-cell" colspan="4">' +
+          b.rows.map(function (s) { return scheduleActionRow(s, b.customer); }).join('') +
+        '</td>' +
+      '</tr>'
+    );
+  }
+
+  // One installment line inside an expanded buyer row — same badge/layout
+  // idiom as scheduleRow() (the buyer-drawer's own schedule), just with the
+  // Record/Link actions this screen has always offered instead of Waive.
+  function scheduleActionRow(s, customer) {
+    var recordable = (s.status === 'pending' || s.status === 'overdue') && R.can('payments.record');
+    return '<div class="sched ' + esc(s.status) + '">' +
+      '<span class="sched-n">' + s.installment_number + '</span>' +
+      '<span class="sched-main"><span class="mono">' + naira(s.amount_due) + '</span>' +
+        '<span class="page-sub">' + (s.status === 'overdue' ? 'overdue since ' : 'due ') + esc(fmtDate(s.due_date)) +
+          (s.paid_at ? ' · paid ' + esc(fmtDate(s.paid_at)) : '') + '</span></span>' +
+      badge(s.status) +
+      (recordable
+        ? '<button class="btn-quiet" data-record="' + esc(s.id) + '" data-outstanding="' + esc(s.amount_outstanding) +
+          '" data-name="' + esc(customer.full_name || '') + '" data-customer="' + esc(customer.id || '') + '">Record</button>'
+        : '') +
+      (recordable && customer.email
+        ? '<button class="btn-quiet" data-link="' + esc(s.id) + '">Link</button>' +
+          // Hidden until the button above is clicked — generating and
+          // copying a payment link used to fire the instant it was clicked,
+          // with no way to back out of a misclick.
+          '<span class="hidden" data-link-confirm="' + esc(s.id) + '">' +
+            '<span class="page-sub">Send Paystack link to ' + esc(customer.full_name || 'this buyer') +
+              ' for ' + esc(naira(s.amount_outstanding)) + '?</span> ' +
+            '<button class="btn-quiet" data-link-yes="' + esc(s.id) + '" data-email="' + esc(customer.email) + '">Confirm</button> ' +
+            '<button class="btn-quiet" data-link-no="' + esc(s.id) + '">Cancel</button>' +
+          '</span>'
+        : '') +
+    '</div>';
+  }
+
+  // Record and Link both live inside collapsed-by-default detail rows, so
+  // this runs after every render (initial, page change, or expand/collapse)
+  // rather than once — a row that was hidden a moment ago may hold buttons
+  // that have never been wired.
+  function wireScheduleRowActions(root) {
+    R.qsa('[data-record]', root).forEach(function (button) {
+      button.addEventListener('click', function () {
+        recordPaymentModal(button.dataset.record, button.dataset.outstanding, button.dataset.name, button.dataset.customer);
+      });
+    });
+
+    R.qsa('[data-link]', root).forEach(function (button) {
+      button.addEventListener('click', function () {
+        button.classList.add('hidden');
+        R.qs('[data-link-confirm="' + button.dataset.link + '"]', root).classList.remove('hidden');
+      });
+    });
+
+    R.qsa('[data-link-no]', root).forEach(function (button) {
+      button.addEventListener('click', function () {
+        var id = button.dataset.linkNo;
+        R.qs('[data-link-confirm="' + id + '"]', root).classList.add('hidden');
+        R.qs('[data-link="' + id + '"]', root).classList.remove('hidden');
+      });
+    });
+
+    R.onClick(root, '[data-link-yes]', async function (button) {
+      var id = button.dataset.linkYes;
+      var result = await api.post('/payments/' + id + '/init', { customer_email: button.dataset.email });
+      await R.copyText(result.authorization_url);
+      toast('Paystack link for ' + naira(result.amount) + ' copied to your clipboard.', 'ok');
+      R.qs('[data-link-confirm="' + id + '"]', root).classList.add('hidden');
+      R.qs('[data-link="' + id + '"]', root).classList.remove('hidden');
+    });
   }
 
   function recordPaymentModal(scheduleId, outstanding, customerName, customerId) {
