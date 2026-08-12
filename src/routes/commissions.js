@@ -70,19 +70,49 @@ router.patch('/status', async (req, res, next) => {
     if (!COMMISSION_STATUSES.includes(status)) {
       return res.status(400).json({ error: `status must be one of: ${COMMISSION_STATUSES.join(', ')}` });
     }
-    // Which permission applies depends on what was posted, not the path, so
-    // this can't be a route-level requirePermission — see rbac.js.
-    const action = status === 'paid' ? 'commissions.markPaid' : 'commissions.approve';
+
+    // What matters for permission is not just the TARGET status but whether
+    // any targeted row is CURRENTLY 'paid' — moving one back to accrued or
+    // void undoes an owner-only action (a payout actually made), and doing
+    // that must require the same tier as making the payment in the first
+    // place. Without this, a Sales Director could pick 'accrued' or 'void'
+    // as the target and the old target-only check would apply the lower
+    // commissions.approve bar to what is really reversing a payout.
+    const { data: currentRows, error: currentErr } = await supabaseAdmin
+      .from('re_commissions')
+      .select('id, status')
+      .in('id', ids)
+      .eq('organization_id', req.orgId);
+    if (currentErr) throw currentErr;
+
+    const anyCurrentlyPaid = (currentRows || []).some((row) => row.status === 'paid');
+    // Which permission applies depends on what was posted — and now, on what
+    // is already true of the targeted rows — not the path, so this can't be
+    // a route-level requirePermission — see rbac.js.
+    const action = (status === 'paid' || anyCurrentlyPaid) ? 'commissions.markPaid' : 'commissions.approve';
     if (!assertPermission(req, res, action)) return;
 
     const updates = { status };
-    if (status === 'paid') updates.paid_at = new Date().toISOString();
+    if (status === 'paid') {
+      updates.paid_at = new Date().toISOString();
+    } else if (anyCurrentlyPaid) {
+      // A row moving OFF 'paid' to something else must not keep a stale
+      // paid_at — it is no longer true this commission was paid on that
+      // date, and a leftover timestamp would read as "paid" to any report
+      // that trusts the column instead of the status.
+      updates.paid_at = null;
+    }
 
     const { data, error } = await supabaseAdmin
       .from('re_commissions')
       .update(updates)
       .in('id', ids)
       .eq('organization_id', req.orgId)
+      // The update path is not covered by orgContext's automatic soft-delete
+      // filter (that only wraps .select()) — without this, the update could
+      // match a soft-deleted commission row (e.g. cascaded from a deleted
+      // buyer) and mark it paid, while it stays invisible everywhere else.
+      .is('deleted_at', null)
       .select('id, amount, sales_rep_id');
     if (error) throw error;
 

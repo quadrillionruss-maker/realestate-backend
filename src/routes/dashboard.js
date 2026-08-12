@@ -5,6 +5,8 @@ const { lagosToday } = require('../services/overdueService');
 const { describeStage } = require('../services/escalationService');
 const router = express.Router();
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 // Documentation's dashboard answers one question — what still needs doing on
 // paper — and none of the financial ones the other roles' KPIs are built
 // from, so it is its own small query rather than a stripped-down copy of the
@@ -56,6 +58,9 @@ router.get('/', requirePermission('dashboard.read'), async (req, res, next) => {
 
     const orgId = req.orgId;
     const projectId = req.query.project_id || null;
+    if (projectId && !UUID_RE.test(projectId)) {
+      return res.status(400).json({ error: 'project_id must be a valid id.' });
+    }
     const today = lagosToday();
     const monthStart = today.slice(0, 8) + '01';
     const in7 = new Date(Date.parse(today) + 7 * 86_400_000).toISOString().slice(0, 10);
@@ -223,6 +228,9 @@ router.get('/at-risk', requirePermission('atRisk.read'), async (req, res, next) 
       .eq('status', 'overdue');
 
     if (req.query.project_id) {
+      if (!UUID_RE.test(req.query.project_id)) {
+        return res.status(400).json({ error: 'project_id must be a valid id.' });
+      }
       query = query.eq('re_installment_plans.re_reservations.re_units.project_id', req.query.project_id);
     }
 

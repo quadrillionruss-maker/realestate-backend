@@ -645,6 +645,55 @@ function check(name, cond, detail) {
   } catch (err) { doubleReallocationBlocked = /unique|duplicate/i.test(err.message); }
   check('the same overpayment cannot be reallocated twice', doubleReallocationBlocked);
 
+  // ── reallocating a CARD payment's overpayment must not collide with the
+  // paystack-reference uniqueness index ────────────────────────────────────
+  // src/services/paystackService.js reallocateOverpayment used to copy the
+  // SOURCE payment's method AND paystack_reference straight onto the new
+  // reallocation row. When the source was itself a card ('paystack')
+  // payment, that meant the new row also got method='paystack' with the
+  // SAME reference as its source — which uniq_re_payments_paystack_reference
+  // (migrations/005: unique on paystack_reference where method='paystack'
+  // and deleted_at is null) always refuses, so reallocating a card payment's
+  // overpayment 23505'd on every attempt, misreported to the operator as
+  // "this credit has already been allocated" when nothing had ever been. The
+  // fix nulls paystack_reference on the reallocation row (method is still
+  // carried, for reporting only) — provenance is already fully carried by
+  // reallocated_from_payment_id.
+  const [{ id: cardSourceSched }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,6,'2026-06-01',500000) returning id`, [userId, planId]);
+  const cardSourceRef = `REINST-${cardSourceSched}-1750000099999`;
+  const [{ id: cardSourcePayment }] = await q(
+    `insert into re_payments (organization_id, schedule_id, amount, method, paystack_reference, overpayment)
+     values ($1,$2,900000,'paystack',$3,400000) returning id`, [userId, cardSourceSched, cardSourceRef]);
+  const [{ id: cardTargetSched }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,7,'2026-07-01',400000) returning id`, [userId, planId]);
+
+  let cardReallocationOk = true;
+  try {
+    // Mirrors reallocateOverpayment's insert shape AFTER the fix: method
+    // carried from the source, paystack_reference explicitly null.
+    await q(`insert into re_payments (organization_id, schedule_id, amount, method, paystack_reference, reallocated_from_payment_id)
+             values ($1,$2,400000,'paystack',null,$3)`, [userId, cardTargetSched, cardSourcePayment]);
+  } catch (err) { cardReallocationOk = false; console.log(`       ${err.message}`); }
+  check('reallocating a card payment\'s overpayment (paystack_reference nulled) does not collide with the paystack-reference index', cardReallocationOk);
+
+  // Confirms the test above is actually meaningful: the OLD (pre-fix) shape —
+  // copying the source's real reference onto a second 'paystack'-method row —
+  // is still refused by the same index. If this ever stopped being refused,
+  // the index itself changed and the fix above may no longer be necessary or
+  // sufficient.
+  const [{ id: secondCardTargetSched }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,8,'2026-08-01',400000) returning id`, [userId, planId]);
+  let buggyShapeStillBlocked = false;
+  try {
+    await q(`insert into re_payments (organization_id, schedule_id, amount, method, paystack_reference)
+             values ($1,$2,400000,'paystack',$3)`, [userId, secondCardTargetSched, cardSourceRef]);
+  } catch (err) { buggyShapeStillBlocked = /unique|duplicate/i.test(err.message); }
+  check('copying the source reference onto a second paystack-method row (the pre-fix behaviour) is still refused', buggyShapeStillBlocked);
+
   // ── 008: voiding a wrongly recorded payment ──────────────────────────────
 
   const voidCols = await colsOf('re_payments');
@@ -996,6 +1045,296 @@ function check(name, cond, detail) {
   } catch (err) { console.log(`       ${err.message}`); }
   check('re-running the 020 backfill fills a pre-existing reservation\'s rate from its rep',
     commissionRateBackfilled);
+
+  // ── Soft-deleted buyer PATCH exclusion (routes/customers.js) ────────────
+  // orgContext's automatic deleted_at filter only wraps .select() — an
+  // update-then-select chain like PATCH /:id used to be unfiltered.
+  const [{ id: softDeleteCustomerId }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Soft Deleted Buyer') returning id`, [userId]);
+  await q(`update re_customers set deleted_at = now() where id=$1`, [softDeleteCustomerId]);
+
+  let patchMatchedDeletedBuyer = true;
+  try {
+    const patched = await q(
+      `update re_customers set full_name='Hijacked Name' where id=$1 and organization_id=$2 and deleted_at is null returning id`,
+      [softDeleteCustomerId, userId]);
+    patchMatchedDeletedBuyer = patched.length > 0;
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('a PATCH-style update with deleted_at is null does NOT match a soft-deleted buyer', !patchMatchedDeletedBuyer);
+
+  const [{ full_name: nameAfterAttempt }] = await q(`select full_name from re_customers where id=$1`, [softDeleteCustomerId]);
+  check('the soft-deleted buyer\'s name is unchanged after the blocked update', nameAfterAttempt === 'Soft Deleted Buyer');
+
+  // ── Commission transition guard: paid_at clearing + soft-delete exclusion
+  // (routes/commissions.js PATCH /status) ──────────────────────────────────
+  const [{ id: commSchedId }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,20,'2026-09-01',200000) returning id`, [userId, planId]);
+  const [{ id: commPaymentId }] = await q(
+    `insert into re_payments (organization_id, schedule_id, amount, method) values ($1,$2,200000,'bank_transfer') returning id`,
+    [userId, commSchedId]);
+  const [{ id: paidCommissionId }] = await q(
+    `insert into re_commissions (organization_id, sales_rep_id, reservation_id, payment_id, rate, base_amount, amount, status, paid_at)
+     values ($1,$2,$3,$4,2.5,200000,5000,'paid', now()) returning id`, [userId, repId, liveReservation, commPaymentId]);
+
+  // Moving a PAID commission back to 'accrued' must clear the stale
+  // paid_at — the exact update shape routes/commissions.js now writes
+  // whenever ANY targeted row is currently 'paid', regardless of what
+  // status was requested.
+  let paidAtCleared = false;
+  try {
+    const [row] = await q(
+      `update re_commissions set status='accrued', paid_at=null where id=$1 and organization_id=$2 and deleted_at is null returning status, paid_at`,
+      [paidCommissionId, userId]);
+    paidAtCleared = row.status === 'accrued' && row.paid_at === null;
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('moving a commission off \'paid\' clears its stale paid_at', paidAtCleared);
+
+  // A soft-deleted commission (e.g. cascaded from a deleted buyer) must not
+  // be reachable by the same update shape — it stays invisible everywhere
+  // else, so a write must not be able to mark it paid either.
+  const [{ id: commSchedId2 }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,21,'2026-10-01',200000) returning id`, [userId, planId]);
+  const [{ id: commPaymentId2 }] = await q(
+    `insert into re_payments (organization_id, schedule_id, amount, method) values ($1,$2,200000,'bank_transfer') returning id`,
+    [userId, commSchedId2]);
+  const [{ id: deletedCommissionId }] = await q(
+    `insert into re_commissions (organization_id, sales_rep_id, reservation_id, payment_id, rate, base_amount, amount, status)
+     values ($1,$2,$3,$4,2.5,200000,5000,'accrued') returning id`, [userId, repId, liveReservation, commPaymentId2]);
+  await q(`update re_commissions set deleted_at = now() where id=$1`, [deletedCommissionId]);
+
+  let deletedCommissionMatched = true;
+  try {
+    const updated = await q(
+      `update re_commissions set status='paid', paid_at=now() where id=$1 and organization_id=$2 and deleted_at is null returning id`,
+      [deletedCommissionId, userId]);
+    deletedCommissionMatched = updated.length > 0;
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('a soft-deleted commission cannot be matched and marked paid by the same update shape', !deletedCommissionMatched);
+
+  // ── Reallocation same-buyer check: schedule → plan → reservation →
+  // customer_id chain (routes/payments.js reallocate route) ───────────────
+  const [{ id: reallocProjectId }] = await q(
+    `insert into re_projects (organization_id, name) values ($1,'Realloc Check Estate') returning id`, [userId]);
+  const [{ id: reallocUnitA }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price) values ($1,$2,'RA-1',5000000) returning id`,
+    [userId, reallocProjectId]);
+  const [{ id: reallocUnitB }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price) values ($1,$2,'RA-2',5000000) returning id`,
+    [userId, reallocProjectId]);
+  const [{ id: reallocBuyerA }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Realloc Buyer A') returning id`, [userId]);
+  const [{ id: reallocBuyerB }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Realloc Buyer B') returning id`, [userId]);
+  const [{ id: reallocResA }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, reallocUnitA, reallocBuyerA]);
+  const [{ id: reallocResB }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, reallocUnitB, reallocBuyerB]);
+  const [{ id: reallocPlanA }] = await q(
+    `insert into re_installment_plans (organization_id, reservation_id, total_amount, number_of_installments, start_date)
+     values ($1,$2,5000000,10,'2026-01-01') returning id`, [userId, reallocResA]);
+  const [{ id: reallocPlanB }] = await q(
+    `insert into re_installment_plans (organization_id, reservation_id, total_amount, number_of_installments, start_date)
+     values ($1,$2,5000000,10,'2026-01-01') returning id`, [userId, reallocResB]);
+  const [{ id: reallocSchedA }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,1,'2026-01-01',500000) returning id`, [userId, reallocPlanA]);
+  const [{ id: reallocSchedA2 }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,2,'2026-02-01',500000) returning id`, [userId, reallocPlanA]);
+  const [{ id: reallocSchedB }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,1,'2026-01-01',500000) returning id`, [userId, reallocPlanB]);
+
+  // Mirrors the exact join path routes/payments.js's reallocate route now
+  // walks BEFORE calling reallocateOverpayment, on both the source
+  // payment's schedule and the proposed target schedule.
+  const customerIdForSchedule = async (scheduleId) => {
+    const [row] = await q(
+      `select res.customer_id from re_installment_schedule s
+       join re_installment_plans p on p.id = s.plan_id
+       join re_reservations res on res.id = p.reservation_id
+       where s.id = $1`, [scheduleId]);
+    return row.customer_id;
+  };
+
+  const sourceCustomer = await customerIdForSchedule(reallocSchedA);
+  const sameBuyerTargetCustomer = await customerIdForSchedule(reallocSchedA2);
+  const differentBuyerTargetCustomer = await customerIdForSchedule(reallocSchedB);
+
+  check('the chain query resolves a schedule to its own buyer\'s customer_id', sourceCustomer === reallocBuyerA);
+  check('two installments on the SAME buyer\'s own reservation resolve to the SAME customer_id — reallocation between them is allowed',
+    sourceCustomer === sameBuyerTargetCustomer);
+  check('two DIFFERENT buyers\' schedules resolve to two DIFFERENT customer_ids — the mismatch the guard refuses',
+    sourceCustomer !== differentBuyerTargetCustomer);
+
+  // ── Waived row / superseded plan guard (routes/payments.js record route) ─
+  const [{ id: waivedGuardSchedId }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due, status)
+     values ($1,$2,22,'2026-11-01',300000,'waived') returning id`, [userId, planId]);
+
+  const guardShape = async (scheduleId) => {
+    const [row] = await q(
+      `select s.status as schedule_status, p.status as plan_status
+       from re_installment_schedule s join re_installment_plans p on p.id = s.plan_id
+       where s.id = $1`, [scheduleId]);
+    return row;
+  };
+
+  const waivedRow = await guardShape(waivedGuardSchedId);
+  check('a waived schedule row is identifiable by the exact query the record route now runs before accepting a payment',
+    waivedRow.schedule_status === 'waived');
+
+  // A schedule row whose PLAN is superseded (the state restructureService
+  // leaves an old plan's rows in) must also be identifiable, even where the
+  // row itself is still nominally 'pending'.
+  const [{ id: supersededPlanId }] = await q(
+    `insert into re_installment_plans (organization_id, reservation_id, total_amount, number_of_installments, start_date, status)
+     values ($1,$2,1000000,5,'2026-01-01','superseded') returning id`, [userId, reallocResB]);
+  const [{ id: supersededSchedId }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due, status)
+     values ($1,$2,1,'2026-01-01',500000,'pending') returning id`, [userId, supersededPlanId]);
+  const supersededRow = await guardShape(supersededSchedId);
+  check('a schedule row whose PLAN (not the row itself) is superseded is identifiable by the same query — the second half of the guard',
+    supersededRow.plan_status === 'superseded' && supersededRow.schedule_status === 'pending');
+
+  // ── Receipt for a voided payment must not be findable
+  // (receiptService.js loadPaymentContext) ─────────────────────────────────
+  const [{ id: voidReceiptSchedId }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,23,'2026-12-01',150000) returning id`, [userId, planId]);
+  const [{ id: voidReceiptPaymentId }] = await q(
+    `insert into re_payments (organization_id, schedule_id, amount, method) values ($1,$2,150000,'bank_transfer') returning id`,
+    [userId, voidReceiptSchedId]);
+  await q(`update re_payments set voided_at = now(), void_reason='test void' where id=$1`, [voidReceiptPaymentId]);
+
+  let voidedPaymentFoundByReceiptLookup = true;
+  try {
+    const rows = await q(
+      `select id from re_payments where id=$1 and organization_id=$2 and voided_at is null`,
+      [voidReceiptPaymentId, userId]);
+    voidedPaymentFoundByReceiptLookup = rows.length > 0;
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('receiptService.loadPaymentContext\'s query (id + org + voided_at is null) does not find a voided payment',
+    !voidedPaymentFoundByReceiptLookup);
+
+  // ── Receipt superseded when its payment is voided (routes/payments.js
+  // void route) — re_documents.status has no 'voided' value, so the fix
+  // reuses 'pending' + clears storage_path, the two fields that gate
+  // whether a receipt is servable everywhere else in the product. ─────────
+  const [{ id: receiptDocId }] = await q(
+    `insert into re_documents (organization_id, reservation_id, payment_id, doc_type, status, storage_path, generated_at)
+     values ($1,$2,$3,'receipt','generated','org/receipts/doc-1/123.pdf', now()) returning id`,
+    [userId, liveReservation, voidReceiptPaymentId]);
+
+  let receiptSuperseded = false;
+  try {
+    const [row] = await q(
+      `update re_documents set status='pending', storage_path=null, generated_at=null
+       where organization_id=$1 and payment_id=$2 and doc_type='receipt' and status='generated'
+       returning id`, [userId, voidReceiptPaymentId]);
+    receiptSuperseded = Boolean(row);
+  } catch (err) { console.log(`       ${err.message}`); }
+  check('voiding a payment supersedes its already-generated receipt (status/storage_path cleared)', receiptSuperseded);
+
+  const stillVisibleToPortal = await q(`select id from re_documents where id=$1 and status='generated'`, [receiptDocId]);
+  check('the superseded receipt no longer matches portalService\'s status=generated buyer-visible filter', stillVisibleToPortal.length === 0);
+
+  // ── Import rollback: hard-deleting an orphaned reservation frees its unit
+  // (routes/imports.js, mirrors routes/reservations.js's own POST rollback) ─
+  const [{ id: importRollbackProject }] = await q(
+    `insert into re_projects (organization_id, name) values ($1,'Import Rollback Estate') returning id`, [userId]);
+  const [{ id: importRollbackUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price, status)
+     values ($1,$2,'IMP-1',3000000,'reserved') returning id`, [userId, importRollbackProject]);
+  const [{ id: importRollbackBuyer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Import Rollback Buyer') returning id`, [userId]);
+  const [{ id: importRollbackRes }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, importRollbackUnit, importRollbackBuyer]);
+
+  // Mirrors the exact rollback sequence imports.js now runs on a
+  // plan-creation failure: hard-delete the reservation just created for
+  // this row, release the unit.
+  await q(`delete from re_reservations where id=$1`, [importRollbackRes]);
+  await q(`update re_units set status='available' where id=$1 and organization_id=$2`, [importRollbackUnit, userId]);
+
+  const [{ status: unitStatusAfterRollback }] = await q(`select status from re_units where id=$1`, [importRollbackUnit]);
+  check('the import rollback sequence returns the unit to available', unitStatusAfterRollback === 'available');
+
+  const [{ id: importRollbackBuyer2 }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Second Attempt Buyer') returning id`, [userId]);
+  let unitReclaimable = true;
+  try {
+    await q(`insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3)`,
+      [userId, importRollbackUnit, importRollbackBuyer2]);
+  } catch (err) { unitReclaimable = false; console.log(`       ${err.message}`); }
+  check('the unit is fully reclaimable by a later row after the rollback — no permanently stranded inventory', unitReclaimable);
+
+  // ── Restructure rollback invariant: a failure AFTER the new plan is
+  // created (e.g. the contract-value link update) must leave exactly one
+  // ACTIVE plan again, not two (services/restructureService.js) ───────────
+  const [{ id: rbProject }] = await q(
+    `insert into re_projects (organization_id, name) values ($1,'Restructure Rollback Estate') returning id`, [userId]);
+  const [{ id: rbUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price) values ($1,$2,'RB-1',9000000) returning id`,
+    [userId, rbProject]);
+  const [{ id: rbBuyer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Restructure Rollback Buyer') returning id`, [userId]);
+  const [{ id: rbRes }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, rbUnit, rbBuyer]);
+  const [{ id: rbOldPlan }] = await q(
+    `insert into re_installment_plans (organization_id, reservation_id, total_amount, number_of_installments, start_date, status)
+     values ($1,$2,9000000,9,'2026-01-01','active') returning id`, [userId, rbRes]);
+  const [{ id: rbSchedPending }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due, status)
+     values ($1,$2,1,'2026-01-01',1000000,'pending') returning id`, [userId, rbOldPlan]);
+  const [{ id: rbSchedOverdue }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due, status)
+     values ($1,$2,2,'2026-02-01',1000000,'overdue') returning id`, [userId, rbOldPlan]);
+
+  // Simulate what restructure() does BEFORE createPlanWithSchedule:
+  // supersede the old plan, waive its unpaid rows.
+  await q(`update re_installment_plans set status='superseded' where id=$1`, [rbOldPlan]);
+  await q(`update re_installment_schedule set status='waived' where id in ($1,$2)`, [rbSchedPending, rbSchedOverdue]);
+
+  // Simulate createPlanWithSchedule succeeding (the new plan + schedule
+  // exist)...
+  const [{ id: rbNewPlan }] = await q(
+    `insert into re_installment_plans (organization_id, reservation_id, total_amount, number_of_installments, start_date, status)
+     values ($1,$2,9000000,9,'2026-10-01','active') returning id`, [userId, rbRes]);
+  const [{ id: rbNewSched }] = await q(
+    `insert into re_installment_schedule (organization_id, plan_id, installment_number, due_date, amount_due)
+     values ($1,$2,1,'2026-10-01',1000000) returning id`, [userId, rbNewPlan]);
+
+  // ...then the LINK update (setting original_total_amount/carried_amount_paid)
+  // fails — simulated by simply not running it; the failure itself is the
+  // premise. This is the exact rollback restructureService.js's catch block
+  // now runs in that case.
+  await q(`delete from re_installment_schedule where plan_id=$1`, [rbNewPlan]);
+  await q(`delete from re_installment_plans where id=$1`, [rbNewPlan]);
+  await q(`update re_installment_plans set status='active', restructured_at=null, restructure_reason=null where id=$1`, [rbOldPlan]);
+  await q(`update re_installment_schedule set status='pending' where id=$1`, [rbSchedPending]);
+  await q(`update re_installment_schedule set status='overdue' where id=$1`, [rbSchedOverdue]);
+
+  const activePlans = await q(`select id from re_installment_plans where reservation_id=$1 and status='active'`, [rbRes]);
+  check('after the rollback, the reservation has exactly ONE active plan again (the restored original)',
+    activePlans.length === 1 && activePlans[0].id === rbOldPlan);
+
+  const restoredStatuses = await q(
+    `select id, status from re_installment_schedule where plan_id=$1 order by installment_number`, [rbOldPlan]);
+  check('each waived row is restored to its OWN prior status, not a blanket value',
+    restoredStatuses[0].status === 'pending' && restoredStatuses[1].status === 'overdue');
+
+  const newPlanGone = await q(`select id from re_installment_plans where id=$1`, [rbNewPlan]);
+  check('the new plan (created seconds before the simulated failure) no longer exists after rollback', newPlanGone.length === 0);
+
+  const newSchedGone = await q(`select id from re_installment_schedule where id=$1`, [rbNewSched]);
+  check('the new plan\'s schedule rows are gone too', newSchedGone.length === 0);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

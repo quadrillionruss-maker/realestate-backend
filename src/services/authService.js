@@ -24,13 +24,23 @@ const jwt = require('jsonwebtoken');
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 
-// Cost parameters. N=16384 puts a single hash at a few tens of milliseconds on
-// a small instance — slow enough to matter offline, fast enough for a login.
-// They are stored in the hash string, so raising them later leaves old rows
-// verifiable.
-const SCRYPT = { N: 16_384, r: 8, p: 1, keylen: 64 };
-// N * r * 128 * 2 exceeds Node's 32MB default and throws ERR_CRYPTO_INVALID_SCRYPT_PARAM.
-const SCRYPT_MAXMEM = 64 * 1024 * 1024;
+// Cost parameters — OWASP's current scrypt minimum (N=2^16, r=8, p=1) or
+// stronger; p=2 here for extra resistance to parallel (GPU/ASIC) attack
+// hardware, at the cost of proportionally more CPU per login. They are
+// stored in the hash string, so raising them later leaves old rows
+// verifiable — verifyPassword below always re-derives with the N/r/p
+// embedded in the STORED hash, never with this live constant, which is
+// exactly what makes that safe: an existing user's row still reads
+// scrypt$16384$8$1$... and still verifies correctly against it, while every
+// password hashed (or reset) from now on gets the stronger parameters.
+const SCRYPT = { N: 65_536, r: 8, p: 2, keylen: 64 };
+// N * r * 128 * 2 must stay under this ceiling or Node throws
+// ERR_CRYPTO_INVALID_SCRYPT_PARAM. At N=65536, r=8 that's ~128MB; rounded up
+// to a clean 256MB so there is headroom without having to retune this again.
+// A larger ceiling than an old row's own N*r*128*2 needs is harmless — it is
+// only a cap, not an allocation — so this single constant covers both the
+// new parameters above and any pre-existing N=16384 row verifyPassword reads.
+const SCRYPT_MAXMEM = 256 * 1024 * 1024;
 
 const MIN_PASSWORD_LENGTH = 12;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -211,10 +221,17 @@ const publicUser = (user) => ({
 });
 
 async function findUserByEmail(email) {
+  // .eq, not .ilike: the email column is stored lowercase behind a unique
+  // index, and normalizeEmail already lowercases/trims — an exact match is
+  // correct and loses nothing. .ilike interprets % and _ in the SUBMITTED
+  // address as SQL wildcards (normalizeEmail does not escape them), so
+  // "a%@x.com" would match any address starting "a" and ending "@x.com"
+  // instead of failing to match anything, as a nonexistent literal address
+  // should.
   const { data, error } = await supabaseAdmin
     .from('users')
     .select(`${PUBLIC_USER_COLUMNS}, password_hash, google_sub, email_verified_at, failed_login_count, locked_until`)
-    .ilike('email', normalizeEmail(email))
+    .eq('email', normalizeEmail(email))
     .maybeSingle();
   if (error) throw error;
   return data || null;
@@ -272,14 +289,27 @@ async function login({ email, password }) {
 
   const user = await findUserByEmail(email);
 
-  // Checked before the password, not after: an attacker who has already
-  // tripped the lockout should not get a fresh timing signal on whether this
-  // particular guess was closer than the last one.
-  if (user?.locked_until && new Date(user.locked_until) > new Date()) {
-    throw Object.assign(
-      new Error('Too many failed attempts on this account. Try again in a few minutes.'),
-      { statusCode: 429 }
-    );
+  // Checked before the password, not after — a locked account never runs
+  // verifyPassword at all, so a guess made while locked out learns nothing
+  // about how close it was, and burnTime() below pads the timing to match.
+  //
+  // The response for this case must be BYTE-IDENTICAL to a wrong password —
+  // same status, same message. registerFailedLogin only ever runs for an
+  // address with a real account, so `locked` can only ever be true for one:
+  // a distinct 429 here (this used to be a 429 with its own message) turns
+  // the response itself into an account-existence oracle — five wrong
+  // guesses against a real address then a sixth attempt reads differently
+  // (429) than the same sequence against an address that does not exist
+  // (always 401) — which directly contradicts this file's own stated
+  // anti-enumeration design (see the top-of-file comment). The lock is still
+  // fully enforced; it is just never visible in the response shape. Whoever
+  // owns this account still has a persisted signal of it: locked_until
+  // itself, on the row.
+  const locked = Boolean(user?.locked_until && new Date(user.locked_until) > new Date());
+  if (locked) {
+    await burnTime();
+    console.warn(`[auth] login attempt against a locked account: ${user.id}`);
+    throw unauthorized('Incorrect email or password.');
   }
 
   if (!user || !(await verifyPassword(password, user.password_hash))) {

@@ -1,6 +1,6 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
-const { requirePermission } = require('../middleware/rbac');
+const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { initInstallmentPayment, recordManualPayment, reallocateOverpayment, voidPayment } = require('../services/paystackService');
 const { onPaymentRecorded } = require('../services/paymentEvents');
 const { generateReceipt } = require('../services/receiptService');
@@ -17,12 +17,30 @@ router.get('/', requirePermission('payments.read'), async (req, res, next) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 100, 500);
 
+    // !inner on the chain down to re_reservations is what makes the
+    // sales_rep_id filter below actually narrow the top-level rows rather
+    // than being silently ignored — same requirement routes/dashboard.js's
+    // identical filter already depends on.
     let query = supabaseAdmin
       .from('re_payments')
-      .select('*, re_installment_schedule(installment_number, due_date, amount_due, status, re_installment_plans(re_reservations(re_customers(full_name), re_units(unit_number, re_projects(name)))))')
+      .select('*, re_installment_schedule!inner(installment_number, due_date, amount_due, status, re_installment_plans!inner(re_reservations!inner(sales_rep_id, re_customers(full_name), re_units(unit_number, re_projects(name)))))')
       .eq('organization_id', req.orgId)
       .order('paid_at', { ascending: false })
       .limit(limit);
+
+    // A Sales Executive sees payment STATUS for their own buyers only — the
+    // permission grant (permissions.js) opens this route to sales_rep, and
+    // this is the row-level half of "sees payment status, cannot record
+    // payment": re_reservations.sales_rep_id references re_sales_reps(id),
+    // not users(id), so the filter is the same two-step lookup used
+    // everywhere else a rep's own book is scoped.
+    if (isOwnRecordsOnly(req.orgRole)) {
+      const repIds = await salesRepIdsFor(req);
+      query = query.in(
+        're_installment_schedule.re_installment_plans.re_reservations.sales_rep_id',
+        repIds.length ? repIds : [MATCHES_NOTHING]
+      );
+    }
 
     if (req.query.method) query = query.eq('method', req.query.method);
     if (req.query.from) query = query.gte('paid_at', req.query.from);
@@ -91,6 +109,18 @@ router.get('/schedule', requirePermission('payments.schedule'), async (req, res,
     }
     if (req.query.due_before) query = query.lte('due_date', req.query.due_before);
 
+    // A Sales Executive browses their own buyers' schedule only — same
+    // two-step re_sales_reps lookup as every other own-book filter, applied
+    // here because this is the "record a payment" / "check status" screen a
+    // rep is now allowed to open read-only (permissions.js: payments.schedule).
+    if (isOwnRecordsOnly(req.orgRole)) {
+      const repIds = await salesRepIdsFor(req);
+      query = query.in(
+        're_installment_plans.re_reservations.sales_rep_id',
+        repIds.length ? repIds : [MATCHES_NOTHING]
+      );
+    }
+
     const { data, error } = await query;
     if (error) throw error;
 
@@ -100,13 +130,30 @@ router.get('/schedule', requirePermission('payments.schedule'), async (req, res,
     const ids = (data || []).map((row) => row.id);
     const paidBySchedule = new Map();
     if (ids.length) {
-      const { data: payments } = await supabaseAdmin
-        .from('re_payments').select('schedule_id, amount').in('schedule_id', ids).is('voided_at', null);
-      for (const payment of payments || []) {
-        paidBySchedule.set(
-          payment.schedule_id,
-          (paidBySchedule.get(payment.schedule_id) || 0) + Number(payment.amount || 0)
-        );
+      // Chunked rather than one .in() call carrying up to this route's own
+      // 1000-row limit — a single request with that many ids risks a
+      // gateway or URL-length failure, which would silently make the error
+      // below the ONLY thing standing between a failed lookup and every
+      // installment rendering as fully outstanding (amount_paid: 0).
+      const CHUNK_SIZE = 100;
+      for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+        const chunk = ids.slice(i, i + CHUNK_SIZE);
+        const { data: payments, error: paymentsErr } = await supabaseAdmin
+          .from('re_payments')
+          .select('schedule_id, amount')
+          .eq('organization_id', req.orgId)
+          .in('schedule_id', chunk)
+          .is('voided_at', null);
+        // A silently swallowed error here used to mean every installment
+        // rendered as fully outstanding (amount_paid: 0) — exactly the
+        // condition that invites double-billing a buyer who already paid.
+        if (paymentsErr) throw paymentsErr;
+        for (const payment of payments || []) {
+          paidBySchedule.set(
+            payment.schedule_id,
+            (paidBySchedule.get(payment.schedule_id) || 0) + Number(payment.amount || 0)
+          );
+        }
       }
     }
 
@@ -161,6 +208,29 @@ router.post('/:scheduleId/record', requirePermission('payments.record'), async (
       return res.status(400).json({ error: `method must be one of: ${PAYMENT_METHODS.join(', ')}` });
     }
 
+    // The UI hides a waived row and a superseded plan's own rows (both are a
+    // normal, common state after restructureService.restructure runs), but
+    // nothing at the API stopped a payment being recorded against either —
+    // the schedule_id is still a valid row in this org either way.
+    const { data: target, error: targetErr } = await supabaseAdmin
+      .from('re_installment_schedule')
+      .select('id, status, re_installment_plans(status)')
+      .eq('id', req.params.scheduleId)
+      .eq('organization_id', req.orgId)
+      .maybeSingle();
+    if (targetErr) throw targetErr;
+    if (!target) return res.status(404).json({ error: 'Installment not found' });
+    if (target.status === 'waived') {
+      return res.status(409).json({
+        error: 'This installment was waived when the plan was restructured — payment cannot be recorded against it.',
+      });
+    }
+    if (target.re_installment_plans && target.re_installment_plans.status !== 'active') {
+      return res.status(409).json({
+        error: 'This installment belongs to a plan that is no longer active — payment cannot be recorded against it.',
+      });
+    }
+
     const payment = await recordManualPayment(req.orgId, req.params.scheduleId, {
       amount, method, reference, payerName: payer_name,
     });
@@ -190,6 +260,39 @@ router.post('/:paymentId/reallocate', requirePermission('payments.reallocate'), 
   try {
     const { to_schedule_id } = req.body || {};
     if (!to_schedule_id) return res.status(400).json({ error: 'to_schedule_id is required' });
+
+    // reallocateOverpayment only checks that both the source payment and the
+    // target schedule row belong to THIS ORG — nothing stops the credit from
+    // one buyer's overpaid installment being moved onto a completely
+    // different buyer's schedule row (a mistyped or copy-pasted id). Checked
+    // here, before any money moves, against the SAME chain the rest of the
+    // product reasons about ownership through: schedule → plan → reservation.
+    const [{ data: sourceChain, error: sourceErr }, { data: targetChain, error: targetErr }] = await Promise.all([
+      supabaseAdmin
+        .from('re_payments')
+        .select('id, re_installment_schedule(re_installment_plans(reservation_id, re_reservations(customer_id)))')
+        .eq('id', req.params.paymentId)
+        .eq('organization_id', req.orgId)
+        .maybeSingle(),
+      supabaseAdmin
+        .from('re_installment_schedule')
+        .select('id, re_installment_plans(reservation_id, re_reservations(customer_id))')
+        .eq('id', to_schedule_id)
+        .eq('organization_id', req.orgId)
+        .maybeSingle(),
+    ]);
+    if (sourceErr) throw sourceErr;
+    if (targetErr) throw targetErr;
+    if (!sourceChain) return res.status(404).json({ error: 'Payment not found' });
+    if (!targetChain) return res.status(404).json({ error: 'Installment not found' });
+
+    const sourceCustomerId = sourceChain.re_installment_schedule?.re_installment_plans?.re_reservations?.customer_id;
+    const targetCustomerId = targetChain.re_installment_plans?.re_reservations?.customer_id;
+    if (!sourceCustomerId || !targetCustomerId || sourceCustomerId !== targetCustomerId) {
+      return res.status(409).json({
+        error: 'This credit and the target installment belong to different buyers — reallocation refused.',
+      });
+    }
 
     const payment = await reallocateOverpayment(req.orgId, req.params.paymentId, to_schedule_id);
 
@@ -224,7 +327,7 @@ router.post('/:paymentId/void', requirePermission('payments.void'), async (req, 
     // The commission this payment earned, if any, was money that turns out
     // never to have arrived — void it too, rather than leaving a rep paid
     // (or owed) on a transfer that didn't happen.
-    const { data: commission } = await supabaseAdmin
+    const { data: commission, error: commissionErr } = await supabaseAdmin
       .from('re_commissions')
       .update({ status: 'void' })
       .eq('payment_id', payment.id)
@@ -233,19 +336,70 @@ router.post('/:paymentId/void', requirePermission('payments.void'), async (req, 
       .select('id, amount')
       .maybeSingle();
 
+    let commissionVoidFailed = false;
+    if (commissionErr) {
+      // The payment itself is already voided at this point — that must not
+      // be undone by a commission-side failure, but silently reporting
+      // success when the commission is still live would leave a rep paid
+      // (or owed) on a transfer that turns out never to have happened.
+      // Re-verify what actually happened rather than trusting the failed
+      // update's absent row.
+      console.error('[payments] failed to void the commission for voided payment', payment.id, ':', commissionErr.message);
+      const { data: stillLive } = await supabaseAdmin
+        .from('re_commissions')
+        .select('id, amount')
+        .eq('payment_id', payment.id)
+        .eq('organization_id', req.orgId)
+        .neq('status', 'void')
+        .maybeSingle();
+      if (stillLive) commissionVoidFailed = true;
+    }
+
+    // A receipt already handed out for this payment must stop being served —
+    // a real receipt number and amount for money now explicitly recorded as
+    // never having arrived. re_documents.status has no 'voided'/'superseded'
+    // value in its check constraint (pending|generated|sent|signed), and
+    // adding one is a migration, out of scope for this fix — so this reuses
+    // 'pending' (the same value a not-yet-generated document carries) and
+    // clears storage_path: portalService.js only shows a buyer documents
+    // where status='generated', and documentService.getDownloadUrl gates a
+    // download on storage_path being set, so both are covered without a
+    // schema change.
+    const { data: staleReceipt, error: receiptErr } = await supabaseAdmin
+      .from('re_documents')
+      .update({ status: 'pending', storage_path: null, generated_at: null })
+      .eq('organization_id', req.orgId)
+      .eq('payment_id', payment.id)
+      .eq('doc_type', 'receipt')
+      .eq('status', 'generated')
+      .select('id')
+      .maybeSingle();
+    if (receiptErr) {
+      console.error('[payments] failed to supersede the receipt for voided payment', payment.id, ':', receiptErr.message);
+    }
+
     audit(req, {
       action: 'payment.voided',
       entityType: 're_payments',
       entityId: payment.id,
       summary: `₦${Number(payment.amount).toLocaleString('en-NG')} payment voided — ${reason}`
-        + (commission ? `; commission of ₦${Number(commission.amount).toLocaleString('en-NG')} voided with it` : ''),
+        + (commission ? `; commission of ₦${Number(commission.amount).toLocaleString('en-NG')} voided with it` : '')
+        + (commissionVoidFailed ? '; WARNING: commission void FAILED — still live, needs manual review' : '')
+        + (staleReceipt ? '; its receipt was superseded' : ''),
       metadata: {
         reason, amount: payment.amount, schedule_id: payment.schedule_id,
         commission_voided: commission?.id || null,
+        commission_void_failed: commissionVoidFailed,
+        receipt_superseded: staleReceipt?.id || null,
       },
     });
 
-    res.json({ ...payment, commission_voided: Boolean(commission) });
+    res.json({
+      ...payment,
+      commission_voided: Boolean(commission),
+      commission_void_failed: commissionVoidFailed,
+      receipt_superseded: Boolean(staleReceipt),
+    });
   } catch (e) { next(e); }
 });
 

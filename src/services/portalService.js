@@ -24,6 +24,15 @@
 const jwt = require('jsonwebtoken');
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
+// Contract value is "what did this buyer agree to, in total" — for a plan
+// that has been restructured, that is NOT total_amount (which, on the new
+// plan, is only the remaining balance) but original_total_amount ?? total_amount.
+// restructureService already owns and exports this exact reasoning
+// (contractValue), so it is reused here rather than re-derived, per its own
+// comment: "Anything reporting contract value reads original_total_amount ??
+// total_amount ... so nothing has to know whether a plan has ever been
+// restructured."
+const { contractValue } = require('./restructureService');
 
 const PORTAL_AUDIENCE = 're-portal';
 
@@ -98,7 +107,7 @@ async function loadPortalAccount(customer) {
         id, status, reserved_at, property_type, tenancy_start_date, tenancy_end_date,
         re_units(unit_number, unit_type, size_sqm, list_price, re_projects(name, location)),
         re_installment_plans(
-          id, total_amount, number_of_installments, frequency, start_date,
+          id, total_amount, original_total_amount, status, number_of_installments, frequency, start_date,
           re_installment_schedule(id, installment_number, due_date, amount_due, status, paid_at)
         )`)
       .eq('customer_id', customer.id)
@@ -128,6 +137,12 @@ async function loadPortalAccount(customer) {
         .order('generated_at', { ascending: false })
     : { data: [] };
 
+  // Every plan's schedule rows go in here, superseded or not — a superseded
+  // plan still has real payments recorded against its (since-waived) rows,
+  // and those payments must still count toward totalPaid below. Filtering
+  // this collection to only the active plan would make totalPaid wrong in
+  // the OTHER direction: a buyer who paid before a restructure would see
+  // that money vanish from their own total.
   const scheduleIds = [];
   for (const reservation of reservations || []) {
     for (const plan of asArray(reservation.re_installment_plans)) {
@@ -171,7 +186,19 @@ async function loadPortalAccount(customer) {
     }
 
     for (const plan of asArray(reservation.re_installment_plans)) {
-      totalContracted += Number(plan.total_amount || 0);
+      // A restructure supersedes the old plan and creates a new one for the
+      // remaining balance (restructureService.restructure) — the OLD plan's
+      // total_amount still holds the full original contract value, and the
+      // NEW plan's total_amount holds only what was left, not the contract.
+      // Summing both double-counts the portion already carried forward:
+      // skip a superseded plan entirely here, and read the live plan's
+      // contract value through contractValue() (original_total_amount when
+      // it has one, i.e. exactly the full contract), not its bare
+      // total_amount, or a restructured buyer's contracted total would read
+      // as only their post-restructure remaining balance.
+      if (plan.status !== 'superseded') {
+        totalContracted += contractValue(plan);
+      }
       for (const row of plan.re_installment_schedule || []) {
         if (row.status === 'overdue') {
           overdueAmount += Number(row.amount_due || 0);

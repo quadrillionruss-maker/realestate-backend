@@ -27,12 +27,24 @@
 
 const express = require('express');
 const env = require('../config/env');
-const { handleRealEstateCharge, verifyWebhookSignature } = require('../services/paystackService');
+const {
+  handleRealEstateCharge, verifyWebhookSignature, parseInstallmentReference,
+} = require('../services/paystackService');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { onPaymentRecorded } = require('../services/paymentEvents');
 const { auditSystem } = require('../services/auditService');
 
 const router = express.Router();
+
+// A class of Postgres error that will fail EXACTLY the same way no matter
+// how many times Paystack retries it — a malformed or impossible event, not
+// a transient database hiccup. See the catch block below for why these get a
+// 200 instead of the usual 500.
+const PERMANENT_PG_ERROR_CODES = new Set([
+  '23514', // check_violation — a value the schema flatly refuses
+  '23502', // not_null_violation — a required field the event never carried
+  '22P02', // invalid_text_representation — a value that doesn't even parse as its column's type
+]);
 
 router.post('/paystack', async (req, res) => {
   // express.raw leaves a Buffer here. If some other body parser got there
@@ -50,7 +62,15 @@ router.post('/paystack', async (req, res) => {
   // own comment for why the order matters: picking a key based on the
   // (unverified) reference first would let an unauthenticated request force a
   // database lookup with no proof of anything, which this order never does.
-  if (!(await verifyWebhookSignature(req.body, req.headers['x-paystack-signature']))) {
+  //
+  // verifyWebhookSignature returns { verified, matchedOrgId }, not a bare
+  // boolean — an object is always truthy in JS, so `!(await ...)` here would
+  // silently stop rejecting anything at all. `.verified` is read explicitly,
+  // and the WHOLE object is carried forward to handleRealEstateCharge below,
+  // which needs `.matchedOrgId` to refuse a workspace-key-signed event that
+  // names a different org's schedule (see that function's own comment).
+  const verification = await verifyWebhookSignature(req.body, req.headers['x-paystack-signature']);
+  if (!verification.verified) {
     console.warn('[webhook] rejected an unsigned or mis-signed Paystack request');
     return res.status(401).json({ error: 'Invalid signature.' });
   }
@@ -69,6 +89,32 @@ router.post('/paystack', async (req, res) => {
   }
 
   const reference = event.data?.reference;
+
+  // handleRealEstateCharge returns a bare `true` both when it just inserted a
+  // brand-new payment row AND when the reference already existed (a Paystack
+  // retry of an event this endpoint already durably recorded) — the two
+  // cases are indistinguishable from its return value alone. Re-running the
+  // full post-payment chain below (receipt PDF, commission accrual, buyer
+  // email/SMS, audit entry) on a retry would re-send the receipt and write a
+  // duplicate audit row for money that was already accounted for once.
+  //
+  // Checked HERE, before calling it, rather than trusting anything about
+  // handleRealEstateCharge's own return shape — that function is owned by a
+  // different fix in this codebase and its signature is not this route's to
+  // assume. A plain existence check against re_payments is the same signal
+  // handleRealEstateCharge itself uses internally for its own idempotency
+  // fast path (see paystackService.js), so this mirrors, rather than
+  // duplicates, that logic.
+  let alreadyRecorded = false;
+  if (reference) {
+    const { data: existingPayment } = await supabaseAdmin
+      .from('re_payments')
+      .select('id')
+      .eq('paystack_reference', reference)
+      .maybeSingle();
+    alreadyRecorded = Boolean(existingPayment);
+  }
+
   let owned;
   try {
     // handleRealEstateCharge returns false for references this product does
@@ -81,7 +127,12 @@ router.post('/paystack', async (req, res) => {
     // handled inside handleRealEstateCharge (23505 / existing-reference
     // checks both resolve to `true`, not a throw), so retrying a slow-but-
     // eventually-successful write is safe, not wasteful.
-    owned = await handleRealEstateCharge(event);
+    //
+    // `verification` is passed through as the second argument so the
+    // cross-workspace org-binding check inside handleRealEstateCharge can
+    // actually run — omitting it defaults to no check at all (see that
+    // function's own comment on its `verification = null` default).
+    owned = await handleRealEstateCharge(event, verification);
   } catch (err) {
     // err.message only — a raw Postgres error's .detail/.hint frequently
     // quotes the offending row's actual values (a buyer's email, a phone
@@ -89,6 +140,47 @@ router.post('/paystack', async (req, res) => {
     // into wherever these logs end up retained.
     console.error('[webhook] failed to record charge.success, asking Paystack to retry:', err.message);
     if (env.isDev) console.error(err.stack);
+
+    // A check/not-null/invalid-type violation on THIS event will fail
+    // identically forever — Paystack would otherwise retry an event that can
+    // never succeed for hours, which is worse than the alternative: log it
+    // loudly, leave a clear trail for a human, and stop the retry storm with
+    // a 200. Anything else (a dropped connection, a momentary timeout) keeps
+    // returning 500 exactly as before, because those genuinely might succeed
+    // on the next attempt.
+    if (PERMANENT_PG_ERROR_CODES.has(err.code)) {
+      console.error(
+        '[webhook] PERMANENT failure (pg code %s) for reference %s — acknowledging to stop Paystack retries; this payment was NOT recorded and needs manual review. %s',
+        err.code, reference, err.message
+      );
+      try {
+        const parsed = parseInstallmentReference(reference);
+        const { data: scheduleOrg } = parsed
+          ? await supabaseAdmin
+              .from('re_installment_schedule')
+              .select('organization_id')
+              .eq('id', parsed.scheduleId)
+              .maybeSingle()
+          : { data: null };
+        // Only writeable if the org can actually be established — same
+        // reasoning as the side-effect catch block below: an audit row with
+        // no organization_id is noise in a table whose whole value is that
+        // every row traces to a workspace.
+        if (scheduleOrg?.organization_id) {
+          await auditSystem({
+            orgId: scheduleOrg.organization_id,
+            action: 'webhook.charge_failed_permanently',
+            entityType: 're_payments',
+            summary: `Paystack charge.success for ${reference} failed permanently (${err.code}) and was NOT recorded — needs manual review`,
+            metadata: { reference, pg_code: err.code, message: err.message },
+          });
+        }
+      } catch (auditErr) {
+        console.error('[webhook] could not even write the manual-review audit entry:', auditErr.message);
+      }
+      return res.status(200).json({ received: true });
+    }
+
     return res.status(500).json({ error: 'Could not record this payment yet.' });
   }
 
@@ -99,6 +191,13 @@ router.post('/paystack', async (req, res) => {
   // turn an already-recorded payment into a Paystack retry.
   res.status(200).json({ received: true });
   if (!owned) return;
+  if (alreadyRecorded) {
+    // A retry of an event already durably recorded — acknowledged above, but
+    // the receipt/commission/notification/audit chain must run exactly once
+    // per real payment, not once per delivery attempt.
+    console.info('[webhook] charge.success for', reference, 'was already recorded — skipping side effects on this retry');
+    return;
+  }
 
   try {
     // The handler inserts the payment row; find it so the same post-payment
@@ -134,3 +233,6 @@ router.post('/paystack', async (req, res) => {
 });
 
 module.exports = router;
+// Attached to the exported router purely for the offline test suite — see
+// reservations.js's identical pattern for stripFinancials.
+module.exports.PERMANENT_PG_ERROR_CODES = PERMANENT_PG_ERROR_CODES;

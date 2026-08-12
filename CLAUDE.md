@@ -43,7 +43,7 @@ src/
   templates/               allocation letter, receipt
   utils/                   escapeHtml, csv, amountInWords
   test/                    syntax + logic + schema (offline), smoke.js (live)
-migrations/                eight idempotent SQL files, applied in order
+migrations/                idempotent SQL files, applied in order
 frontend/
   config.js                sets window.__API_BASE__
   vercel.json              security headers; CSP connect-src names the same host as config.js
@@ -367,7 +367,7 @@ degrades:
 | `OPENAI_API_KEY` | Brief still runs, rule-based, marked `generated_by: 'fallback'` |
 | `PAYSTACK_SECRET_KEY` | Payment links 503; the webhook 503s — for any workspace that hasn't set its own Paystack keys. Bank transfers still work |
 | `CREDENTIALS_ENCRYPTION_KEY` | A workspace cannot save its own Paystack or Resend keys (those two Settings forms 503) — the platform fallback keeps working exactly as before |
-| `ALLOWED_ORIGINS` | No browser origin is allowed in production |
+| `ALLOWED_ORIGINS` | No *additional* browser origin is allowed — `server.js` hardcodes the canonical production frontend origin (`PRODUCTION_ORIGINS`) as always-allowed with `credentials: true`, regardless of this variable |
 
 Three deployment gotchas, all covered in `render.yaml`:
 
@@ -410,7 +410,7 @@ in-file, which is why this paragraph is where that note lives instead.
 
 1. Run every file in `migrations/`, in numeric order, in the Supabase SQL
    editor — `001_phase1_schema.sql` through the highest-numbered file present
-   (`019_termii_org_keys.sql` as of this writing). `001` is self-contained — it creates
+   (`020_commission_rate_snapshot.sql` as of this writing). `001` is self-contained — it creates
    the identity tables (`users`, `teams`, `team_members`) as well as the
    domain ones, so an empty project is all it needs. Every migration is
    idempotent, so re-running the whole set after a change is safe and is how

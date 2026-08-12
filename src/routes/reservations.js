@@ -16,6 +16,10 @@ const router = express.Router();
 // row of a list instead of once per buyer.
 function stripFinancials(reservation) {
   if (reservation.re_units) reservation.re_units.list_price = null;
+  // A percentage-based leak of the same class list_price/total_amount are —
+  // migrations/020 added this column to re_reservations, and select('*')
+  // returns it to documentation same as everything else unless stripped here.
+  reservation.commission_rate = null;
   const plans = Array.isArray(reservation.re_installment_plans)
     ? reservation.re_installment_plans
     : [reservation.re_installment_plans].filter(Boolean);
@@ -450,3 +454,8 @@ router.post('/:id/renew-tenancy', requirePermission('reservations.renewTenancy')
 });
 
 module.exports = router;
+// Attached to the exported router (a function, so this is a harmless extra
+// property) purely so the offline test suite can assert on the strip logic
+// directly, the same way restructureService.js exports its own pure helpers
+// for logic.test.js — a route file otherwise has no exports besides `router`.
+module.exports.stripFinancials = stripFinancials;

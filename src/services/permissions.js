@@ -158,8 +158,13 @@ const PERMISSIONS = {
   // Money arriving, and everything that is really "chasing it".
   'payments.record': MONEY_IN,
   'payments.init': MONEY_IN,
-  'payments.schedule': MONEY_IN,
-  'payments.read': MONEY_IN,
+  // + Sales Rep, read-only: this file's own role description says "sees
+  // payment status, cannot record payment" — payments.record above is the
+  // half that stays MONEY_IN-only. routes/payments.js narrows both of these
+  // to a rep's own buyers with the same isOwnRecordsOnly/salesRepIdsFor
+  // row-level filter reservations.read already uses.
+  'payments.schedule': [...MONEY_IN, 'sales_rep'],
+  'payments.read': [...MONEY_IN, 'sales_rep'],
   'payments.reallocate': MONEY_IN,
   'promises.read': MONEY_IN,
   'promises.write': MONEY_IN,
@@ -180,7 +185,11 @@ const PERMISSIONS = {
   // ── Owner + Sales Director + Documentation ───────────────────────────────
   'documents.generate': PAPERWORK,
   'documents.updateStatus': PAPERWORK,
-  'documents.download': PAPERWORK,
+  // + Sales Rep: documents.create/read below already include them ("can
+  // request, cannot issue" — routes/documents.js's own comment). Excluding
+  // download meant a rep could request a document for their own buyer and
+  // then never retrieve the finished file.
+  'documents.download': [...PAPERWORK, 'sales_rep'],
 
   // ── Owner + Sales Director + Sales Rep ───────────────────────────────────
   // Selling. A rep creates buyers and reservations; the row-level filters in

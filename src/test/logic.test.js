@@ -21,11 +21,15 @@ process.env.CREDENTIALS_ENCRYPTION_KEY = process.env.CREDENTIALS_ENCRYPTION_KEY
 
 const assert = require('assert');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const path = require('path');
 
 const { buildSchedule, addMonthsUTC } = require('../services/installmentService');
-const { parseInstallmentReference, isRealEstateReference, buildReference } = require('../services/paystackService');
+const {
+  parseInstallmentReference, isRealEstateReference, buildReference,
+  verifyWebhookSignature, handleRealEstateCharge,
+} = require('../services/paystackService');
 const { buildAllocationLetterHtml, describePaymentPlan } = require('../services/documentService');
 const { buildFallbackBrief, sanitizeStateForModel, resolveRefs } = require('../services/aiBrief');
 const {
@@ -52,6 +56,15 @@ const {
   isDowngrade, capabilitiesLostGoingFrom,
 } = require('../services/permissions');
 const { encrypt, decrypt, last4 } = require('../utils/credentials');
+const { authenticate } = require('../middleware/auth');
+// Route files export only `router` normally — these three attach a couple of
+// extra properties purely so this offline suite can assert on their pure
+// logic directly (stripFinancials, the audit financial-redaction helper, the
+// webhook's permanent-error classification set) without needing a live
+// Express server or a database.
+const reservationsRouter = require('../routes/reservations');
+const auditRouter = require('../routes/audit');
+const webhooksRouter = require('../routes/webhooks');
 
 // frontend/realestate.js is a browser script, not a CommonJS module — it
 // assigns onto `window.RE` rather than `module.exports`, and its very last
@@ -226,6 +239,161 @@ test('refuses to parse a malformed reference rather than guessing', () => {
   assert.strictEqual(parseInstallmentReference('REINST-'), null);
   assert.strictEqual(parseInstallmentReference(''), null);
 });
+
+// ── Webhook signature verification — cross-workspace fraud ───────────────
+// (src/services/paystackService.js: verifyWebhookSignature, allConfiguredSecretKeys,
+// handleRealEstateCharge). A live signature check against a real Paystack
+// account can't run offline, so this exercises the exact logic that changed —
+// which principal a matching key identifies, and that handleRealEstateCharge
+// refuses to credit a schedule that does not belong to the workspace whose
+// key actually signed the event — against constructed inputs and a stubbed
+// supabaseAdmin, the same technique the branding tests below use.
+//
+// supabaseAdmin.from is a plain reassignable property, so it can be swapped
+// per-table for the duration of one test and restored after.
+function withFakePaystackTables(tables, fn) {
+  const original = supabaseAdmin.from;
+  supabaseAdmin.from = (table) => {
+    if (Object.prototype.hasOwnProperty.call(tables, table)) return tables[table]();
+    throw new Error(`unexpected table in test stub: ${table}`);
+  };
+  return fn().finally(() => { supabaseAdmin.from = original; });
+}
+
+// A minimal chainable query builder: every non-terminal call returns itself,
+// and it resolves to `result` however it is awaited — with or without a
+// trailing .maybeSingle()/.single() — because the real code sometimes awaits
+// the query directly and sometimes awaits one more method on top of it.
+function fakeQuery(result) {
+  const builder = {
+    select: () => builder,
+    eq: () => builder,
+    not: () => builder,
+    order: () => builder,
+    is: () => builder,
+    maybeSingle: async () => result,
+    single: async () => result,
+    then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
+  };
+  return builder;
+}
+
+async function runPaystackWebhookOrgTests() {
+  section('Webhook signature verification — return shape + cross-workspace org check (paystackService.js)');
+
+  await testAsync('verifyWebhookSignature returns WHICH workspace key matched, not a bare boolean', async () => {
+    const orgAKey = 'sk_test_orgA_1234567890';
+    const orgBKey = 'sk_test_orgB_abcdefghij';
+    const orgSettingsRows = [
+      { organization_id: 'org-a', paystack_secret_key_encrypted: encrypt(orgAKey) },
+      { organization_id: 'org-b', paystack_secret_key_encrypted: encrypt(orgBKey) },
+    ];
+    const rawBody = Buffer.from(JSON.stringify({ event: 'charge.success', data: { reference: 'REINST-x' } }));
+    const signedByOrgB = crypto.createHmac('sha512', orgBKey).update(rawBody).digest('hex');
+
+    await withFakePaystackTables(
+      { re_org_settings: () => fakeQuery({ data: orgSettingsRows }) },
+      async () => {
+        const matched = await verifyWebhookSignature(rawBody, signedByOrgB);
+        assert.strictEqual(matched.verified, true);
+        assert.strictEqual(matched.matchedOrgId, 'org-b', 'must identify org-b specifically, not just "some key matched"');
+
+        const noMatch = await verifyWebhookSignature(rawBody, 'not-a-real-signature');
+        assert.strictEqual(noMatch.verified, false);
+        assert.strictEqual(noMatch.matchedOrgId, null);
+      },
+    );
+  });
+
+  await testAsync('handleRealEstateCharge refuses an event whose matched workspace key does not own the referenced schedule', async () => {
+    const scheduleId = '11111111-1111-4111-8111-111111111111';
+    const reference = `REINST-${scheduleId}-1750000000000`;
+    const event = { data: { reference, amount: 10_000_00, paid_at: '2026-08-01T00:00:00.000Z' } };
+    let insertCalled = false;
+
+    const result = await withFakePaystackTables(
+      {
+        // Duplicate-reference fast-path check: nothing recorded yet.
+        re_payments: () => ({
+          ...fakeQuery({ data: null }),
+          insert: () => { insertCalled = true; return Promise.resolve({ error: null }); },
+        }),
+        // The schedule genuinely belongs to org-a.
+        re_installment_schedule: () => fakeQuery({ data: { id: scheduleId, organization_id: 'org-a', amount_due: 100000 } }),
+      },
+      // A key that verified as belonging to org-b tries to settle org-a's schedule.
+      () => handleRealEstateCharge(event, { verified: true, matchedOrgId: 'org-b' }),
+    );
+
+    assert.strictEqual(insertCalled, false, 'a cross-workspace-key event must never write a payment row');
+    assert.strictEqual(result, true, 'still acknowledged (ours by namespace) so Paystack does not retry a mismatch forever');
+  });
+
+  await testAsync('handleRealEstateCharge processes normally when the matched key IS the schedule\'s own workspace', async () => {
+    const scheduleId = '22222222-2222-4222-8222-222222222222';
+    const reference = `REINST-${scheduleId}-1750000000001`;
+    const event = { data: { reference, amount: 10_000_00, paid_at: '2026-08-01T00:00:00.000Z' } };
+    let insertCalled = false;
+
+    await withFakePaystackTables(
+      {
+        re_payments: () => ({
+          ...fakeQuery({ data: null }),
+          insert: () => { insertCalled = true; return Promise.resolve({ error: null }); },
+        }),
+        re_installment_schedule: () => fakeQuery({ data: { id: scheduleId, organization_id: 'org-a', amount_due: 100000 } }),
+      },
+      () => handleRealEstateCharge(event, { verified: true, matchedOrgId: 'org-a' }),
+    );
+
+    assert.strictEqual(insertCalled, true, 'the schedule\'s own workspace key must still be able to settle its own payment');
+  });
+
+  await testAsync('handleRealEstateCharge stays unrestricted when the platform key matched (matchedOrgId null)', async () => {
+    const scheduleId = '33333333-3333-4333-8333-333333333333';
+    const reference = `REINST-${scheduleId}-1750000000002`;
+    const event = { data: { reference, amount: 10_000_00, paid_at: '2026-08-01T00:00:00.000Z' } };
+    let insertCalled = false;
+
+    await withFakePaystackTables(
+      {
+        re_payments: () => ({
+          ...fakeQuery({ data: null }),
+          insert: () => { insertCalled = true; return Promise.resolve({ error: null }); },
+        }),
+        re_installment_schedule: () => fakeQuery({ data: { id: scheduleId, organization_id: 'org-a', amount_due: 100000 } }),
+      },
+      // The platform key matching is null, deliberately unrestricted — this
+      // is the path every workspace with no Paystack key of its own has
+      // always used, and it must keep working exactly as before.
+      () => handleRealEstateCharge(event, { verified: true, matchedOrgId: null }),
+    );
+
+    assert.strictEqual(insertCalled, true, 'a platform-key match must remain unrestricted regardless of which org the schedule belongs to');
+  });
+
+  await testAsync('handleRealEstateCharge with no verification argument at all behaves exactly as before (no cross-org check)', async () => {
+    // Guards backward compatibility for any caller not yet passing verification
+    // context through — same pre-fix behaviour, not a new failure mode.
+    const scheduleId = '44444444-4444-4444-8444-444444444444';
+    const reference = `REINST-${scheduleId}-1750000000003`;
+    const event = { data: { reference, amount: 10_000_00, paid_at: '2026-08-01T00:00:00.000Z' } };
+    let insertCalled = false;
+
+    await withFakePaystackTables(
+      {
+        re_payments: () => ({
+          ...fakeQuery({ data: null }),
+          insert: () => { insertCalled = true; return Promise.resolve({ error: null }); },
+        }),
+        re_installment_schedule: () => fakeQuery({ data: { id: scheduleId, organization_id: 'org-a', amount_due: 100000 } }),
+      },
+      () => handleRealEstateCharge(event),
+    );
+
+    assert.strictEqual(insertCalled, true);
+  });
+}
 
 // ── Document rendering ───────────────────────────────────────────────────
 section('Allocation letter');
@@ -740,6 +908,96 @@ test('refuses a restructure that would produce a nonsense schedule', () => {
   }), /whole number/i);
 });
 
+// ── Portal balance — a restructured plan must not double-count ──────────
+// (src/services/portalService.js loadPortalAccount). Before the fix, the
+// reservation query fetched every plan with no status filter and summed
+// plan.total_amount across ALL of them — a restructure's superseded plan
+// still holds the FULL original contract value in its own total_amount, so
+// it was added on top of the new plan's total_amount (the remaining
+// balance), inflating what the buyer's own portal told them they had
+// contracted for. Fixture below: ₦10,000,000 contract, ₦4,000,000 paid
+// before a restructure, ₦3,000,000 paid after — the buyer should read as
+// owing exactly ₦3,000,000, matching the one outstanding installment.
+async function runPortalBalanceTests() {
+  section('Portal balance — a restructured reservation is not double-counted (portalService.js)');
+
+  function withFakePortalTables(byTable, fn) {
+    const original = supabaseAdmin.from;
+    supabaseAdmin.from = (table) => {
+      const config = byTable[table];
+      if (!config) throw new Error(`unexpected table in test stub: ${table}`);
+      const builder = {
+        select: () => builder,
+        eq: () => builder,
+        neq: () => builder,
+        in: () => builder,
+        is: () => builder,
+        order: () => builder,
+        update: () => builder,
+        maybeSingle: async () => config,
+        then: (resolve, reject) => Promise.resolve(config).then(resolve, reject),
+      };
+      return builder;
+    };
+    return fn().finally(() => { supabaseAdmin.from = original; });
+  }
+
+  await testAsync('total_contracted, total_paid and balance all read correctly across a restructure — not inflated, not understated', async () => {
+    const oldPlan = {
+      id: 'plan-old',
+      status: 'superseded',
+      total_amount: 10_000_000,       // the FULL original contract — must be skipped, not summed
+      original_total_amount: null,
+      number_of_installments: 10, frequency: 'monthly', start_date: '2026-01-01',
+      re_installment_schedule: [
+        // Waived by restructureService when the plan was superseded — not
+        // 'pending'/'overdue', so it was already naturally excluded from
+        // overdue/next-due math either way.
+        { id: 'sched-old-1', installment_number: 1, due_date: '2026-01-01', amount_due: 4_000_000, status: 'waived', paid_at: null },
+      ],
+    };
+    const newPlan = {
+      id: 'plan-new',
+      status: 'active',
+      total_amount: 6_000_000,        // only the REMAINING balance at restructure time
+      original_total_amount: 10_000_000, // the contract value survives here
+      number_of_installments: 2, frequency: 'monthly', start_date: '2026-05-01',
+      re_installment_schedule: [
+        { id: 'sched-new-1', installment_number: 1, due_date: '2026-05-01', amount_due: 3_000_000, status: 'paid', paid_at: '2026-05-01' },
+        { id: 'sched-new-2', installment_number: 2, due_date: '2026-06-01', amount_due: 3_000_000, status: 'pending', paid_at: null },
+      ],
+    };
+    const reservation = {
+      id: 'res-1', status: 'active', reserved_at: '2026-01-01', property_type: 'off_plan',
+      tenancy_start_date: null, tenancy_end_date: null,
+      re_units: { unit_number: 'A1', unit_type: null, size_sqm: null, list_price: null, re_projects: { name: 'Test Estate', location: null } },
+      re_installment_plans: [oldPlan, newPlan],
+    };
+    const payments = [
+      // Paid BEFORE the restructure, against the now-superseded plan's
+      // schedule row — must still count toward total_paid.
+      { id: 'pay-1', schedule_id: 'sched-old-1', amount: 4_000_000, method: 'bank_transfer', paid_at: '2026-01-15', reallocated_from_payment_id: null },
+      // Paid AFTER, against the new plan.
+      { id: 'pay-2', schedule_id: 'sched-new-1', amount: 3_000_000, method: 'bank_transfer', paid_at: '2026-05-01', reallocated_from_payment_id: null },
+    ];
+
+    const account = await withFakePortalTables(
+      {
+        re_reservations: { data: [reservation], error: null },
+        re_org_settings: { data: null },
+        re_documents: { data: [] },
+        re_payments: { data: payments },
+        re_customers: { data: null, error: null }, // portal_last_seen_at bump
+      },
+      () => portal.loadPortalAccount({ id: 'cust-1', organization_id: 'org-1', full_name: 'Buyer One', email: 'b@example.com', phone: '08030000000' }),
+    );
+
+    assert.strictEqual(account.summary.total_contracted, 10_000_000, 'contract value must count once (from the live plan), not twice');
+    assert.strictEqual(account.summary.total_paid, 7_000_000, 'payments against the superseded plan\'s schedule must still be counted');
+    assert.strictEqual(account.summary.balance, 3_000_000, 'matches the one real outstanding installment exactly');
+  });
+}
+
 // ── Amounts in words ─────────────────────────────────────────────────────
 section('Amount in words (receipts)');
 
@@ -936,6 +1194,252 @@ test('portal link lifetime is capped, however PORTAL_TOKEN_TTL_DAYS is set', () 
   assert.ok(env.portal.tokenTtlDays <= 90, `got ${env.portal.tokenTtlDays}`);
   assert.ok(env.portal.tokenTtlDays >= 1, `got ${env.portal.tokenTtlDays}`);
 });
+
+// ── Boot validation ──────────────────────────────────────────────────────
+// env.assertRequired() calls process.exit(), so it has to run in a child
+// process to be observable — same technique as the timezone-independence
+// test above (execFileSync + a tiny inline script).
+section('Boot validation — JWT_SECRET strength (src/config/env.js)');
+
+function runEnvAssertRequired(jwtSecret) {
+  const script = `
+    process.env.SUPABASE_URL = 'http://localhost:54321';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'k';
+    process.env.JWT_SECRET = ${JSON.stringify(jwtSecret)};
+    const env = require(${JSON.stringify(path.join(__dirname, '../config/env'))});
+    env.assertRequired();
+    process.stdout.write('BOOTED');
+  `;
+  try {
+    const stdout = execFileSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    return { code: 0, stdout };
+  } catch (err) {
+    // execFileSync throws on a non-zero exit; the child's own streams are
+    // still attached to the error.
+    return { code: err.status, stdout: err.stdout, stderr: err.stderr };
+  }
+}
+
+test('boots with a long, non-placeholder JWT_SECRET', () => {
+  const result = runEnvAssertRequired('a-genuinely-random-secret-that-is-plenty-long-1234567890');
+  assert.strictEqual(result.code, 0);
+  assert.strictEqual(result.stdout, 'BOOTED');
+});
+
+test('refuses to boot with a JWT_SECRET under 32 characters', () => {
+  const result = runEnvAssertRequired('too-short');
+  assert.strictEqual(result.code, 1, 'must exit non-zero rather than booting with a weak secret');
+  assert.match(result.stderr, /at least 32 characters/);
+});
+
+test('refuses to boot with the exact .env.example placeholder JWT_SECRET', () => {
+  // The literal string shipped in .env.example — someone who copies the file
+  // and forgets to replace this one line must not be able to boot with it.
+  const result = runEnvAssertRequired('your-jwt-secret-minimum-32-characters');
+  assert.strictEqual(result.code, 1);
+  assert.match(result.stderr, /placeholder/);
+});
+
+// ── Password hashing — scrypt cost parameters ────────────────────────────
+// (src/services/authService.js). Raised from {N:16384,r:8,p:1} to
+// {N:65536,r:8,p:2} — this proves new hashes actually use the stronger
+// parameters, AND that a hash produced under the OLD parameters (i.e. every
+// existing user's row) still verifies: verifyPassword must read N/r/p from
+// the stored hash string, never from the live SCRYPT constant, or raising
+// this would have signed out (rejected the password of) every existing user
+// at once.
+async function runAuthServiceTests() {
+  section('Password hashing — scrypt cost parameters (src/services/authService.js)');
+
+  await testAsync('hashPassword now stores OWASP-strength parameters (N=65536, r=8, p=2)', async () => {
+    const stored = await auth.hashPassword('a-perfectly-reasonable-password-1');
+    const [scheme, n, r, p] = stored.split('$');
+    assert.strictEqual(scheme, 'scrypt');
+    assert.strictEqual(Number(n), 65536);
+    assert.strictEqual(Number(r), 8);
+    assert.strictEqual(Number(p), 2);
+  });
+
+  await testAsync('verifyPassword accepts the right password and rejects the wrong one against a new-parameter hash', async () => {
+    const stored = await auth.hashPassword('correct horse battery staple 99');
+    assert.strictEqual(await auth.verifyPassword('correct horse battery staple 99', stored), true);
+    assert.strictEqual(await auth.verifyPassword('an entirely wrong guess', stored), false);
+  });
+
+  await testAsync('verifyPassword still accepts a hash produced under the OLD N=16384,r=8,p=1 parameters — raising the constant does not lock out existing users', async () => {
+    // Built independently of authService's own hashPassword/SCRYPT constant,
+    // in the exact legacy string shape, so this cannot pass merely because
+    // hashPassword and verifyPassword agree with each other — it proves
+    // verifyPassword honours whatever N/r/p is actually embedded in a
+    // pre-existing row.
+    const password = 'a legacy password predating this hardening change';
+    const salt = crypto.randomBytes(16);
+    const legacyKey = crypto.scryptSync(password.normalize('NFKC'), salt, 64, {
+      N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024,
+    });
+    const legacyStored = `scrypt$16384$8$1$${salt.toString('hex')}$${legacyKey.toString('hex')}`;
+    assert.strictEqual(await auth.verifyPassword(password, legacyStored), true);
+    assert.strictEqual(await auth.verifyPassword('wrong password', legacyStored), false);
+  });
+
+  // ── findUserByEmail — exact match, not a LIKE-wildcard match ────────────
+  section('findUserByEmail — exact match, not ILIKE (src/services/authService.js)');
+
+  await testAsync('findUserByEmail queries with .eq(), never .ilike() — % and _ in a submitted address must not act as SQL wildcards', async () => {
+    const original = supabaseAdmin.from;
+    let calledWith = null;
+    supabaseAdmin.from = (table) => {
+      if (table !== 'users') return original(table);
+      const builder = {
+        select: () => builder,
+        ilike: (column, value) => { calledWith = { method: 'ilike', column, value }; return builder; },
+        eq: (column, value) => { calledWith = { method: 'eq', column, value }; return builder; },
+        maybeSingle: async () => ({ data: null, error: null }),
+      };
+      return builder;
+    };
+    try {
+      await auth.findUserByEmail('Someone+Wildcard%@Example.com');
+    } finally {
+      supabaseAdmin.from = original;
+    }
+    assert.strictEqual(calledWith?.method, 'eq');
+    assert.strictEqual(calledWith?.column, 'email');
+    // normalizeEmail lowercases/trims but does not escape % or _ — an exact
+    // .eq() match is what makes that safe; .ilike() would have treated the
+    // submitted value's own '%' as a wildcard rather than a literal character.
+    assert.strictEqual(calledWith?.value, 'someone+wildcard%@example.com');
+  });
+
+  // ── Login — lockout must not be an existence oracle ─────────────────────
+  section('Login — lockout is not an existence oracle (src/services/authService.js)');
+
+  await testAsync('a locked account and a nonexistent account produce the exact same 401 — never a distinct status for "this account exists and is locked"', async () => {
+    const original = supabaseAdmin.from;
+    const lockedUser = {
+      id: 'user-locked-1',
+      email: 'locked@example.com',
+      password_hash: await auth.hashPassword('the-real-password-0000'),
+      locked_until: new Date(Date.now() + 10 * 60_000).toISOString(),
+      failed_login_count: 5,
+    };
+    supabaseAdmin.from = (table) => {
+      if (table !== 'users') return original(table);
+      const builder = {
+        select: () => builder,
+        eq: (column, value) => { builder._email = value; return builder; },
+        maybeSingle: async () => ({
+          data: builder._email === 'locked@example.com' ? lockedUser : null,
+          error: null,
+        }),
+        update: () => ({ eq: async () => ({ error: null }) }),
+      };
+      return builder;
+    };
+
+    try {
+      let lockedErr;
+      try {
+        // Even the CORRECT password must be refused without ever being
+        // checked, while the account is locked.
+        await auth.login({ email: 'locked@example.com', password: 'the-real-password-0000' });
+      } catch (err) { lockedErr = err; }
+      assert.ok(lockedErr, 'a locked account must still refuse to sign in');
+      assert.strictEqual(lockedErr.statusCode, 401);
+      assert.strictEqual(lockedErr.message, 'Incorrect email or password.');
+
+      let missingErr;
+      try {
+        await auth.login({ email: 'nobody-such-account@example.com', password: 'whatever-guess-0000' });
+      } catch (err) { missingErr = err; }
+      assert.ok(missingErr);
+      assert.strictEqual(missingErr.statusCode, lockedErr.statusCode, 'status code must match the nonexistent-account case exactly');
+      assert.strictEqual(missingErr.message, lockedErr.message, 'message must match the nonexistent-account case exactly');
+    } finally {
+      supabaseAdmin.from = original;
+    }
+  });
+}
+
+// ── Session middleware — team lookup must fail CLOSED on a transient error ──
+// (src/middleware/auth.js). The token_version check earlier in the same
+// file already fails open ONLY for 42P01/42703 (a genuine schema gap) and
+// closed (503) on everything else; the team-membership lookup used to fail
+// open on EVERY error, which orgContext.js then reads as req.orgId =
+// user.id / req.orgRole = 'owner' — silently demoting a real team member to
+// a solo-workspace "owner" of their own id during a transient DB hiccup.
+async function runAuthMiddlewareTests() {
+  section('Session middleware — team lookup fails closed on a transient error (src/middleware/auth.js)');
+
+  function fakeReqRes(token) {
+    const req = { headers: { authorization: `Bearer ${token}` } };
+    let statusCode = null;
+    let body = null;
+    const res = {
+      status(code) { statusCode = code; return this; },
+      json(payload) { body = payload; return this; },
+    };
+    return { req, res, outcome: () => ({ statusCode, body }) };
+  }
+
+  function withFakeAuthLookup({ usersRow, teamMembersError }, fn) {
+    const original = supabaseAdmin.from;
+    supabaseAdmin.from = (table) => {
+      if (table === 'users') {
+        return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: usersRow, error: null }) }) }) };
+      }
+      if (table === 'team_members') {
+        return {
+          select: () => ({
+            eq: () => ({
+              eq: () => ({
+                order: async () => ({ data: null, error: teamMembersError }),
+              }),
+            }),
+          }),
+        };
+      }
+      return original(table);
+    };
+    return fn().finally(() => { supabaseAdmin.from = original; });
+  }
+
+  await testAsync('a transient team-membership lookup error fails CLOSED (503), never silently falls through to a solo-owner session', async () => {
+    const token = jwt.sign({ id: 'user-1', tv: 0 }, env.jwt.secret, { algorithm: 'HS256' });
+    const { req, res, outcome } = fakeReqRes(token);
+    let nextCalled = false;
+
+    await withFakeAuthLookup(
+      {
+        usersRow: { token_version: 0, email_verified_at: '2026-01-01' },
+        teamMembersError: { code: '57014', message: 'canceling statement due to statement timeout' },
+      },
+      () => authenticate(req, res, () => { nextCalled = true; }),
+    );
+
+    assert.strictEqual(nextCalled, false, 'next() must not run — a demoted req.user must never reach a route handler');
+    assert.strictEqual(outcome().statusCode, 503);
+  });
+
+  await testAsync('a genuinely missing team_members table (42P01) still degrades to a solo account, unchanged', async () => {
+    const token = jwt.sign({ id: 'user-1', tv: 0 }, env.jwt.secret, { algorithm: 'HS256' });
+    const { req, res, outcome } = fakeReqRes(token);
+    let nextCalled = false;
+
+    await withFakeAuthLookup(
+      {
+        usersRow: { token_version: 0, email_verified_at: '2026-01-01' },
+        teamMembersError: { code: '42P01', message: 'relation "team_members" does not exist' },
+      },
+      () => authenticate(req, res, () => { nextCalled = true; }),
+    );
+
+    assert.strictEqual(nextCalled, true);
+    assert.strictEqual(req.user.team_id, null);
+    assert.strictEqual(req.user.role, null);
+    assert.strictEqual(outcome().statusCode, null, 'no error response was sent — the request proceeded as a solo account');
+  });
+}
 
 // ── Phone numbers ────────────────────────────────────────────────────────
 section('Nigerian phone numbers');
@@ -1334,7 +1838,280 @@ test('last4 returns only the final four characters', () => {
   assert.strictEqual(last4('ab'), 'ab'); // shorter than 4 — the whole thing, not padded
 });
 
-runBrandingTests().then(() => {
+// ── errorHandler — headers-sent guard, no-reflection messages, code fallback
+// (src/middleware/errorHandler.js). Pure middleware functions taking plain
+// req/res objects — no Express app or network needed to exercise them.
+section('errorHandler — headersSent guard, no-reflection messages, SQLSTATE fallback');
+{
+  const { errorHandler, notFound } = require('../middleware/errorHandler');
+
+  test('errorHandler defers to next(err) instead of writing a second response once headers are sent', () => {
+    // reports.js's CSV export streams headers before the body; if a later
+    // error reaches errorHandler in that state, res.status().json() throws
+    // ERR_HTTP_HEADERS_SENT. res below throws if either is called at all, so
+    // this fails loudly if the guard regresses.
+    const res = {
+      headersSent: true,
+      status() { throw new Error('must not call res.status() once headers are sent'); },
+      json() { throw new Error('must not call res.json() once headers are sent'); },
+    };
+    const req = { method: 'GET', originalUrl: '/api/re/reports/collections.csv' };
+    const err = new Error('boom mid-stream');
+    let nextArg = 'not called';
+    errorHandler(err, req, res, (passed) => { nextArg = passed; });
+    assert.strictEqual(nextArg, err);
+  });
+
+  test('errorHandler logs a SQLSTATE fallback (and never .hint/.details) for a plain supabase-js error with no .stack', () => {
+    const logs = [];
+    const original = console.error;
+    console.error = (...args) => logs.push(args.join(' '));
+    try {
+      const res = { headersSent: false, status() { return this; }, json() {} };
+      const req = { method: 'POST', originalUrl: '/api/re/units' };
+      // supabase-js throws a plain {message, details, hint, code} object, not
+      // an Error — no .stack. .details/.hint can quote an offending row's
+      // actual values (CLAUDE.md's "Data retention" section), so only
+      // .message and the SQLSTATE .code may ever reach the log.
+      const dbErr = {
+        message: 'duplicate key value violates unique constraint',
+        code: '23505',
+        details: 'Key (unit_number)=(A101) already exists.',
+        hint: 'row-data-must-not-be-logged',
+      };
+      errorHandler(dbErr, req, res, () => {});
+    } finally {
+      console.error = original;
+    }
+    const joined = logs.join('\n');
+    assert.ok(joined.includes('code=23505'), `expected a SQLSTATE fallback in the log, got: ${joined}`);
+    assert.ok(!joined.includes('row-data-must-not-be-logged'), 'err.hint must never be logged');
+    assert.ok(!joined.includes('unit_number'), 'err.details must never be logged');
+  });
+
+  test('notFound returns a constant message and does not reflect req.originalUrl into the response', () => {
+    let statusCode = null;
+    let body = null;
+    const res = {
+      status(code) { statusCode = code; return this; },
+      json(payload) { body = payload; },
+    };
+    const req = { method: 'GET', originalUrl: '/api/re/"><script>alert(1)</script>' };
+    notFound(req, res);
+    assert.strictEqual(statusCode, 404);
+    assert.strictEqual(body.error, 'Not found.');
+    assert.ok(!body.error.includes('<script>'), 'notFound must not reflect the request URL back to the caller');
+  });
+}
+
+// ── RBAC — sales_rep gains read-only payment status + document download ──
+// (src/services/permissions.js). This file's own role description for
+// sales_rep says "sees payment status, cannot record payment" — until this
+// fix, payments.read/payments.schedule granted NEITHER, contradicting it.
+// documents.download similarly excluded sales_rep even though
+// documents.create/read already included them ("can request, cannot issue").
+section('RBAC — sales_rep read-only payments + document download (permissions.js)');
+
+test('sales_rep can now read payment status and the schedule, but still cannot record a payment', () => {
+  assert.strictEqual(canAccess('sales_rep', 'payments.read'), true);
+  assert.strictEqual(canAccess('sales_rep', 'payments.schedule'), true);
+  assert.strictEqual(canAccess('sales_rep', 'payments.record'), false);
+  assert.strictEqual(canAccess('sales_rep', 'payments.init'), false);
+  assert.strictEqual(canAccess('sales_rep', 'payments.reallocate'), false);
+});
+
+test('sales_rep can now download a document they requested, but still cannot generate one', () => {
+  assert.strictEqual(canAccess('sales_rep', 'documents.download'), true);
+  assert.strictEqual(canAccess('sales_rep', 'documents.generate'), false);
+  assert.strictEqual(canAccess('sales_rep', 'documents.updateStatus'), false);
+});
+
+test('collections and documentation are unaffected by the sales_rep additions above', () => {
+  // The fix widened two grants by exactly one role each — confirms nothing
+  // else in the matrix moved as a side effect.
+  assert.strictEqual(canAccess('collections', 'payments.read'), true); // was already MONEY_IN
+  assert.strictEqual(canAccess('collections', 'documents.download'), false); // never granted
+  assert.strictEqual(canAccess('documentation', 'payments.read'), false);
+});
+
+// actionsFor/canAccess must still agree after this change — the existing
+// "actionsFor(role) agrees with canAccess for every action" test above
+// already re-runs against the live PERMISSIONS object, so a second explicit
+// check here would be redundant; this section instead checks the two
+// specific grants the fix touched, which that generic loop does not name.
+
+// ── stripFinancials — commission_rate is now stripped (routes/reservations.js) ──
+// migrations/020 added commission_rate to re_reservations; select('*') in
+// GET /reservations returns it to documentation same as list_price/
+// total_amount unless the strip covers it too.
+section('stripFinancials strips commission_rate (routes/reservations.js)');
+
+test('nulls list_price, plan total_amount AND commission_rate — a documentation officer sees no naira figure and no percentage', () => {
+  const reservation = {
+    id: 'res-1',
+    commission_rate: 5,
+    re_units: { unit_number: 'B12', list_price: 45_000_000 },
+    re_installment_plans: [{ id: 'plan-1', total_amount: 45_000_000 }],
+  };
+  reservationsRouter.stripFinancials(reservation);
+  assert.strictEqual(reservation.commission_rate, null);
+  assert.strictEqual(reservation.re_units.list_price, null);
+  assert.strictEqual(reservation.re_installment_plans[0].total_amount, null);
+});
+
+test('stripFinancials handles a reservation with no plan yet without throwing', () => {
+  const reservation = { id: 'res-2', commission_rate: 3.5, re_units: null, re_installment_plans: [] };
+  assert.doesNotThrow(() => reservationsRouter.stripFinancials(reservation));
+  assert.strictEqual(reservation.commission_rate, null);
+});
+
+// ── Audit financial content gate (routes/audit.js) ────────────────────────
+// audit.readEntity is granted to every role including documentation
+// (permissions.js), and GET /entity/:type/:id otherwise returned raw
+// summary/metadata with no gate — the same class of leak customers.js/
+// units.js/reservations.js already guard against on their own direct views.
+section('Audit entity route — financial content gate (routes/audit.js)');
+
+const sampleAuditRows = [
+  { id: 'a1', entity_type: 're_payments', summary: '₦500,000 payment voided — wrong amount', metadata: { amount: 500000 } },
+  { id: 'a2', entity_type: 're_commissions', summary: 'Commission of ₦93,750 marked paid', metadata: { amount: 93750 } },
+  { id: 'a3', entity_type: 're_units', summary: 'List price changed to ₦46,000,000', metadata: { list_price: 46000000 } },
+  { id: 'a4', entity_type: 're_reservations', summary: 'Reservation moved from reserved to confirmed', metadata: { from: 'reserved', to: 'confirmed' } },
+];
+
+test('redactFinancialAuditRows strips summary/metadata on financial entity types when the caller lacks financial.view', () => {
+  const redacted = auditRouter.redactFinancialAuditRows(sampleAuditRows, false);
+  const payment = redacted.find((r) => r.id === 'a1');
+  const commission = redacted.find((r) => r.id === 'a2');
+  const unit = redacted.find((r) => r.id === 'a3');
+  assert.strictEqual(payment.summary, null);
+  assert.deepStrictEqual(payment.metadata, {});
+  assert.strictEqual(commission.summary, null);
+  assert.strictEqual(unit.summary, null, 'a unit price change is a financial fact too — re_units is in FINANCIAL_ENTITY_TYPES');
+});
+
+test('redactFinancialAuditRows leaves a non-financial entity type untouched even without financial.view', () => {
+  const redacted = auditRouter.redactFinancialAuditRows(sampleAuditRows, false);
+  const reservationStatus = redacted.find((r) => r.id === 'a4');
+  assert.strictEqual(reservationStatus.summary, 'Reservation moved from reserved to confirmed');
+  assert.deepStrictEqual(reservationStatus.metadata, { from: 'reserved', to: 'confirmed' });
+});
+
+test('redactFinancialAuditRows returns every row unchanged when the caller HAS financial.view', () => {
+  const redacted = auditRouter.redactFinancialAuditRows(sampleAuditRows, true);
+  assert.strictEqual(redacted, sampleAuditRows, 'must be the exact same array — no copying/filtering when the caller may see money');
+});
+
+test('FINANCIAL_ENTITY_TYPES names exactly the money-carrying entity types the fix describes', () => {
+  for (const t of ['re_payments', 're_commissions', 're_installment_schedule', 're_units', 're_installment_plans']) {
+    assert.ok(auditRouter.FINANCIAL_ENTITY_TYPES.has(t), `expected ${t} to be gated`);
+  }
+  assert.ok(!auditRouter.FINANCIAL_ENTITY_TYPES.has('re_reservations'), 'a status change alone is not financial');
+  assert.ok(!auditRouter.FINANCIAL_ENTITY_TYPES.has('re_customers'));
+});
+
+// ── Input validation — UUID shape + numeric clamps (audit.js, reports.js, ──
+// customers.js, dashboard.js) — a negative/zero limit or a malformed id
+// query param used to reach Postgres unshaped and surface as an opaque 500.
+section('Input validation — UUID shape + numeric floor/ceiling clamps');
+
+test('UUID_RE (audit.js — identical pattern in reports.js/dashboard.js) accepts a real uuid and rejects junk', () => {
+  assert.ok(auditRouter.UUID_RE.test('9f8b7c6d-1234-4a5b-8c9d-0e1f2a3b4c5d'));
+  assert.ok(auditRouter.UUID_RE.test('AA11BB22-CC33-4D44-8E55-FF66AA77BB88'), 'case-insensitive');
+  assert.strictEqual(auditRouter.UUID_RE.test('not-a-uuid'), false);
+  assert.strictEqual(auditRouter.UUID_RE.test('9f8b7c6d-1234-4a5b-8c9d'), false, 'too short');
+  assert.strictEqual(auditRouter.UUID_RE.test("'; drop table re_payments; --"), false);
+  assert.strictEqual(auditRouter.UUID_RE.test(''), false);
+});
+
+test('the floor+ceiling clamp formula used across these routes rejects negative/zero and still caps a huge value', () => {
+  // Math.max(1, Math.min(Number(query.limit) || DEFAULT, CAP)) — the exact
+  // shape every fixed route now uses. Exercised generically here since the
+  // constant lives inline in four different route files, not as one shared
+  // exported helper.
+  const clamp = (raw, fallback, cap) => Math.max(1, Math.min(Number(raw) || fallback, cap));
+  assert.strictEqual(clamp('-5', 100, 500), 1, 'a negative limit must not reach Postgres as -5');
+  // Number('0') || fallback evaluates to fallback — 0 is falsy in JS, so an
+  // explicit ?limit=0 is treated the same as an absent one (falls back to
+  // the default) rather than clamped up to 1. That is the actual behaviour
+  // of the `||`-based formula used in every fixed route; the floor exists to
+  // catch a NEGATIVE value slipping past the `||`, not zero.
+  assert.strictEqual(clamp('0', 100, 500), 100);
+  assert.strictEqual(clamp('50', 100, 500), 50);
+  assert.strictEqual(clamp('999999', 100, 500), 500, 'still capped at the ceiling');
+  assert.strictEqual(clamp(undefined, 100, 500), 100, 'falls back to the default when absent');
+});
+
+// ── Webhook permanent-failure classification (routes/webhooks.js) ────────
+// A live Paystack webhook retry storm can't be simulated offline, so this
+// exercises the one piece of the fix that is pure: which Postgres error
+// codes are treated as permanent (ack with 200, stop the retry storm, flag
+// for manual review) versus transient (keep returning 500 so Paystack
+// retries, since those genuinely might succeed later).
+section('Webhook permanent-failure classification (routes/webhooks.js)');
+
+test('PERMANENT_PG_ERROR_CODES contains exactly the three documented SQLSTATEs', () => {
+  const codes = webhooksRouter.PERMANENT_PG_ERROR_CODES;
+  assert.ok(codes.has('23514'), 'check_violation');
+  assert.ok(codes.has('23502'), 'not_null_violation');
+  assert.ok(codes.has('22P02'), 'invalid_text_representation');
+  assert.strictEqual(codes.size, 3);
+});
+
+test('a genuinely transient error code is NOT classified as permanent — Paystack must keep retrying it', () => {
+  const codes = webhooksRouter.PERMANENT_PG_ERROR_CODES;
+  assert.strictEqual(codes.has('57014'), false, 'query_canceled — a timeout, might succeed on retry');
+  assert.strictEqual(codes.has('08006'), false, 'connection_failure — transient');
+  assert.strictEqual(codes.has(undefined), false, 'an error with no .code at all must fall through to the 500 path');
+});
+
+// ── Import overpayment rounding (routes/imports.js) ───────────────────────
+// The excess-money fix attaches whatever is left over after the backfill
+// loop to the LAST payment row as `amount += remaining` / `overpayment =
+// remaining`, rounded to the kobo exactly like every other money
+// calculation in this codebase (toKobo/toNaira in paystackService.js). The
+// arithmetic is inline in the route rather than an exported helper, so this
+// exercises the identical formula against the float-drift case that makes
+// kobo rounding matter in the first place.
+section('Import overpayment rounding matches the kobo-rounding convention used everywhere else');
+
+test('an excess that does not round cleanly in floating point still lands on exactly two decimal places', () => {
+  const applyOverpayment = (lastAmount, remaining) => ({
+    amount: Math.round((lastAmount + remaining) * 100) / 100,
+    overpayment: Math.round(remaining * 100) / 100,
+  });
+  // 3_333_333.34 + 0.1 + 0.2 style drift.
+  const result = applyOverpayment(3_333_333.34, 1000.1 + 2000.2 - 3000.3 + 500.005);
+  // remaining ≈ 500.005 after the float-noisy arithmetic above; the point of
+  // the test is that BOTH fields end up rounded to the kobo, not that this
+  // specific remainder is meaningful.
+  assert.strictEqual(Number(result.amount.toFixed(2)), result.amount);
+  assert.strictEqual(Number(result.overpayment.toFixed(2)), result.overpayment);
+});
+
+test('the last payment row absorbs the full excess when a buyer pays more than the whole plan', () => {
+  const applyOverpayment = (lastAmount, remaining) => ({
+    amount: Math.round((lastAmount + remaining) * 100) / 100,
+    overpayment: Math.round(remaining * 100) / 100,
+  });
+  // Last installment was ₦500,000 due; buyer's backfilled total left
+  // ₦75,000 over after every row was covered.
+  const result = applyOverpayment(500_000, 75_000);
+  assert.strictEqual(result.amount, 575_000, 'the row\'s amount carries the full transferred sum, due + excess');
+  assert.strictEqual(result.overpayment, 75_000);
+});
+
+(async () => {
+  // Each of these swaps supabaseAdmin.from for the duration of its own
+  // suite and restores it afterward (see each function's own withFake*
+  // helper) — run sequentially, never concurrently, or one suite's stub
+  // would clobber another's mid-flight.
+  await runPaystackWebhookOrgTests();
+  await runPortalBalanceTests();
+  await runAuthServiceTests();
+  await runAuthMiddlewareTests();
+  await runBrandingTests();
+
   // ── Report ─────────────────────────────────────────────────────────────
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length) {
@@ -1342,4 +2119,4 @@ runBrandingTests().then(() => {
     for (const f of failures) console.error(`  ${f.name}\n    ${f.err.stack.split('\n').slice(0, 3).join('\n    ')}`);
     process.exit(1);
   }
-});
+})();

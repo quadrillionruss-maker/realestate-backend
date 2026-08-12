@@ -8,6 +8,13 @@ require('dotenv').config();
 
 const REQUIRED = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'JWT_SECRET'];
 
+// The exact literal shown in .env.example — someone who copies the file and
+// forgets to replace this one line would otherwise boot a production server
+// signing every session and every buyer-portal link with a secret published
+// in this repo's own history.
+const PLACEHOLDER_JWT_SECRET = 'your-jwt-secret-minimum-32-characters';
+const MIN_JWT_SECRET_LENGTH = 32;
+
 const env = {
   port: parseInt(process.env.PORT || '4000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -149,6 +156,25 @@ env.assertRequired = () => {
     console.error('Missing required environment variables:');
     missing.forEach((key) => console.error(`  - ${key}`));
     console.error('\nCopy .env.example to .env and fill in your values.');
+    process.exit(1);
+  }
+
+  // Present is not the same as strong. JWT_SECRET signs every staff session
+  // AND every buyer-portal link (portalService) — a short or default secret
+  // is brute-forceable or simply publicly known, either of which lets anyone
+  // forge a token for any user or any buyer's portal link.
+  const jwtSecret = process.env.JWT_SECRET || '';
+  const jwtProblems = [];
+  if (jwtSecret === PLACEHOLDER_JWT_SECRET) {
+    jwtProblems.push('JWT_SECRET is still the literal placeholder value from .env.example — generate a real one.');
+  }
+  if (jwtSecret.length < MIN_JWT_SECRET_LENGTH) {
+    jwtProblems.push(`JWT_SECRET must be at least ${MIN_JWT_SECRET_LENGTH} characters (got ${jwtSecret.length}).`);
+  }
+  if (jwtProblems.length) {
+    console.error('JWT_SECRET is not strong enough to boot with:');
+    jwtProblems.forEach((problem) => console.error(`  - ${problem}`));
+    console.error('\nGenerate one: node -e "console.log(require(\'crypto\').randomBytes(64).toString(\'hex\'))"');
     process.exit(1);
   }
 };

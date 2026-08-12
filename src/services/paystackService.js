@@ -53,48 +53,68 @@ async function resolvePaystackSecretKey(orgId) {
 // of anything, which today's single-key check rejects before touching the
 // database at all.
 //
+// Each entry carries WHICH workspace the key belongs to (null for the
+// platform key) — matching a signature is proof that the caller holds that
+// specific principal's secret, and handleRealEstateCharge below uses exactly
+// that identity to refuse an event whose reference points at a DIFFERENT
+// workspace's schedule. Discarding which key matched (the previous shape:
+// a bare boolean) threw that identity away, which is what let a workspace
+// with its own real, valid Paystack key sign a forged charge.success body
+// naming another workspace's installment and have it accepted.
+//
 // HMAC-SHA512 against N keys is microseconds each — cheap enough that this
 // scales fine to however many workspaces actually configure their own
 // account, which will never be a large fraction of "every webhook Paystack
 // ever sends this endpoint".
 async function allConfiguredSecretKeys() {
-  const keys = [];
-  if (env.paystack.secretKey) keys.push(env.paystack.secretKey);
+  const entries = [];
+  if (env.paystack.secretKey) entries.push({ key: env.paystack.secretKey, orgId: null });
 
   const { data } = await supabaseAdmin
     .from('re_org_settings')
-    .select('paystack_secret_key_encrypted')
+    .select('organization_id, paystack_secret_key_encrypted')
     .not('paystack_secret_key_encrypted', 'is', null);
 
   for (const row of data || []) {
     try {
       const key = decrypt(row.paystack_secret_key_encrypted);
-      if (key) keys.push(key);
+      if (key) entries.push({ key, orgId: row.organization_id });
     } catch (err) {
       // One workspace's corrupted key must not take down webhook processing
       // for every other workspace — skip it, log it, move on.
       console.warn('[re-paystack] skipping an org Paystack key that failed to decrypt:', err.message);
     }
   }
-  return keys;
+  return entries;
 }
 
-// Returns true the moment ANY known key's HMAC matches — constant-time per
-// comparison, same as the single-key check this replaces, so which key
-// (if any) matched is not observable by timing.
+// Returns which principal's key matched, not a bare boolean — constant-time
+// per comparison, same as the single-key check this replaces, so WHICH key
+// matched is not observable by timing, only the eventual return value is.
+//
+//   { verified: false, matchedOrgId: null }        — no configured key matched
+//   { verified: true,  matchedOrgId: null }        — the PLATFORM key matched
+//   { verified: true,  matchedOrgId: '<uuid>' }     — that workspace's own key matched
+//
+// Callers that only care whether the request is genuinely from Paystack can
+// read `.verified`; handleRealEstateCharge below also needs `.matchedOrgId`
+// to refuse a workspace-key-signed event that names a different org's
+// schedule. (routes/webhooks.js is not owned by this change — if it has not
+// been updated to read `.verified` instead of treating this return value as
+// a plain boolean, note that in review: an object is always truthy in JS.)
 async function verifyWebhookSignature(rawBody, signatureHeader) {
-  if (!signatureHeader) return false;
+  if (!signatureHeader) return { verified: false, matchedOrgId: null };
   const provided = Buffer.from(String(signatureHeader), 'utf8');
 
-  for (const key of await allConfiguredSecretKeys()) {
+  for (const { key, orgId } of await allConfiguredSecretKeys()) {
     const expected = Buffer.from(
       crypto.createHmac('sha512', key).update(rawBody).digest('hex'), 'utf8'
     );
     if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
-      return true;
+      return { verified: true, matchedOrgId: orgId };
     }
   }
-  return false;
+  return { verified: false, matchedOrgId: null };
 }
 
 // The Settings "test these keys" button. A read-only, no-side-effect call
@@ -266,8 +286,22 @@ async function initInstallmentPayment(orgId, scheduleId, customerEmail, { callba
 // product to carry on handling the event.
 //
 // PRECONDITION: the caller has already verified the x-paystack-signature HMAC
-// against the raw request body. This function trusts the event it is given.
-async function handleRealEstateCharge(event) {
+// against the raw request body. This function trusts the event it is given —
+// EXCEPT for which workspace it is allowed to write into, which it checks for
+// itself below.
+//
+// `verification` is the `{ verified, matchedOrgId }` shape verifyWebhookSignature
+// returns (see that function's own comment). It defaults to null so this stays
+// callable exactly as before by any caller that has not been updated to pass
+// it through — in that case no cross-workspace check runs, i.e. the exact
+// pre-fix behaviour, not a new failure mode. Passing it through is what closes
+// the hole: a workspace can hold its own genuine Paystack secret key (it's
+// just their own account's key) and use it to sign a FORGED charge.success
+// body that names a different workspace's installment reference. Nothing
+// about that forged body is otherwise distinguishable from a real one — the
+// signature really does verify, just against the wrong org's key for the
+// schedule the reference names.
+async function handleRealEstateCharge(event, verification = null) {
   const reference = event?.data?.reference;
   if (!isRealEstateReference(reference)) return false;
 
@@ -303,6 +337,21 @@ async function handleRealEstateCharge(event) {
   if (!schedule) {
     console.error('[re-paystack] no installment for reference', reference);
     return true;
+  }
+
+  // A workspace-specific key matching is proof of exactly one thing: the
+  // caller holds THAT workspace's Paystack secret. It is not proof they may
+  // credit a payment onto some OTHER workspace's schedule. The platform key
+  // (matchedOrgId === null) stays unrestricted, same as every workspace that
+  // has never configured a key of its own has always worked — this only ever
+  // narrows a workspace-key match, never the platform-key path.
+  const matchedOrgId = verification?.matchedOrgId ?? null;
+  if (matchedOrgId && matchedOrgId !== schedule.organization_id) {
+    console.error(
+      '[re-paystack] webhook signature matched a different workspace\'s Paystack key than the one that owns this schedule — refusing:',
+      reference
+    );
+    return true; // ours by namespace — don't let billing logic touch it, and don't ask Paystack to retry
   }
 
   // Paystack normally only ever collects exactly the outstanding amount
@@ -475,7 +524,16 @@ async function reallocateOverpayment(orgId, sourcePaymentId, toScheduleId) {
       schedule_id: toScheduleId,
       amount: creditAmount,
       method: source.method,
-      paystack_reference: source.paystack_reference,
+      // NOT source.paystack_reference. When the source was a card payment,
+      // that reference already occupies the one slot
+      // uniq_re_payments_paystack_reference allows for it (unique per
+      // reference where method = 'paystack' and deleted_at is null) — copying
+      // it onto this second row, with the SAME method, guaranteed a 23505 on
+      // every reallocation of a card payment's overpayment, misreported below
+      // as "already been allocated" when nothing had been. Provenance is
+      // already fully carried by reallocated_from_payment_id; this row does
+      // not need its own Paystack reference.
+      paystack_reference: null,
       overpayment,
       reallocated_from_payment_id: source.id,
     })

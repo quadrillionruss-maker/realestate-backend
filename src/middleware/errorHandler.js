@@ -7,12 +7,26 @@
 
 const env = require('../config/env');
 
-function errorHandler(err, req, res, _next) {
+function errorHandler(err, req, res, next) {
+  // A prior handler (e.g. reports.js's CSV export, which streams headers
+  // before the body) may already have started writing the response. Calling
+  // res.status().json() again in that state throws ERR_HTTP_HEADERS_SENT —
+  // Express's own documented escape hatch is to delegate to the default
+  // handler via next(err) instead of writing a second response.
+  if (res.headersSent) return next(err);
+
   const statusCode = err.statusCode || err.status || 500;
 
   // Always log server-side with enough context to find it in Render's logs.
   console.error(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} → ${statusCode}: ${err.message}`);
-  if (statusCode >= 500) console.error(err.stack);
+  // Routes throughout this codebase throw supabase-js's plain
+  // {message, details, hint, code} object, not an Error instance — it has no
+  // .stack, so logging err.stack alone silently logs "undefined" for the most
+  // common class of 500 here. err.code is a Postgres SQLSTATE (never row
+  // data, unlike .details/.hint, which must never be logged — see CLAUDE.md's
+  // "Data retention" section), so it's what's left to log when there's no
+  // stack.
+  if (statusCode >= 500) console.error(err.stack || `code=${err.code || 'n/a'}`);
 
   // 4xx messages are written for the caller and are safe to return.
   // 5xx messages can carry internals (a Postgres error, a stack frame), so in
@@ -35,7 +49,11 @@ function createError(statusCode, message) {
 }
 
 function notFound(req, res) {
-  res.status(404).json({ success: false, error: `Route ${req.method} ${req.originalUrl} not found.` });
+  // Same reflector concern as the CORS rejection message above: this is an
+  // unauthenticated path, and req.originalUrl is attacker-controlled input.
+  // Log it server-side only; the response body stays a constant string.
+  console.warn(`[${new Date().toISOString()}] 404: ${req.method} ${req.originalUrl}`);
+  res.status(404).json({ success: false, error: 'Not found.' });
 }
 
 module.exports = { errorHandler, createError, notFound };

@@ -145,12 +145,30 @@ async function authenticate(req, res, next) {
       .order('joined_at', { ascending: true });
 
     if (error) {
-      console.warn('[auth] team lookup failed, treating as solo account:', error.message);
+      // Mirrors the token_version check above, exactly: 42703/42P01 =
+      // undefined column/table, a deployment with no team_members table at
+      // all, which this service must still run against as a solo account
+      // (see CLAUDE.md's "Org scoping"). Anything else — a timeout, a
+      // dropped connection, an exhausted pool — is transient, not a schema
+      // gap, and must fail CLOSED: silently falling through to "solo
+      // account" here sets teamId/role to null, which orgContext then reads
+      // as req.orgId = user.id and req.orgRole = 'owner' — quietly demoting
+      // a real team member to a solo-workspace owner on nothing more than a
+      // hiccup, and (worse) handing them an owner-shaped view of a workspace
+      // that is actually only their own.
+      if (error.code === '42703' || error.code === '42P01') {
+        console.warn('[auth] team_members table unavailable, treating as solo account:', error.message);
+      } else {
+        console.error('[auth] team lookup failed, refusing the request:', error.message);
+        return res.status(503).json({ success: false, error: 'Could not verify this session. Try again shortly.' });
+      }
     } else {
       memberships = rows || [];
     }
   } catch (err) {
-    console.warn('[auth] team lookup threw, treating as solo account:', err.message);
+    // Same transient category as a non-schema query error above — fail closed.
+    console.error('[auth] team lookup threw, refusing the request:', err.message);
+    return res.status(503).json({ success: false, error: 'Could not verify this session. Try again shortly.' });
   }
 
   if (memberships.length) {

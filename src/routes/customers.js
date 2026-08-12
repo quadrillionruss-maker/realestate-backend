@@ -14,7 +14,9 @@ router.get('/', requirePermission('customers.read'), async (req, res, next) => {
     // buyers, and every one of them came back on every load of this screen.
     // Same cap shape as payments.js: a default that covers a normal
     // workspace, a ceiling nobody needs to exceed in one page.
-    const limit = Math.min(Number(req.query.limit) || 500, 2000);
+    // Floored as well as capped — a negative or zero limit reached Postgres
+    // unvalidated and surfaced as an opaque error rather than a clear 400.
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 500, 2000));
 
     let query = supabaseAdmin
       .from('re_customers')
@@ -201,7 +203,12 @@ router.patch('/:id', requirePermission('customers.update'), async (req, res, nex
       .from('re_customers')
       .update(updates)
       .eq('id', req.params.id)
-      .eq('organization_id', req.orgId);
+      .eq('organization_id', req.orgId)
+      // orgContext's soft-delete filter only wraps .select() — an
+      // update-then-select chain like this one is unfiltered by default, so
+      // without this a PATCH could match and return a soft-deleted buyer's
+      // full PII, which is invisible everywhere else in the product.
+      .is('deleted_at', null);
 
     // A Sales Executive can only edit their own buyers — enforced as part of
     // the update's own WHERE clause, so someone else's row simply doesn't

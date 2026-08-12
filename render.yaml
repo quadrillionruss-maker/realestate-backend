@@ -39,6 +39,15 @@ services:
       - key: NODE_ENV
         value: production
 
+      # The frontend is deployed separately on Vercel (see CLAUDE.md's
+      # "Layout" and "Deployment" sections) — Vercel's config carries the
+      # security headers (frontend/vercel.json) this API process's own static
+      # serving does not. Left unset this defaults true and this process
+      # mounts a second, independently-drifting copy of the frontend with
+      # none of those headers.
+      - key: SERVE_FRONTEND
+        value: "false"
+
       # Set these in the dashboard (or a secret group) — never in this file.
       - key: SUPABASE_URL
         sync: false

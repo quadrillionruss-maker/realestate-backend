@@ -219,6 +219,7 @@ async function restructure(req, reservationId, {
   }
 
   let created;
+  let linked;
   try {
     created = await createPlanWithSchedule(orgId, {
       reservationId,
@@ -227,9 +228,44 @@ async function restructure(req, reservationId, {
       frequency,
       startDate,
     });
+
+    // Record what the contract was and what has been paid into it, so the
+    // new plan alone answers "how much did this buyer agree to, and how far
+    // in are they" without walking the chain. Deliberately inside the SAME
+    // try as the plan creation above: a failure here used to throw past the
+    // rollback entirely, leaving a new plan that DOES exist but is missing
+    // original_total_amount — which contractValue() reads as "never
+    // restructured" and falls back to total_amount, the REMAINING balance
+    // only. That silently understates the contract for as long as that plan
+    // lives, exactly the class of financial drift this codebase does not
+    // tolerate, so a failure here now unwinds exactly like a schedule-build
+    // failure does.
+    const { data: linkedRow, error: linkError } = await supabaseAdmin
+      .from('re_installment_plans')
+      .update({
+        original_total_amount: state.contract_value,
+        carried_amount_paid: state.total_paid,
+      })
+      .eq('id', created.plan.id)
+      .eq('organization_id', orgId)
+      .select()
+      .single();
+    if (linkError) throw linkError;
+    linked = linkedRow;
   } catch (err) {
     // Put it back. A reservation whose only plan is superseded looks, to every
-    // aggregate in the product, like a buyer with no obligations left.
+    // aggregate in the product, like a buyer with no obligations left — and a
+    // new plan sitting there with no original_total_amount corrupts the
+    // contract-value invariant for good, so both failure points unwind the
+    // same way: undo the new plan entirely (it is seconds old and nobody has
+    // ever seen it — same reasoning routes/reservations.js's own rollback
+    // uses for a hard delete rather than a soft one), then restore the old
+    // plan and its waived rows exactly as they were.
+    if (created?.plan?.id) {
+      await supabaseAdmin.from('re_installment_schedule').delete().eq('plan_id', created.plan.id);
+      await supabaseAdmin.from('re_installment_plans').delete().eq('id', created.plan.id);
+    }
+
     await supabaseAdmin
       .from('re_installment_plans')
       .update({ status: 'active', restructured_at: null, restructure_reason: null })
@@ -243,21 +279,6 @@ async function restructure(req, reservationId, {
     }
     throw err;
   }
-
-  // Record what the contract was and what has been paid into it, so the new
-  // plan alone answers "how much did this buyer agree to, and how far in are
-  // they" without walking the chain.
-  const { data: linked, error: linkError } = await supabaseAdmin
-    .from('re_installment_plans')
-    .update({
-      original_total_amount: state.contract_value,
-      carried_amount_paid: state.total_paid,
-    })
-    .eq('id', created.plan.id)
-    .eq('organization_id', orgId)
-    .select()
-    .single();
-  if (linkError) throw linkError;
 
   await supabaseAdmin
     .from('re_installment_plans')

@@ -80,6 +80,15 @@ supabaseAdmin.from = function scopedFrom(table) {
 
 // storage and the rest of the client surface are inherited from supabaseRaw
 // through the prototype, so documentService and friends need no changes.
+//
+// UNFILTERED ESCAPE HATCHES: ONLY .from() is wrapped above. supabaseAdmin.rpc()
+// and supabaseAdmin.schema() resolve straight through the prototype to
+// supabaseRaw and see soft-deleted rows with no warning — the exact same
+// unfiltered surface supabaseRaw itself is (see that comment above). A future
+// caller reaching for supabaseAdmin.rpc(...) against a soft-deletable table,
+// or supabaseAdmin.schema(...).from(...), gets no `deleted_at is null` for
+// free and must apply it by hand, the same way any direct caller of
+// supabaseRaw would have to.
 
 // The scope key: a team workspace is scoped by team, a solo account by the
 // user. Every table carries organization_id set from this, which is why one

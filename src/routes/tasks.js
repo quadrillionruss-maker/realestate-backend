@@ -1,6 +1,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission, isOwnRecordsOnly, salesRepIdsFor } = require('../middleware/rbac');
+const { audit } = require('../services/auditService');
 const router = express.Router();
 
 const TASK_STATUSES = ['open', 'done', 'dismissed'];
@@ -104,6 +105,15 @@ router.post('/', requirePermission('tasks.write'), async (req, res, next) => {
       .select()
       .single();
     if (error) throw error;
+
+    audit(req, {
+      action: 'task.created',
+      entityType: 're_tasks',
+      entityId: data.id,
+      summary: `Task "${data.title}" created`,
+      metadata: { assigned_to: data.assigned_to, related_reservation_id: data.related_reservation_id },
+    });
+
     res.status(201).json(data);
   } catch (e) { next(e); }
 });
@@ -114,6 +124,13 @@ router.patch('/:id/status', requirePermission('tasks.write'), async (req, res, n
     if (!TASK_STATUSES.includes(status)) {
       return res.status(400).json({ error: `status must be one of: ${TASK_STATUSES.join(', ')}` });
     }
+
+    // Read before the write so the audit entry carries a from/to, not just
+    // the new value with no record of what it replaced — same reasoning as
+    // routes/units.js's list_price pre-read.
+    const { data: existing } = await supabaseAdmin
+      .from('re_tasks').select('title, status')
+      .eq('id', req.params.id).eq('organization_id', req.orgId).maybeSingle();
 
     let query = supabaseAdmin
       .from('re_tasks')
@@ -138,6 +155,15 @@ router.patch('/:id/status', requirePermission('tasks.write'), async (req, res, n
     const { data, error } = await query.select().maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Task not found' });
+
+    audit(req, {
+      action: 'task.status_changed',
+      entityType: 're_tasks',
+      entityId: data.id,
+      summary: `Task "${existing?.title || data.title}" moved from ${existing?.status || '?'} to ${status}`,
+      metadata: { from: existing?.status || null, to: status },
+    });
+
     res.json(data);
   } catch (e) { next(e); }
 });

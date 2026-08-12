@@ -33,6 +33,7 @@ const exportLimiter = rateLimit({
 
 const round2 = (value) => Math.round(Number(value) * 100) / 100;
 const sum = (rows, key) => rows.reduce((total, row) => total + Number(row[key] || 0), 0);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Investor / partner summary. Optionally scoped to one project, because an
 // investor almost always backed ONE development and has no business seeing
@@ -40,6 +41,12 @@ const sum = (rows, key) => rows.reduce((total, row) => total + Number(row[key] |
 router.get('/investor', requirePermission('reports.investor'), async (req, res, next) => {
   try {
     const projectId = req.query.project_id || null;
+    // Validated up front rather than left to reach Postgres unshaped — a
+    // malformed uuid against a uuid column surfaces as an opaque 500 instead
+    // of a clear 400.
+    if (projectId && !UUID_RE.test(projectId)) {
+      return res.status(400).json({ error: 'project_id must be a valid id.' });
+    }
     const today = lagosToday();
 
     let projectQuery = supabaseAdmin
@@ -291,7 +298,7 @@ router.get('/rental', requirePermission('reports.rental'), async (req, res, next
 // "are we speeding up or slowing down" question underneath it.
 router.get('/collections', requirePermission('reports.collections'), async (req, res, next) => {
   try {
-    const months = Math.min(Number(req.query.months) || 12, 36);
+    const months = Math.max(1, Math.min(Number(req.query.months) || 12, 36));
     const since = new Date();
     // Clamp to the 1st BEFORE subtracting months, not after. setUTCMonth
     // overflows silently when the current day-of-month doesn't exist in the

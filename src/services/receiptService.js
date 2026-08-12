@@ -56,6 +56,10 @@ async function loadPaymentContext(orgId, paymentId) {
       )`)
     .eq('id', paymentId)
     .eq('organization_id', orgId)
+    // A voided payment is money explicitly recorded as never having
+    // arrived — without this, a receipt (a real receipt number and amount)
+    // could still be generated, or regenerated, for it.
+    .is('voided_at', null)
     .maybeSingle();
 
   if (error) throw error;

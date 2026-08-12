@@ -128,6 +128,18 @@ router.post('/', requirePermission('inventory.write'), async (req, res, next) =>
       return res.status(409).json({ error: `Unit "${unit_number}" already exists in this project` });
     }
     if (error) throw error;
+
+    // list_price here is the INITIAL price everything downstream (contract
+    // value, commission, allocation letter) derives from — worth the same
+    // audit trail PATCH already keeps for every price change after this one.
+    audit(req, {
+      action: 'unit.created',
+      entityType: 're_units',
+      entityId: data.id,
+      summary: `Unit ${data.unit_number} created`,
+      metadata: { project_id: data.project_id, list_price: data.list_price },
+    });
+
     res.status(201).json(data);
   } catch (e) { next(e); }
 });
@@ -177,6 +189,17 @@ router.post('/bulk', requirePermission('inventory.write'), async (req, res, next
       return res.status(409).json({ error: 'One or more unit numbers already exist in this project' });
     }
     if (error) throw error;
+
+    // One summary entry for the whole batch, not one per row — a 40-unit
+    // paste would otherwise write 40 audit rows for a single action.
+    audit(req, {
+      action: 'units.bulk_created',
+      entityType: 're_units',
+      entityId: null,
+      summary: `${data.length} units created in bulk for project ${project_id}`,
+      metadata: { project_id, count: data.length },
+    });
+
     res.status(201).json(data);
   } catch (e) { next(e); }
 });

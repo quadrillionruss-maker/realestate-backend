@@ -50,7 +50,7 @@ const TEMPLATES = {
 // "Download this, fill it in, upload it." The example row is included because
 // a template with only headers gets filled in wrongly every time — people copy
 // the shape of the data they can see.
-router.get('/template/:kind', (req, res) => {
+router.get('/template/:kind', requirePermission('imports.write'), (req, res) => {
   const template = TEMPLATES[req.params.kind];
   if (!template) {
     return res.status(404).json({ error: `No template for "${req.params.kind}". Try: ${Object.keys(TEMPLATES).join(', ')}` });
@@ -346,10 +346,25 @@ router.post('/customers', requirePermission('imports.write'), async (req, res, n
     // needs the id of their specific backfilled row, not just a count.
     const importedPaymentIds = [];
 
+    // A large import (up to MAX_ROWS, ~9 sequential Supabase calls per row)
+    // can run well past a typical proxy timeout. Until now the ONLY audit
+    // trail was written after the entire loop finished, so an aborted run —
+    // proxy timeout, a crashed dyno, the tab closed — left no record of what
+    // it had actually created up to that point. Written BEFORE the loop
+    // starts, and awaited, so it is durably there even if nothing else ever
+    // completes.
+    await audit(req, {
+      action: 'import.customers.started',
+      entityType: 're_customers',
+      summary: `Import started: ${plan.length} rows queued`,
+      metadata: { rows: plan.length },
+    });
+    const PROGRESS_CHECKPOINT_INTERVAL = 50;
+
     // Row by row rather than in bulk: a reservation needs the customer's id,
     // and a plan needs the reservation's. One bad row is skipped with its
     // reason rather than failing the other 149.
-    for (const entry of plan) {
+    for (const [index, entry] of plan.entries()) {
       try {
         let customerId = entry.existing_customer;
 
@@ -369,6 +384,10 @@ router.post('/customers', requirePermission('imports.write'), async (req, res, n
           customerId = customer.id;
           result.customers_created += 1;
           if (entry.phone) customerByPhone.set(digits(entry.phone), { id: customerId });
+          // Mirrors the phone-based extension above — without it, a buyer
+          // listed twice by email with no phone number created a second,
+          // permanent customer row rather than being reused.
+          if (entry.email) customerByEmail.set(entry.email, { id: customerId });
         } else {
           result.customers_reused += 1;
         }
@@ -439,20 +458,44 @@ router.post('/customers', requirePermission('imports.write'), async (req, res, n
           .select('id')
           .single();
         if (resErr) {
-          await supabaseAdmin.from('re_units').update({ status: 'available' }).eq('id', unit.id);
+          await supabaseAdmin.from('re_units').update({ status: 'available' })
+            .eq('id', unit.id).eq('organization_id', req.orgId);
           throw resErr;
         }
         result.reservations += 1;
 
         if (!entry.plan) continue;
 
-        const { schedule } = await createPlanWithSchedule(req.orgId, {
-          reservationId: reservation.id,
-          totalAmount: entry.plan.total_amount,
-          numberOfInstallments: entry.plan.number_of_installments,
-          frequency: entry.plan.frequency,
-          startDate: entry.plan.start_date,
-        });
+        let schedule;
+        try {
+          ({ schedule } = await createPlanWithSchedule(req.orgId, {
+            reservationId: reservation.id,
+            totalAmount: entry.plan.total_amount,
+            numberOfInstallments: entry.plan.number_of_installments,
+            frequency: entry.plan.frequency,
+            startDate: entry.plan.start_date,
+          }));
+        } catch (planErr) {
+          // Mirrors routes/reservations.js's own POST handler exactly: a
+          // reservation with a broken payment plan is worse than no
+          // reservation, because the schedule is what everything else
+          // counts. Without this, a bad row's plan failure left the
+          // reservation AND the unit claim behind — permanently stranding
+          // that unit as 'reserved' with nobody actually holding it.
+          await supabaseAdmin.from('re_reservations').delete().eq('id', reservation.id);
+          await supabaseAdmin.from('re_units').update({ status: 'available' })
+            .eq('id', unit.id).eq('organization_id', req.orgId);
+          result.reservations -= 1;
+          audit(req, {
+            action: 'reservation.rollback',
+            entityType: 're_reservations',
+            entityId: reservation.id,
+            summary: `Imported reservation for unit ${entry.unit_number} rolled back — plan creation failed: ${planErr.message}`,
+            metadata: { unit_id: unit.id, customer_id: customerId, reason: planErr.message, row: entry.row },
+          });
+          result.errors.push({ row: entry.row, error: `plan creation failed: ${planErr.message}` });
+          continue;
+        }
         result.plans += 1;
 
         // Historical money, applied oldest installment first — which is how it
@@ -488,6 +531,24 @@ router.post('/customers', requirePermission('imports.write'), async (req, res, n
           remaining -= applied;
         }
 
+        // Money paid beyond the whole schedule's total — the loop above
+        // simply stops once every row is covered, and until now whatever was
+        // left over was never written anywhere: no payment row, no
+        // overpayment field. Every other money path in this codebase
+        // (recordManualPayment, handleRealEstateCharge, reallocateOverpayment
+        // — paystackService.js) persists an explicit overpayment figure
+        // rather than letting an excess vanish; a backfilled historical
+        // payment is no different just because the transfer predates this
+        // system. Recorded on the LAST payment row for this reservation, same
+        // shape recordManualPayment writes: `amount` is the full sum of that
+        // payment event, `overpayment` is however much of it exceeded what
+        // was actually due.
+        if (remaining > 0 && paymentRows.length) {
+          const last = paymentRows[paymentRows.length - 1];
+          last.amount = Math.round((last.amount + remaining) * 100) / 100;
+          last.overpayment = Math.round(remaining * 100) / 100;
+        }
+
         if (paymentRows.length) {
           const { data: insertedPayments, error: payErr } = await supabaseAdmin
             .from('re_payments').insert(paymentRows).select('id');
@@ -499,12 +560,30 @@ router.post('/customers', requirePermission('imports.write'), async (req, res, n
             const { error: statusErr } = await supabaseAdmin
               .from('re_installment_schedule')
               .update({ status: 'paid', paid_at: new Date().toISOString() })
-              .in('id', fullyPaidScheduleIds);
+              .in('id', fullyPaidScheduleIds)
+              .eq('organization_id', req.orgId);
             if (statusErr) throw statusErr;
           }
         }
       } catch (err) {
         result.errors.push({ row: entry.row, error: err.message });
+      }
+
+      // A checkpoint every N rows, not a rewrite of the last one — a
+      // re_audit_log row is append-only by design (auditService.js: "nothing
+      // in this service updates or deletes re_audit_log"), so progress is a
+      // trail of entries rather than one mutated row. If the request is
+      // aborted mid-import, whichever checkpoint most recently completed is
+      // the trace of what actually got created.
+      const processed = index + 1;
+      if (processed % PROGRESS_CHECKPOINT_INTERVAL === 0 || processed === plan.length) {
+        await audit(req, {
+          action: 'import.customers.progress',
+          entityType: 're_customers',
+          summary: `Import progress: ${processed}/${plan.length} rows processed — `
+            + `${result.customers_created} buyers, ${result.reservations} reservations, ${result.payments} payments so far`,
+          metadata: { processed, total: plan.length, ...result },
+        });
       }
     }
 

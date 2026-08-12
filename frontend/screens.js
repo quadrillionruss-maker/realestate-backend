@@ -32,7 +32,7 @@
   // first person's project. realestate.js calls the hook below from signOut().
   var projectFilter = null;
 
-  R.resetScreenState = function () { projectFilter = null; };
+  R.resetScreenState = function () { projectFilter = null; expandedScheduleBuyerId = null; };
 
   // Mirrors src/services/installmentService.js addMonthsUTC exactly: a lease
   // starting 31 Jan renews to 28/29 Feb, not 3 March, which is what native
@@ -46,6 +46,14 @@
     var lastDayOfTarget = new Date(Date.UTC(year, month + months + 1, 0)).getUTCDate();
     var result = new Date(Date.UTC(year, month + months, Math.min(day, lastDayOfTarget)));
     return result.toISOString().slice(0, 10);
+  }
+
+  // The device's own local Y-M-D, NOT toISOString().slice(0,10) — that reads
+  // the UTC date, which between 00:00-01:00 Africa/Lagos (UTC+1) is still
+  // "yesterday" in UTC and would shift a same-day filter window by a day.
+  function localDateStr(d) {
+    var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   }
 
   function head(title, sub, actions) {
@@ -815,31 +823,41 @@
         '</div>' +
         card(null, tasks.length
           ? tasks.map(status === 'open' ? taskRow : doneTaskRow).join('')
-          : R.emptyState('No ' + status + ' tasks'),
+          : R.emptyState(
+              'No ' + status + ' tasks',
+              status === 'open'
+                ? 'Follow-ups you create, and the ones the AI suggests, both land here.'
+                : status === 'done'
+                  ? 'Tasks you mark done move here — nothing has been completed yet.'
+                  : 'Tasks you dismiss move here — nothing has been dismissed yet.',
+              '<button class="btn primary" id="btn-empty-task">Add a task</button>'
+            ),
           { flush: true });
 
       if (status === 'open') wireTasks(view);
 
-      R.qs('#btn-new-task', view).addEventListener('click', function () {
-        R.modal({
-          title: 'New task',
-          body:
-            '<div class="field"><label for="t-title">Task</label>' +
-              '<input class="input" id="t-title" name="title" required placeholder="Call Mrs Adeyemi about her February installment"></div>' +
-            '<div class="field"><label for="t-due">Due date</label>' +
-              '<input class="input" id="t-due" name="due_date" type="date"></div>' +
-            '<div class="field"><label for="t-notes">Notes</label>' +
-              '<textarea class="textarea" id="t-notes" name="notes"></textarea></div>',
-          submitLabel: 'Add task',
-          onSubmit: async function (form, close) {
-            var v = R.values(form);
-            if (!v.title) throw new Error('Give the task a title.');
-            await api.post('/tasks', { title: v.title, due_date: v.due_date || null, notes: v.notes || null });
-            close();
-            toast('Task added.', 'ok');
-            R.refreshCounts();
-            R.reload();
-          },
+      R.qsa('#btn-new-task, #btn-empty-task', view).forEach(function (b) {
+        b.addEventListener('click', function () {
+          R.modal({
+            title: 'New task',
+            body:
+              '<div class="field"><label for="t-title">Task</label>' +
+                '<input class="input" id="t-title" name="title" required placeholder="Call Mrs Adeyemi about her February installment"></div>' +
+              '<div class="field"><label for="t-due">Due date</label>' +
+                '<input class="input" id="t-due" name="due_date" type="date"></div>' +
+              '<div class="field"><label for="t-notes">Notes</label>' +
+                '<textarea class="textarea" id="t-notes" name="notes"></textarea></div>',
+            submitLabel: 'Add task',
+            onSubmit: async function (form, close) {
+              var v = R.values(form);
+              if (!v.title) throw new Error('Give the task a title.');
+              await api.post('/tasks', { title: v.title, due_date: v.due_date || null, notes: v.notes || null });
+              close();
+              toast('Task added.', 'ok');
+              R.refreshCounts();
+              R.reload();
+            },
+          });
         });
       });
     },
@@ -1010,7 +1028,16 @@
               '</td>' +
             '</tr>';
           },
-          { emptyTitle: 'No units yet', emptyHint: 'Add them one at a time, in bulk, or import a CSV.' }
+          canWrite
+            ? {
+                emptyTitle: 'No units yet',
+                emptyHint: 'Add them one at a time, in bulk, or import a CSV.',
+                emptyAction: '<button class="btn primary" id="btn-empty-unit">Add unit</button>',
+              }
+            // A read-only role's own screen has no Add/Import buttons — telling
+            // them how to add units their screen doesn't let them add is a
+            // dead end, not a hint.
+            : { emptyTitle: 'No units yet', emptyHint: 'Units will appear here once your team adds them.' }
         ), { flush: true });
 
       R.qsa('[data-project]', view).forEach(function (pill) {
@@ -1022,13 +1049,19 @@
       });
 
       if (canWrite) {
-        R.qs('#btn-new-unit', view).addEventListener('click', function () { unitModal(projects); });
+        R.qsa('#btn-new-unit, #btn-empty-unit', view).forEach(function (b) {
+          b.addEventListener('click', function () { unitModal(projects); });
+        });
         R.qs('#btn-bulk-units', view).addEventListener('click', function () { bulkUnitModal(projects); });
         R.qs('#btn-import-units', view).addEventListener('click', function () { importUnitsModal(projects); });
       }
 
-      R.qsa('[data-reserve]', view).forEach(function (button) {
-        button.addEventListener('click', function () { openReservationModal({ unitId: button.dataset.reserve }); });
+      // R.onClick (not a bare addEventListener) so the button shows a
+      // spinner and is protected against a double-click while
+      // units/customers/reps are still being pre-fetched for the modal,
+      // same as the restructure and renew-tenancy buttons elsewhere.
+      R.onClick(view, '[data-reserve]', async function (button) {
+        await reservationModal({ unitId: button.dataset.reserve });
       });
 
       R.onClick(view, '[data-delete-unit]', async function (button) {
@@ -1052,7 +1085,7 @@
   async function deleteModal(resource, id, label) {
     var impact = await api('/recycle/' + resource + '/' + id + '/impact');
 
-    R.modal({
+    var panel = R.modal({
       title: 'Delete ' + (label || 'this record') + '?',
       body:
         '<div class="notice mb-2">This also removes ' + esc(impact.takes_with_it) + '.</div>' +
@@ -1073,7 +1106,12 @@
       },
     });
 
-    var submit = R.qs('.modal-foot [type="submit"]');
+    // Scoped to this modal's own root — an unscoped document-wide lookup
+    // here would restyle whichever modal's submit button the selector
+    // happens to hit first if more than one were ever open at once (the
+    // exact bug modal()'s own formId-per-instance scheme was hardened
+    // against once already; see the comment on modalSeq in realestate.js).
+    var submit = R.qs('[type="submit"]', panel.root);
     if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
   }
 
@@ -1387,7 +1425,10 @@
   R.screens.customers = {
     render: async function (view, params, query) {
       // #/customers/<id> opens the buyer straight from a search result.
-      if (params[0]) { openCustomer(params[0]); window.location.hash = '#/customers'; return; }
+      // The id stays in the hash while the drawer is open — so the URL is
+      // linkable/shareable and Back behaves — and is only rewritten to the
+      // bare list route once the drawer actually closes (see openCustomer).
+      if (params[0]) { openCustomer(params[0]); return; }
 
       var search = query.q || '';
       var customers = await api('/customers' + (search ? '?search=' + encodeURIComponent(search) : ''));
@@ -1607,6 +1648,24 @@
   async function openCustomer(id) {
     var panel = R.drawer({ eyebrow: 'Buyer', title: 'Loading…' });
 
+    // R.drawer (realestate.js) closes itself on the × button, Escape, a
+    // scrim click, or a handler here calling panel.close() outright (e.g.
+    // "Create a reservation" below) — with no onClose hook exposed. A
+    // MutationObserver on the drawer's fixed overlay parent catches every
+    // one of those paths in one place: once the drawer's own scrim node is
+    // no longer a child, it really is closed, so only then does the URL
+    // fall back to the bare list route.
+    var scrim = panel.root.parentNode;
+    if (scrim && scrim.parentNode) {
+      var overlayEl = scrim.parentNode;
+      var hashObserver = new MutationObserver(function () {
+        if (scrim.parentNode) return;
+        hashObserver.disconnect();
+        if (window.location.hash.indexOf('#/customers/') === 0) window.location.hash = '#/customers';
+      });
+      hashObserver.observe(overlayEl, { childList: true });
+    }
+
     try {
       var c = await api('/customers/' + id);
       var reservations = c.re_reservations || [];
@@ -1701,13 +1760,13 @@
             '<button class="btn primary" id="d-reserve">Create a reservation</button>') + '</div>');
       R.applyDynamicStyles(panel.body);
 
-      var reserveButton = R.qs('#d-reserve', panel.body);
-      if (reserveButton) {
-        reserveButton.addEventListener('click', function () {
-          panel.close();
-          openReservationModal({ customerId: c.id });
-        });
-      }
+      // R.onClick — same reasoning as the unit-row Reserve buttons: shows a
+      // spinner and blocks a double-click while the modal's own
+      // units/customers/reps pre-fetch is still in flight.
+      R.onClick(panel.body, '#d-reserve', async function () {
+        panel.close();
+        await reservationModal({ customerId: c.id });
+      });
 
       // Each mints its own link (a fresh token, same underlying buyer account)
       // and reports its own result — R.onClick disables only the button it is
@@ -1854,7 +1913,7 @@
           { emptyTitle: 'No reservations yet', emptyHint: 'A reservation ties a buyer to a unit and starts their payment schedule.' }
         ), { flush: true });
 
-      R.qs('#btn-new-res', view).addEventListener('click', function () { openReservationModal({}); });
+      R.onClick(view, '#btn-new-res', async function () { await reservationModal({}); });
 
       R.onClick(view, '#btn-export-reservations', async function () {
         await R.downloadCsv('/reports/export/schedule', 'archta-reservations.csv');
@@ -2061,13 +2120,11 @@
     refresh();
   }
 
-  // The modal has to load units, buyers and reps before it can draw itself, so
-  // it is async — and an async function handed straight to addEventListener
-  // rejects into nothing. Every call site goes through this.
-  function openReservationModal(preset) {
-    reservationModal(preset || {}).catch(function (err) { toast(err.message, 'err'); });
-  }
-
+  // The modal has to load units, buyers and reps before it can draw itself,
+  // so it is async. Every call site now goes through R.onClick, which
+  // awaits it directly — spinner on the triggering button, and errors
+  // (including "no available units" / "add a buyer first" below) toasted
+  // automatically instead of each site needing its own .catch().
   async function reservationModal(preset) {
     var results = await Promise.all([
       api('/units?status=available'),
@@ -2328,7 +2385,7 @@
   // Typing the word is the point. A confirm dialog with a button is dismissed
   // reflexively; a word has to be read first.
   function confirmCancellation(id, buyerName) {
-    R.modal({
+    var panel = R.modal({
       title: 'Cancel this reservation?',
       body:
         '<div class="notice mb-2">This frees the unit for anyone else to reserve. ' +
@@ -2349,7 +2406,8 @@
       },
     });
 
-    var submit = R.qs('.modal-foot [type="submit"]');
+    // Scoped to this modal's own root — see the comment in deleteModal().
+    var submit = R.qs('[type="submit"]', panel.root);
     if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
   }
 
@@ -2364,6 +2422,21 @@
   // back at a fully collapsed list.
   var expandedScheduleBuyerId = null;
 
+  // This screen was already permission-agnostic before Sales Rep got read
+  // access here: it fetches /payments and /payments/schedule directly and
+  // trusts the server's row-level filter (permissions.js's payments.read /
+  // payments.schedule now include sales_rep, scoped to their own buyers via
+  // salesRepIdsFor — CLAUDE.md's "Row-level filtering" section), and its
+  // write actions (Record, the Paystack Link button, Void) are separately
+  // gated on payments.record/payments.void below, which a rep still does not
+  // have. So nothing here needed to change for a rep to see their own
+  // buyers' payment status read-only, exactly as intended.
+  //
+  // What still needs doing OUTSIDE this file: realestate.js's NAV_BY_ROLE
+  // has no 'payments' entry for sales_rep, so there is no sidebar link to
+  // this screen for that role yet — the route itself works if reached
+  // directly (#/payments). Adding the nav entry is a one-line change in
+  // realestate.js, which this pass does not own/touch.
   R.screens.payments = {
     render: async function (view, params, query) {
       var tab = query.tab || 'all';
@@ -2533,8 +2606,8 @@
   // totals for the same buyer together.
   function groupScheduleByBuyer(schedule) {
     var byPlan = {};
-    var todayStr = new Date().toISOString().slice(0, 10);
-    var weekAheadStr = new Date(Date.now() + 6 * 86400000).toISOString().slice(0, 10);
+    var todayStr = localDateStr(new Date());
+    var weekAheadStr = localDateStr(new Date(Date.now() + 6 * 86400000));
 
     schedule.forEach(function (row) {
       var plan = row.re_installment_plans;
@@ -2791,7 +2864,8 @@
           resolve(true);
         },
       });
-      var submit = R.qs('.modal-foot [type="submit"]');
+      // Scoped to this modal's own root — see the comment in deleteModal().
+      var submit = R.qs('[type="submit"]', panel.root);
       if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
       qsaCloseWatch(panel, resolve);
     });
@@ -2823,7 +2897,8 @@
           resolve(true);
         },
       });
-      var submit = R.qs('.modal-foot [type="submit"]');
+      // Scoped to this modal's own root — see the comment in deleteModal().
+      var submit = R.qs('[type="submit"]', panel.root);
       if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
       qsaCloseWatch(panel, resolve);
     });
@@ -3044,7 +3119,7 @@
           commissionTabs(tab) +
           card(null, table(
             [{ label: 'Date' }, { label: 'Rep' }, { label: 'Buyer' }, { label: 'Payment', num: true },
-              { label: 'Rate', num: true }, { label: 'Commission', num: true }, { label: 'Status' }],
+              { label: 'Rate', num: true }, { label: 'Commission', num: true }, { label: 'Status' }, { label: '' }],
             entries,
             function (c) {
               var reservation = c.re_reservations || {};
@@ -3056,6 +3131,13 @@
                 '<td class="num muted">' + c.rate + '%</td>' +
                 '<td class="num gold">' + naira(c.amount) + '</td>' +
                 '<td>' + badge(c.status) + '</td>' +
+                // The middle step of accrued → approved → paid (CLAUDE.md:
+                // "a director approves, only the owner pays") — until now
+                // there was no way to move a row out of 'accrued' short of
+                // the owner paying it outright.
+                '<td class="right">' + (c.status === 'accrued' && R.can('commissions.approve')
+                  ? '<button class="btn-quiet" data-approve="' + esc(c.id) + '">Approve</button>'
+                  : '') + '</td>' +
               '</tr>';
             },
             {
@@ -3064,6 +3146,21 @@
               emptyAction: '<a class="btn-quiet" href="#/payments">Go to Payments</a>',
             }
           ), { flush: true });
+
+        R.qsa('[data-approve]', view).forEach(function (button) {
+          button.addEventListener('click', async function () {
+            var confirmed = await R.confirm({
+              title: 'Approve commission',
+              message: 'Approve this commission for payout? The owner still has to mark it paid.',
+              confirmLabel: 'Approve',
+            });
+            if (!confirmed) return;
+
+            await api.patch('/commissions/status', { ids: [button.dataset.approve], status: 'approved' });
+            toast('Commission approved.', 'ok');
+            R.reload();
+          });
+        });
         return;
       }
 
@@ -3169,9 +3266,15 @@
       // section — nothing to report on is nothing to show.
       var hasRentals = rental && (rental.occupancy.occupied > 0 || rental.upcoming_renewals.length > 0);
 
-      var peak = collections
-        ? Math.max.apply(null, collections.map(function (m) { return m.amount; }).concat([1]))
+      // peakAmount is the real figure ("Peak month ₦x") and is only shown
+      // when a month actually collected something. peakScale is purely the
+      // bar-height denominator and always keeps the +1 divide-by-zero guard
+      // — a brand-new workspace with zero collections must not display a
+      // literal "Peak month ₦1", but the bars still need a safe divisor.
+      var peakAmount = collections
+        ? Math.max.apply(null, collections.map(function (m) { return m.amount; }).concat([0]))
         : 0;
+      var peakScale = Math.max(peakAmount, 1);
 
       view.innerHTML =
         head('Reports', 'The summary you send to investors, without rebuilding it in PowerPoint.',
@@ -3197,12 +3300,16 @@
         (canCollections
           ? card('Collections, last 12 months',
               '<div class="bars">' + collections.map(function (m) {
-                var height = Math.max(2, Math.round((m.amount / peak) * 100));
+                var height = Math.max(2, Math.round((m.amount / peakScale) * 100));
+                // The amount is a visible label, not just a title tooltip —
+                // hover does nothing on the touch/mobile devices this app
+                // primarily runs on. title= stays as a bonus for mouse users.
                 return '<div title="' + esc(m.month + ': ' + naira(m.amount)) + '">' +
+                  '<div class="bar-label">' + esc(nairaShort(m.amount)) + '</div>' +
                   '<div class="bar" data-h="' + height + '"></div>' +
                   '<div class="bar-label">' + esc(m.month.slice(5)) + '</div></div>';
               }).join('') + '</div>' +
-              '<div class="page-sub mt-1">Peak month ' + naira(peak) + '</div>')
+              (peakAmount > 0 ? '<div class="page-sub mt-1">Peak month ' + naira(peakAmount) + '</div>' : ''))
           : '') +
 
         (canInvestor
@@ -3260,9 +3367,12 @@
             ), { flush: true })
           : '');
 
-      // Only rendered when canExport — absent from the DOM entirely for a
-      // Sales Director, who has reports.collections/reports.rental but not
-      // reports.export.
+      // Only rendered when canExport. reports.export is DIRECTORS in
+      // permissions.js — the same group as reports.collections/reports.rental
+      // — so a Sales Director has it too, same as the owner; this null guard
+      // is for a role with none of the three (sales_rep, collections,
+      // documentation — none of whom even have 'reports' in NAV_BY_ROLE)
+      // forcing this URL directly rather than reaching it from the sidebar.
       var printButton = R.qs('#btn-print', view);
       if (printButton) printButton.addEventListener('click', function () { window.print(); });
 
@@ -3300,7 +3410,6 @@
 
   async function workspaceTab(view, tabs) {
     var settings = await api('/settings');
-    var me = R.state.user;
 
     view.innerHTML = head('Settings', 'Workspace configuration — letterhead, provider keys, commission default and who gets told what. Your own profile and password are under your name, bottom left of the sidebar.') + tabs +
       '<div class="grid cols-2">' +
@@ -3323,7 +3432,7 @@
           '</form>') +
 
           card('Payments — Paystack',
-            (me.role === 'owner'
+            (R.can('settings.write')
               ? '<p class="field-hint mb-2">Optional. Without your own Paystack account, card payments settle into Archta\'s default account and are forwarded to you. Add your own keys to receive them directly.</p>' +
                 '<form id="form-paystack">' +
                   '<div class="field"><label for="s-pk-public">Public key</label>' +
@@ -3367,7 +3476,7 @@
           '</form>') +
 
           card('Email',
-            (me.role === 'owner'
+            (R.can('settings.write')
               ? '<p class="field-hint mb-2">Optional. Without this, receipts, portal links and alerts still send — they just arrive from Archta rather than your own domain.</p>' +
                 '<form id="form-email">' +
                   '<div class="field"><label for="s-resend-key">Resend API key</label>' +
@@ -3389,7 +3498,7 @@
                 ' Only the workspace owner can change this.</p>')) +
 
           card('SMS — Termii',
-            (me.role === 'owner'
+            (R.can('settings.write')
               ? '<p class="field-hint mb-2">Optional. Without this, payment reminders and overdue texts still send — they just arrive from Archta\'s registered sender ID rather than your own.</p>' +
                 '<form id="form-termii">' +
                   '<div class="field"><label for="s-termii-sender">Sender ID</label>' +
@@ -3514,27 +3623,24 @@
   }
 
   // ── Role-change guards ────────────────────────────────────────────────
-  // Mirrors src/services/permissions.js's ROLE_RANK and ROLE_LOSS_GROUPS
-  // exactly, so the confirmation shown here — BEFORE any request is sent —
-  // says the same thing the server would answer with if this check were
-  // skipped. The server re-checks independently (PATCH /settings/team/:id
-  // refuses a downgrade without confirm_downgrade:true); this copy exists so
-  // the person deciding sees the cost up front instead of after a round trip.
-  var ROLE_RANK = { owner: 3, sales_director: 2, sales_rep: 1, collections: 1, documentation: 1 };
-  function isRoleDowngrade(fromRole, toRole) { return ROLE_RANK[toRole] < ROLE_RANK[fromRole]; }
-
-  var ROLE_LOSS_GROUPS = [
-    { roles: ['owner'], label: "owner-only actions — waiving a buyer's debt, deleting records from the bin, workspace settings and provider keys, the investor report, and marking commission paid out" },
-    { roles: ['owner', 'sales_director'], label: 'director-level access — the whole sales book, restructuring plans and renewing tenancies, importing and exporting data, approving commissions, the daily brief, and managing the team' },
-    { roles: ['owner', 'sales_director', 'collections'], label: 'recording payments, logging payment promises, and sending buyers their portal link' },
-    { roles: ['owner', 'sales_director', 'documentation'], label: 'generating, updating and downloading documents' },
-    { roles: ['owner', 'sales_director', 'sales_rep'], label: 'creating buyers and reservations' },
-  ];
-  function rolesLostGoingFrom(fromRole, toRole) {
-    return ROLE_LOSS_GROUPS
-      .filter(function (g) { return g.roles.indexOf(fromRole) !== -1 && g.roles.indexOf(toRole) === -1; })
-      .map(function (g) { return g.label; });
-  }
+  // There used to be a hand-copied ROLE_RANK map and a ROLE_LOSS_GROUPS list
+  // here, mirroring src/services/permissions.js's own ROLE_RANK and
+  // capabilitiesLostGoingFrom() literally field-for-field — exactly the
+  // "second copy of a rule the server already computes" CLAUDE.md's
+  // per-workspace-credentials and RBAC sections both warn against. Neither
+  // copy is needed: realestate.js's request() already attaches the full
+  // parsed JSON body to a failed request as `err.body`, and
+  // PATCH /settings/team/:id already answers a downgrade attempted without
+  // confirm_downgrade with exactly this shape in its 409 body —
+  // { downgrade: true, current_role_label, new_role_label, loses: [...] }
+  // (src/routes/settings.js, built from permissions.js's own ROLE_RANK and
+  // ROLE_LOSS_GROUPS). Both call sites below now read that instead of
+  // precomputing it — the first attempt costs nothing extra for a lateral
+  // move or a promotion, and only a genuine downgrade ever needs a second
+  // round trip. Self-inviting at a lower role is the same story: rather
+  // than duplicating that check too, the invite submit below just lets
+  // POST /settings/team/invite reject it (inviteService.js already throws
+  // the identical message), and the modal's own error display shows it.
 
   async function teamTab(view, tabs) {
     var results = await Promise.all([
@@ -3592,11 +3698,10 @@
             '<td class="right nowrap">' + (
               canManage
                 ? '<button class="btn-quiet" data-change-role="' + esc(m.id) + '" data-current="' + esc(m.role) +
-                  '" data-current-label="' + esc(m.role_label || m.role) + '" data-name="' +
-                  esc(m.full_name || m.email || 'this person') + '">Change role</button> '
+                  '" data-name="' + esc(m.full_name || m.email || 'this person') + '">Change role</button> '
                 : ''
             ) + (
-              m.role !== 'owner' && m.status === 'active' && m.id && R.state.user.role === 'owner'
+              m.role !== 'owner' && m.status === 'active' && m.id && R.can('settings.transferOwner')
                 ? '<button class="btn-quiet" data-make-owner="' + esc(m.id) + '" data-name="' +
                   esc(m.full_name || m.email || 'this person') + '">Make owner</button> '
                 : ''
@@ -3703,16 +3808,15 @@
           submitLabel: 'Send invite',
           onSubmit: async function (form, close) {
             var v = R.values(form);
-            // Checked here too, not just server-side — inviting your own
-            // address at a role below the one you already hold is how
-            // somebody would otherwise demote themselves with no other
-            // owner's say-so, and this fails before the request is even sent.
-            var meEmail = (R.state.user.email || '').trim().toLowerCase();
-            if (v.email && v.email.trim().toLowerCase() === meEmail && isRoleDowngrade(R.state.user.role, v.role)) {
-              throw new Error('You cannot invite yourself at a lower role than your current one. '
-                + 'To change your own role, ask another owner to do it.');
-            }
-
+            // Inviting your own address at a role below the one you already
+            // hold is how somebody would otherwise demote themselves with no
+            // other owner's say-so. src/services/inviteService.js already
+            // rejects exactly that (comparing against permissions.js's own
+            // ROLE_RANK) and throws the identical message below — this used
+            // to duplicate that check client-side to fail before a round
+            // trip, but it's rare enough (an admin inviting themselves) that
+            // the one extra request isn't worth hand-copying the server's
+            // rank table for.
             var result = await api.post('/settings/team/invite', v);
             close();
             toast(result.joined_immediately ? 'Added to the workspace.' : 'Invite sent.', 'ok');
@@ -3737,16 +3841,25 @@
           submitLabel: 'Save',
           onSubmit: async function (form, close) {
             var newRole = R.values(form).role;
-            var currentRole = button.dataset.current;
 
-            if (newRole !== currentRole && isRoleDowngrade(currentRole, newRole)) {
-              var target = team.invitable_roles.filter(function (r) { return r.role === newRole; })[0];
-              var lost = rolesLostGoingFrom(currentRole, newRole);
+            // First attempt never claims confirm_downgrade — a lateral move
+            // or a promotion just succeeds here, one request. A genuine
+            // downgrade gets refused with a 409 carrying exactly what it
+            // costs (permissions.js's ROLE_RANK and ROLE_LOSS_GROUPS,
+            // computed server-side — see the comment above this function).
+            try {
+              await api.patch('/settings/team/' + button.dataset.changeRole, { role: newRole });
+            } catch (err) {
+              // Anything else is a real failure (e.g. "there must always be
+              // at least one owner") — let it bubble to the modal's own
+              // error display like any other rejected submit.
+              if (!(err.status === 409 && err.body && err.body.downgrade)) throw err;
+
               var confirmed = await R.confirm({
                 title: 'Change ' + button.dataset.name + '’s role?',
                 message: 'You are about to change ' + button.dataset.name + ' from ' +
-                  button.dataset.currentLabel + ' to ' + (target ? target.label : newRole) + '. ' +
-                  'They will immediately lose access to ' + lost.join('; ') + '. Are you sure?',
+                  err.body.current_role_label + ' to ' + err.body.new_role_label + '. ' +
+                  'They will immediately lose access to ' + err.body.loses.join('; ') + '. Are you sure?',
                 confirmLabel: 'Change role',
                 danger: true,
               });
@@ -3754,12 +3867,10 @@
               // they had already picked, rather than closing the whole flow —
               // they may just want a different new role, not to give up.
               if (!confirmed) return;
+
+              await api.patch('/settings/team/' + button.dataset.changeRole, { role: newRole, confirm_downgrade: true });
             }
 
-            // Sent unconditionally: harmless for a lateral move or a
-            // promotion, and it is what tells the server this specific
-            // downgrade was actually confirmed, not just requested.
-            await api.patch('/settings/team/' + button.dataset.changeRole, { role: newRole, confirm_downgrade: true });
             close();
             toast('Role updated.', 'ok');
             R.reload();
@@ -3844,8 +3955,12 @@
       });
     });
 
-    R.qs('#btn-add-rep', view).addEventListener('click', async function () {
-      var team = await api('/settings/team');
+    // R.onClick for the spinner/disable and automatic error toast on the
+    // (rare, but real — a stale invite, a race with another admin) failure
+    // path a bare addEventListener here had no try/catch for. `team` is
+    // already sitting in this closure from the Promise.all above — no need
+    // to hit /settings/team a second time for data that hasn't changed.
+    R.onClick(view, '#btn-add-rep', async function () {
       var candidates = team.members.filter(function (m) { return m.user_id; });
 
       R.modal({
@@ -3937,7 +4052,7 @@
 
     var hasReps = work.reps && work.reps.length;
 
-    R.modal({
+    var panel = R.modal({
       title: 'Remove ' + name + '?',
       body:
         (work.has_workload
@@ -3990,7 +4105,8 @@
       },
     });
 
-    var submit = R.qs('.modal-foot [type="submit"]');
+    // Scoped to this modal's own root — see the comment in deleteModal().
+    var submit = R.qs('[type="submit"]', panel.root);
     if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
   }
 

@@ -9,11 +9,19 @@ const router = express.Router();
 // conversation nobody enjoys but everybody needs to have.
 router.get('/', requirePermission('promises.read'), async (req, res, next) => {
   try {
-    res.json(await promises.listPromises(req.orgId, {
+    // Unlike every sibling list route (payments.js, reservations.js), this one
+    // had no cap at all, risking an unbounded response and silent truncation
+    // past PostgREST's own max-rows setting. promiseService.listPromises does
+    // not accept a query-level limit (it lives outside this route file), so
+    // the cap is applied here on the response instead — same ceiling shape
+    // (`?limit=`, capped) as the other list routes use at the query level.
+    const limit = Math.min(Number(req.query.limit) || 200, 500);
+    const data = await promises.listPromises(req.orgId, {
       status: req.query.status || null,
       scheduleId: req.query.schedule_id || null,
       customerId: req.query.customer_id || null,
-    }));
+    });
+    res.json(data.slice(0, limit));
   } catch (e) { next(e); }
 });
 

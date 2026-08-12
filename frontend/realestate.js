@@ -1030,7 +1030,7 @@
   // map (owner, sales_director, and no role at all — a solo account) means
   // "everything", since neither role has a restricted list in the spec.
   var NAV_BY_ROLE = {
-    sales_rep: ['dashboard', 'customers', 'reservations', 'commissions', 'projects', 'units'],
+    sales_rep: ['dashboard', 'customers', 'reservations', 'payments', 'commissions', 'projects', 'units'],
     collections: ['dashboard', 'at-risk', 'payments', 'customers', 'tasks'],
     documentation: ['dashboard', 'documents', 'customers', 'reservations'],
   };

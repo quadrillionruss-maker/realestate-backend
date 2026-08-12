@@ -47,7 +47,10 @@ app.use(helmet({
       fontSrc: ["'self'", 'https://fonts.gstatic.com'],
       // https: for images because a developer's logo is a URL they own.
       imgSrc: ["'self'", 'data:', 'https:'],
-      connectSrc: ["'self'", 'https://accounts.google.com', ...env.cors.allowedOrigins],
+      // NOTE: this is what the served app itself may call out to, not who may
+      // call in — env.cors.allowedOrigins (below, in the CORS section) answers
+      // the opposite question and does not belong here.
+      connectSrc: ["'self'", 'https://accounts.google.com'],
       frameSrc: ['https://accounts.google.com'],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
@@ -99,7 +102,13 @@ const corsOptions = {
     // No Origin header: server-to-server, curl, health checks.
     if (!origin) return callback(null, true);
     if (allowedOrigins.has(origin)) return callback(null, true);
-    callback(Object.assign(new Error(`CORS: origin '${origin}' not allowed.`), { statusCode: 403 }));
+    // Log the actual origin server-side only. The error message returned to
+    // the caller must stay a constant string — errorHandler returns a sub-500
+    // message verbatim, and this endpoint is unauthenticated, so interpolating
+    // the raw Origin header here would make it a reflector for arbitrary
+    // attacker-supplied text.
+    console.warn(`CORS: rejected origin '${origin}'`);
+    callback(Object.assign(new Error('Origin not allowed.'), { statusCode: 403 }));
   },
   // PATCH is not optional here — every status transition in this API
   // (/reservations/:id/status, /tasks/:id/status, /documents/:id/status) uses
@@ -141,6 +150,12 @@ app.use(express.urlencoded({ extended: true }));
 // ── Health check ───────────────────────────────────────────────────────────
 // Queries a table this service owns, so it reports on the database this API
 // actually depends on. Render polls this to decide if a deploy is live.
+//
+// Unauthenticated by design (Render's poller carries no token), so the body
+// stays minimal on purpose — no environment name, no raw database-error
+// state, nothing beyond whether the service is serving traffic. That used to
+// leak `environment: env.nodeEnv` and a live `database` field to anyone who
+// asked; neither is worth exposing to an unauthenticated caller.
 app.get('/health', async (_req, res) => {
   let database = 'ok';
   try {
@@ -152,10 +167,6 @@ app.get('/health', async (_req, res) => {
 
   res.status(database === 'ok' ? 200 : 503).json({
     status: database === 'ok' ? 'ok' : 'degraded',
-    service: 'Real Estate Sales Operations API',
-    database,
-    environment: env.nodeEnv,
-    timestamp: new Date().toISOString(),
   });
 });
 
@@ -195,16 +206,20 @@ require('./src/jobs/daily');
 
 // ── Listen ─────────────────────────────────────────────────────────────────
 const server = app.listen(env.port, () => {
+  // env.appUrl is the deployed URL (Render, etc); fall back to localhost only
+  // when it's unset, so the boot-log banner in production points a developer
+  // configuring the Paystack webhook at the real host instead of localhost.
+  const baseUrl = env.appUrl || `http://localhost:${env.port}`;
   console.log('');
   console.log('  ●  Real Estate Sales Operations API');
-  console.log(`  ↳  http://localhost:${env.port}`);
+  console.log(`  ↳  ${baseUrl}`);
   console.log(`  ↳  Environment: ${env.nodeEnv}`);
-  console.log(`  ↳  Health:      http://localhost:${env.port}/health`);
-  console.log(`  ↳  API:         http://localhost:${env.port}/api/re`);
-  console.log(`  ↳  Sign in:     http://localhost:${env.port}/api/auth/login`);
-  console.log(`  ↳  Webhook:     http://localhost:${env.port}/api/webhooks/paystack`);
+  console.log(`  ↳  Health:      ${baseUrl}/health`);
+  console.log(`  ↳  API:         ${baseUrl}/api/re`);
+  console.log(`  ↳  Sign in:     ${baseUrl}/api/auth/login`);
+  console.log(`  ↳  Webhook:     ${baseUrl}/api/webhooks/paystack`);
   if (env.serveFrontend) {
-    console.log(`  ↳  App:         http://localhost:${env.port}/`);
+    console.log(`  ↳  App:         ${baseUrl}/`);
   }
   console.log('');
 });
