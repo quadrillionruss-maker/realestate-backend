@@ -408,6 +408,11 @@
       ]);
 
       var d = results[0], atRisk = results[1], tasks = results[2];
+      // The 4 KPI tiles read a lot better as ₦28.5m than ₦28,450,000 once
+      // the grid has collapsed to one column — checked at render time, not
+      // in a media query, because there is no CSS way to swap which STRING
+      // a tile contains, only how it is styled.
+      var kpiMoney = window.innerWidth < 480 ? nairaShort : naira;
       // Collections and a Sales Executive never get a brief back at all
       // (routes/dashboard.js only fetches one for Owner/Sales Director) —
       // d.latest_brief is already null for them, same as canSeeBrief being
@@ -482,14 +487,17 @@
             '</div>'
           : '') +
 
+        // ₦28,450,000 at 18px (the mobile .stat-value size) is the widest
+        // thing on a 4-up grid squeezed to one column — nairaShort's
+        // ₦28.5m fits the tile instead of wrapping or overflowing it.
         '<div class="grid cols-4 mt-2">' +
-          stat('Collected this month', naira(d.collected_this_month), { tone: 'moss', accent: 'moss' }) +
-          stat('Outstanding', naira(d.outstanding_total)) +
-          stat('Overdue', naira(d.overdue.amount), {
+          stat('Collected this month', kpiMoney(d.collected_this_month), { tone: 'moss', accent: 'moss' }) +
+          stat('Outstanding', kpiMoney(d.outstanding_total)) +
+          stat('Overdue', kpiMoney(d.overdue.amount), {
             tone: 'clay', accent: d.overdue.count ? 'clay' : null,
             sub: d.overdue.count ? R.plural(d.overdue.count, 'installment') : 'All current',
           }) +
-          stat('Due in 7 days', naira(d.due_next_7_days)) +
+          stat('Due in 7 days', kpiMoney(d.due_next_7_days)) +
         '</div>' +
 
         // Two revenue streams read as one number without this. Only shown once
@@ -1003,15 +1011,16 @@
         '</div>' +
 
         card(null, table(
-          [{ label: 'Unit' }, { label: 'Project' }, { label: 'Type' }, { label: 'Size', num: true },
+          [{ label: 'Unit' }, { label: 'Project', hideMobile: true }, { label: 'Type', hideMobile: true },
+            { label: 'Size', num: true, hideMobile: true },
             { label: 'Price', num: true }, { label: 'Status' }, { label: '' }],
           units,
           function (u) {
             return '<tr>' +
               '<td class="cell-primary">' + esc(u.unit_number) + '</td>' +
-              '<td class="muted">' + esc((u.re_projects && u.re_projects.name) || '') + '</td>' +
-              '<td class="muted">' + esc(u.unit_type || '—') + '</td>' +
-              '<td class="num muted">' + (u.size_sqm ? esc(u.size_sqm) + ' m²' : '—') + '</td>' +
+              '<td class="muted hide-mobile">' + esc((u.re_projects && u.re_projects.name) || '') + '</td>' +
+              '<td class="muted hide-mobile">' + esc(u.unit_type || '—') + '</td>' +
+              '<td class="num muted hide-mobile">' + (u.size_sqm ? esc(u.size_sqm) + ' m²' : '—') + '</td>' +
               '<td class="num">' + naira(u.list_price) + '</td>' +
               '<td>' + badge(u.status) + '</td>' +
               '<td class="right nowrap">' +
@@ -1445,16 +1454,16 @@
             '<button class="btn primary" id="btn-new-buyer">Add buyer</button>') +
 
           card(null, table(
-            [{ label: 'Name' }, { label: 'Phone' }, { label: 'Email' }, { label: 'Source' },
-              { label: 'Added' }, { label: '' }],
+            [{ label: 'Name' }, { label: 'Phone' }, { label: 'Email', hideMobile: true },
+              { label: 'Source', hideMobile: true }, { label: 'Added', hideMobile: true }, { label: '' }],
             p.slice,
             function (c) {
               return '<tr class="is-clickable" data-open="' + esc(c.id) + '">' +
                 '<td class="cell-primary">' + esc(c.full_name) + '</td>' +
                 '<td class="mono muted">' + esc(c.phone || '—') + '</td>' +
-                '<td class="muted">' + esc(c.email || '—') + '</td>' +
-                '<td class="muted">' + esc(c.source || '—') + '</td>' +
-                '<td class="muted">' + esc(fmtDate(c.created_at)) + '</td>' +
+                '<td class="muted hide-mobile">' + esc(c.email || '—') + '</td>' +
+                '<td class="muted hide-mobile">' + esc(c.source || '—') + '</td>' +
+                '<td class="muted hide-mobile">' + esc(fmtDate(c.created_at)) + '</td>' +
                 // data-stop keeps the row's own click handler from firing and
                 // opening the drawer behind the confirmation.
                 '<td class="right">' + (R.can('recycle.delete')
@@ -1872,8 +1881,8 @@
         '</div>' +
 
         card(null, table(
-          [{ label: 'Buyer' }, { label: 'Unit' }, { label: 'Plan' }, { label: 'Value', num: true },
-            { label: 'Reserved' }, { label: 'Status' }, { label: '' }],
+          [{ label: 'Buyer' }, { label: 'Unit' }, { label: 'Plan', hideMobile: true }, { label: 'Value', num: true },
+            { label: 'Reserved', hideMobile: true }, { label: 'Status' }, { label: '' }],
           reservations,
           function (r) {
             var unit = r.re_units || {};
@@ -1884,7 +1893,7 @@
                 '<div class="cell-meta">' + esc((r.re_customers && r.re_customers.phone) || '') + '</div></td>' +
               '<td>' + esc(unit.unit_number || '—') +
                 '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
-              '<td class="muted">' +
+              '<td class="muted hide-mobile">' +
                 (rental
                   ? (plan ? plan.number_of_installments + '-month lease' : 'Rental') +
                     (r.tenancy_end_date ? '<div class="cell-meta">ends ' + esc(fmtDate(r.tenancy_end_date)) + '</div>' : '')
@@ -1893,7 +1902,7 @@
               '<td class="num">' + naira(plan ? (rental ? plan.total_amount / plan.number_of_installments : plan.total_amount) : unit.list_price) +
                 (rental && plan ? '<div class="cell-meta">/month</div>' : '') +
               '</td>' +
-              '<td class="muted">' + esc(fmtDate(r.reserved_at)) + '</td>' +
+              '<td class="muted hide-mobile">' + esc(fmtDate(r.reserved_at)) + '</td>' +
               '<td>' + badge(r.status) + (r.escalation_stage && r.escalation_stage !== 'none' ? ' ' + badge(r.escalation_stage) : '') + '</td>' +
               '<td class="right nowrap">' +
                 (rental
@@ -2455,7 +2464,8 @@
               '<button class="btn" id="btn-export-payments">Export CSV</button>') +
             paymentTabs(tab) +
             card(null, table(
-              [{ label: 'Date' }, { label: 'Buyer' }, { label: 'Unit' }, { label: 'Method' },
+              [{ label: 'Date' }, { label: 'Buyer' }, { label: 'Unit', hideMobile: true },
+                { label: 'Method', hideMobile: true },
                 { label: 'Amount', num: true }, { label: '' }],
               p.slice,
               function (row) {
@@ -2466,9 +2476,9 @@
                 return '<tr' + (row.voided_at ? ' class="is-voided"' : '') + '>' +
                   '<td class="muted">' + esc(fmtDate(row.paid_at)) + '</td>' +
                   '<td class="cell-primary">' + esc(buyerName || '—') + '</td>' +
-                  '<td class="muted">' + esc(unit.unit_number || '—') +
+                  '<td class="muted hide-mobile">' + esc(unit.unit_number || '—') +
                     '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
-                  '<td class="muted">' + esc(String(row.method).replace(/_/g, ' ')) + '</td>' +
+                  '<td class="muted hide-mobile">' + esc(String(row.method).replace(/_/g, ' ')) + '</td>' +
                   '<td class="num moss">' + naira(row.amount) +
                     (row.voided_at ? '<div class="cell-meta">voided — ' + esc(row.void_reason || '') + '</div>' : '') + '</td>' +
                   '<td class="right nowrap">' + (row.voided_at
@@ -2558,7 +2568,7 @@
           '</div>' +
 
           card(null, table(
-            [{ label: 'Buyer' }, { label: 'Unit' }, { label: 'Paid' }, { label: 'Remaining', num: true }],
+            [{ label: 'Buyer' }, { label: 'Unit' }, { label: 'Paid', hideMobile: true }, { label: 'Remaining', num: true }],
             p.slice,
             buyerRow,
             {
@@ -2660,14 +2670,14 @@
   function buyerRow(b) {
     var isOpen = expandedScheduleBuyerId === b.reservationId;
     return (
-      '<tr class="is-clickable' + (isOpen ? ' is-open' : '') + '" data-expand="' + esc(b.reservationId) + '">' +
+      '<tr class="is-clickable buyer-summary-row' + (isOpen ? ' is-open' : '') + '" data-expand="' + esc(b.reservationId) + '">' +
         '<td class="cell-primary">' +
           '<span class="expand-caret">▸</span>' + esc(b.customer.full_name || '—') +
           (b.hasOverdue ? ' ' + badge('overdue') : '') +
         '</td>' +
         '<td class="muted">' + esc(b.unit.unit_number || '—') +
           '<div class="cell-meta">' + esc(b.project.name || '') + '</div></td>' +
-        '<td class="muted">' + b.paidCount + ' of ' + b.numberOfInstallments + ' paid</td>' +
+        '<td class="muted hide-mobile">' + b.paidCount + ' of ' + b.numberOfInstallments + ' paid</td>' +
         '<td class="num">' + naira(b.remaining) + '</td>' +
       '</tr>' +
       '<tr class="' + (isOpen ? '' : 'hidden') + '" data-buyer-detail="' + esc(b.reservationId) + '">' +
@@ -3088,19 +3098,21 @@
         var performance = await api('/commissions/performance');
         view.innerHTML = head('Sales performance', 'Who is selling, and who is collecting.') + commissionTabs(tab) +
           card(null, table(
-            [{ label: 'Rep' }, { label: 'Reservations', num: true }, { label: 'This month', num: true },
-              { label: 'Portfolio', num: true }, { label: 'Collected', num: true }, { label: 'Rate', num: true },
-              { label: 'At risk', num: true }, { label: 'Commission', num: true }],
+            [{ label: 'Rep' }, { label: 'Reservations', num: true, hideMobile: true },
+              { label: 'This month', num: true, hideMobile: true },
+              { label: 'Portfolio', num: true, hideMobile: true }, { label: 'Collected', num: true },
+              { label: 'Rate', num: true, hideMobile: true },
+              { label: 'At risk', num: true, hideMobile: true }, { label: 'Commission', num: true }],
             performance,
             function (p) {
               return '<tr>' +
                 '<td class="cell-primary">' + esc(p.name) + (p.active ? '' : ' <span class="badge none">inactive</span>') + '</td>' +
-                '<td class="num">' + p.reservations_total + '</td>' +
-                '<td class="num">' + p.reservations_this_month + '</td>' +
-                '<td class="num muted">' + nairaShort(p.portfolio_value) + '</td>' +
+                '<td class="num hide-mobile">' + p.reservations_total + '</td>' +
+                '<td class="num hide-mobile">' + p.reservations_this_month + '</td>' +
+                '<td class="num muted hide-mobile">' + nairaShort(p.portfolio_value) + '</td>' +
                 '<td class="num moss">' + nairaShort(p.collected) + '</td>' +
-                '<td class="num ' + (p.collection_rate >= 70 ? 'moss' : p.collection_rate < 40 ? 'clay' : '') + '">' + p.collection_rate + '%</td>' +
-                '<td class="num ' + (p.buyers_at_risk ? 'clay' : 'muted') + '">' + p.buyers_at_risk + '</td>' +
+                '<td class="num hide-mobile ' + (p.collection_rate >= 70 ? 'moss' : p.collection_rate < 40 ? 'clay' : '') + '">' + p.collection_rate + '%</td>' +
+                '<td class="num hide-mobile ' + (p.buyers_at_risk ? 'clay' : 'muted') + '">' + p.buyers_at_risk + '</td>' +
                 '<td class="num gold">' + naira(p.commission_earned) + '</td>' +
               '</tr>';
             },
@@ -3118,17 +3130,19 @@
         view.innerHTML = head('Commission entries', 'One row per payment. This is where a rep\'s total comes from.') +
           commissionTabs(tab) +
           card(null, table(
-            [{ label: 'Date' }, { label: 'Rep' }, { label: 'Buyer' }, { label: 'Payment', num: true },
-              { label: 'Rate', num: true }, { label: 'Commission', num: true }, { label: 'Status' }, { label: '' }],
+            [{ label: 'Date', hideMobile: true }, { label: 'Rep' }, { label: 'Buyer' },
+              { label: 'Payment', num: true, hideMobile: true },
+              { label: 'Rate', num: true, hideMobile: true }, { label: 'Commission', num: true },
+              { label: 'Status' }, { label: '' }],
             entries,
             function (c) {
               var reservation = c.re_reservations || {};
               return '<tr>' +
-                '<td class="muted">' + esc(fmtDate(c.created_at)) + '</td>' +
+                '<td class="muted hide-mobile">' + esc(fmtDate(c.created_at)) + '</td>' +
                 '<td>' + esc((c.re_sales_reps && c.re_sales_reps.users && (c.re_sales_reps.users.full_name || c.re_sales_reps.users.email)) || '—') + '</td>' +
                 '<td class="muted">' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</td>' +
-                '<td class="num muted">' + naira(c.base_amount) + '</td>' +
-                '<td class="num muted">' + c.rate + '%</td>' +
+                '<td class="num muted hide-mobile">' + naira(c.base_amount) + '</td>' +
+                '<td class="num muted hide-mobile">' + c.rate + '%</td>' +
                 '<td class="num gold">' + naira(c.amount) + '</td>' +
                 '<td>' + badge(c.status) + '</td>' +
                 // The middle step of accrued → approved → paid (CLAUDE.md:
@@ -3178,17 +3192,19 @@
         '</div>' +
 
         card(null, table(
-          [{ label: 'Rep' }, { label: 'Rate', num: true }, { label: 'Collected on', num: true },
-            { label: 'Earned', num: true }, { label: 'Owed', num: true }, { label: 'Paid out', num: true }, { label: '' }],
+          [{ label: 'Rep' }, { label: 'Rate', num: true, hideMobile: true },
+            { label: 'Collected on', num: true, hideMobile: true },
+            { label: 'Earned', num: true }, { label: 'Owed', num: true },
+            { label: 'Paid out', num: true, hideMobile: true }, { label: '' }],
           summary,
           function (r) {
             return '<tr>' +
               '<td class="cell-primary">' + esc(r.name) + '</td>' +
-              '<td class="num muted">' + r.commission_rate + '%</td>' +
-              '<td class="num muted">' + nairaShort(r.collected_base) + '</td>' +
+              '<td class="num muted hide-mobile">' + r.commission_rate + '%</td>' +
+              '<td class="num muted hide-mobile">' + nairaShort(r.collected_base) + '</td>' +
               '<td class="num gold">' + naira(r.earned) + '</td>' +
               '<td class="num">' + naira(r.outstanding) + '</td>' +
-              '<td class="num moss">' + naira(r.paid) + '</td>' +
+              '<td class="num moss hide-mobile">' + naira(r.paid) + '</td>' +
               '<td class="right">' + (r.outstanding > 0 && R.can('commissions.markPaid')
                 ? '<button class="btn-quiet" data-payout="' + esc(r.sales_rep_id) + '" data-name="' + esc(r.name) + '">Mark paid</button>'
                 : '') + '</td>' +
@@ -3275,6 +3291,9 @@
         ? Math.max.apply(null, collections.map(function (m) { return m.amount; }).concat([0]))
         : 0;
       var peakScale = Math.max(peakAmount, 1);
+      var hasCollectionsData = Boolean(collections && collections.length && peakAmount > 0);
+      var MONTH_ABBR = { '01': 'Jan', '02': 'Feb', '03': 'Mar', '04': 'Apr', '05': 'May', '06': 'Jun',
+        '07': 'Jul', '08': 'Aug', '09': 'Sep', '10': 'Oct', '11': 'Nov', '12': 'Dec' };
 
       view.innerHTML =
         head('Reports', 'The summary you send to investors, without rebuilding it in PowerPoint.',
@@ -3299,17 +3318,22 @@
 
         (canCollections
           ? card('Collections, last 12 months',
-              '<div class="bars">' + collections.map(function (m) {
-                var height = Math.max(2, Math.round((m.amount / peakScale) * 100));
-                // The amount is a visible label, not just a title tooltip —
-                // hover does nothing on the touch/mobile devices this app
-                // primarily runs on. title= stays as a bonus for mouse users.
-                return '<div title="' + esc(m.month + ': ' + naira(m.amount)) + '">' +
-                  '<div class="bar-label">' + esc(nairaShort(m.amount)) + '</div>' +
-                  '<div class="bar" data-h="' + height + '"></div>' +
-                  '<div class="bar-label">' + esc(m.month.slice(5)) + '</div></div>';
-              }).join('') + '</div>' +
-              (peakAmount > 0 ? '<div class="page-sub mt-1">Peak month ' + naira(peakAmount) + '</div>' : ''))
+              hasCollectionsData
+                ? '<div class="bars">' + collections.map(function (m) {
+                    var height = Math.max(2, Math.round((m.amount / peakScale) * 100));
+                    // The amount is a visible label, not just a title tooltip —
+                    // hover does nothing on the touch/mobile devices this app
+                    // primarily runs on. title= stays as a bonus for mouse users.
+                    // Suppressed below 15% height: on a twelve-bar chart a tall
+                    // peak next to several near-flat months left the small
+                    // bars' labels overlapping each other and the bar below.
+                    return '<div title="' + esc(m.month + ': ' + naira(m.amount)) + '">' +
+                      (height > 15 ? '<div class="bar-label">' + esc(nairaShort(m.amount)) + '</div>' : '') +
+                      '<div class="bar-track"><div class="bar" data-h="' + height + '"></div></div>' +
+                      '<div class="bar-label">' + esc(MONTH_ABBR[m.month.slice(5)] || m.month.slice(5)) + '</div></div>';
+                  }).join('') + '</div>' +
+                  '<div class="page-sub mt-1">Peak month ' + naira(peakAmount) + '</div>'
+                : R.emptyState('No collections recorded yet'))
           : '') +
 
         (canInvestor
@@ -3366,6 +3390,13 @@
               { emptyTitle: 'Nothing expiring soon', emptyHint: 'Renewals due in the next 90 days will appear here.' }
             ), { flush: true })
           : '');
+
+      // Collections bars carry their height as data-h (a CSP with no
+      // 'unsafe-inline' in style-src blocks a literal style="height:…"
+      // attribute) — this is the one step that turns that number into an
+      // actual bar. Same helper the CSS-computed-size convention already
+      // uses everywhere else in the app.
+      R.applyDynamicStyles(view);
 
       // Only rendered when canExport. reports.export is DIRECTORS in
       // permissions.js — the same group as reports.collections/reports.rental

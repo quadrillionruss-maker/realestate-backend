@@ -165,9 +165,19 @@
     return normalized.length === 13 ? normalized : null;
   }
 
+  // web.whatsapp.com/send, not wa.me — wa.me hands off to the WhatsApp
+  // desktop app when one is installed, and on a machine that has never
+  // linked that app to a phone it answers "phone number shared via url is
+  // invalid" even for a genuinely valid number. Routing through WhatsApp Web
+  // in the browser instead sidesteps the desktop app entirely.
   function waLink(phone) {
     var number = waNumber(phone);
-    return number ? 'https://wa.me/' + number : null;
+    return number ? 'https://web.whatsapp.com/send?phone=' + number : null;
+  }
+
+  // ── Touch detection ──────────────────────────────────────────────────
+  function isTouchDevice() {
+    return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
   }
 
   // Downloads go through a real anchor click, not window.open. Popup blockers
@@ -514,7 +524,8 @@
 
     return '<div class="table-wrap"><table class="data"><thead><tr>' +
       columns.map(function (c) {
-        return '<th' + (c.num ? ' class="num"' : '') + '>' + esc(c.label) + '</th>';
+        var cls = [c.num ? 'num' : '', c.hideMobile ? 'hide-mobile' : ''].filter(Boolean).join(' ');
+        return '<th' + (cls ? ' class="' + cls + '"' : '') + '>' + esc(c.label) + '</th>';
       }).join('') +
       '</tr></thead><tbody>' +
       rows.map(rowFn).join('') +
@@ -536,6 +547,86 @@
       try {
         document.execCommand('copy') ? resolve() : reject(new Error('copy rejected'));
       } catch (err) { reject(err); } finally { document.body.removeChild(area); }
+    });
+  }
+
+  // ── Call popup ────────────────────────────────────────────────────────
+  // Every "Call" control in the app is a plain <a href="tel:…">. On a phone
+  // that link is the whole feature — tapping it opens the dialer, which is
+  // exactly what a tel: link is for. On a desktop there is usually no dialer
+  // to open, so the same click instead drops a small popup with the number
+  // and a Copy button, positioned under the link that was clicked. One
+  // delegated listener handles every current and future "Call" link in the
+  // app — nothing at the call site has to opt in.
+  var openCallPopup = null;
+
+  function closeCallPopup() {
+    if (!openCallPopup) return;
+    if (openCallPopup.parentNode) openCallPopup.parentNode.removeChild(openCallPopup);
+    openCallPopup = null;
+  }
+
+  function showCallPopup(anchor, phone) {
+    closeCallPopup();
+
+    var normalized = waNumber(phone);
+    var copyValue = normalized ? '+' + normalized : phone;
+
+    var pop = document.createElement('div');
+    pop.className = 'call-popup';
+    pop.setAttribute('role', 'dialog');
+    pop.innerHTML =
+      '<div class="call-popup-number">' + esc(phone) + '</div>' +
+      '<button class="btn-quiet" type="button">Copy</button>';
+
+    document.body.appendChild(pop);
+
+    var rect = anchor.getBoundingClientRect();
+    var top = rect.bottom + window.scrollY + 6;
+    var left = rect.left + window.scrollX;
+    // Keep it on-screen for a link sitting near the right edge — the popup
+    // itself is narrow enough that flipping to a right-anchor covers it.
+    var maxLeft = window.scrollX + document.documentElement.clientWidth - pop.offsetWidth - 8;
+    if (left > maxLeft) left = Math.max(window.scrollX + 8, maxLeft);
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+
+    pop.querySelector('.btn-quiet').addEventListener('click', function () {
+      copyText(copyValue).then(function () {
+        toast('Copied', 'ok');
+        closeCallPopup();
+      }, function () {
+        toast('Could not copy — try selecting the number instead.', 'err');
+      });
+    });
+
+    openCallPopup = pop;
+  }
+
+  // One document-level listener, exactly like wireSearch()'s outside-click
+  // handling below — installed once in boot(), covers every screen.
+  function wireCallLinks() {
+    document.addEventListener('click', function (e) {
+      var link = e.target.closest('a[href^="tel:"]');
+      if (link) {
+        if (isTouchDevice()) return; // unchanged: let the dialer open
+        e.preventDefault();
+        var phone = link.getAttribute('href').replace(/^tel:/, '');
+        // Clicking the already-open popup's own trigger again closes it,
+        // rather than closing and instantly reopening in the same spot.
+        if (openCallPopup && openCallPopup.dataset.forLink === phone && document.body.contains(openCallPopup)) {
+          closeCallPopup();
+          return;
+        }
+        showCallPopup(link, phone);
+        if (openCallPopup) openCallPopup.dataset.forLink = phone;
+        return;
+      }
+      if (openCallPopup && !e.target.closest('.call-popup')) closeCallPopup();
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeCallPopup();
     });
   }
 
@@ -1343,6 +1434,7 @@
   async function boot() {
     wireGate();
     wireSearch();
+    wireCallLinks();
 
     el('btn-signout').addEventListener('click', function () { signOut(); });
     el('btn-signout-icon').addEventListener('click', function () { signOut(); });

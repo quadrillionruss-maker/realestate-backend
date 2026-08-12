@@ -639,6 +639,32 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .search-hit:hover, .search-hit.is-cursor { background: var(--panel-3); }
 .search-hit .hit-meta { margin-left: auto; color: var(--text-faint); font-size: 11.5px; }
 
+/* Desktop's stand-in for tapping a tel: link — there is usually no dialer to
+   hand it to, so this shows the number instead. Positioned in JS (top/left
+   set inline from the trigger's own bounding rect), same reasoning as
+   .search-results but anchored to an arbitrary button rather than one fixed
+   header field. */
+.call-popup {
+  position: absolute;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  box-shadow: var(--lift);
+  z-index: 150;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  animation: fade .12s var(--ease);
+}
+
+.call-popup-number {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 .topbar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
 .dateline {
@@ -1107,6 +1133,7 @@ table.data td.num, table.data th.num {
   width: 100%;
   max-width: 520px;
   max-height: calc(100vh - 44px);
+  max-height: calc(100dvh - 44px);
   display: flex;
   flex-direction: column;
   animation: rise .22s var(--ease);
@@ -1444,6 +1471,14 @@ table.data td.sched-detail-cell {
    twelve rectangles. */
 .bars { display: flex; align-items: flex-end; gap: 5px; height: 132px; padding-top: 8px; }
 .bars > div { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 6px; min-width: 0; }
+/* A CSS height percentage resolves against the containing block's OWN
+   height — and .bars > div has none (it's a flex item sized to its content,
+   since .bars uses align-items: flex-end rather than stretch). .bar-track
+   is that containing block: a fixed pixel height for .bar's percentage to
+   actually mean something, sized to leave room for the two label rows
+   above/below within .bars' own 132px. align-items: flex-end keeps every
+   bar anchored to one baseline regardless of height, same as before. */
+.bar-track { height: 90px; width: 100%; display: flex; align-items: flex-end; }
 .bars .bar { width: 100%; background: var(--gold-deep); border-radius: 3px 3px 0 0; min-height: 2px; transition: height .5s var(--ease), background .15s; }
 .bars > div:hover .bar { background: var(--gold); }
 .bars .bar-label { font-family: var(--mono); font-size: 9px; color: var(--text-faint); white-space: nowrap; }
@@ -1693,9 +1728,40 @@ table.data td.sched-detail-cell {
   .drawer { width: 100vw; }
 
   /* Below this width a pointer is a finger, not a mouse — 28px was fine for
-     a cursor, not for a thumb. Desktop density is untouched. */
+     a cursor, not for a thumb. Desktop density is untouched. min-height, not
+     height, everywhere here: it only ever grows a box that would otherwise
+     be shorter, so it can never fight a taller rule set elsewhere. */
   .icon-btn { width: 44px; height: 44px; font-size: 17px; }
-  .btn-quiet { height: 36px; padding: 0 12px; }
+  .btn-quiet { height: 36px; padding: 0 12px; min-height: 44px; }
+  .btn { min-height: 44px; }
+  .btn.sm { min-height: 38px; }
+
+  /* iOS Safari zooms the whole page on focusing any input under 16px — the
+     one browser behaviour a form cannot override, only avoid. #search-input
+     is not wrapped in .field (it lives in the topbar, not a form), so it
+     needs its own line rather than being covered by the rule below. */
+  .search input { font-size: 16px; }
+  .field input, .field select, .field textarea { min-height: 44px; font-size: 16px; }
+
+  /* A full modal footer that scrolled out of view under a short phone's
+     keyboard used to mean no way to actually submit the form. dvh (dynamic
+     viewport height) tracks the browser chrome that vh ignores — the same
+     reasoning as .shell's own vh/dvh pair above. */
+  .modal { max-height: 92vh; max-height: 92dvh; }
+  .modal-body { max-height: calc(92vh - 120px); max-height: calc(92dvh - 120px); overflow-y: auto; }
+
+  /* This codebase's drawer has no separate footer bar — every action button
+     lives at the bottom of .drawer-body, which is exactly where an iPhone's
+     home indicator can cover them without this. */
+  .drawer-body { padding-bottom: env(safe-area-inset-bottom, 16px); }
+
+  /* Installment rows — shared between the operator drawer and the buyer
+     portal (portal.js reuses .sched/.sched-main verbatim). */
+  .sched { min-height: 44px; }
+
+  /* The portal's one primary action. 48px, not the 44px floor above — it is
+     the only button most buyers ever press on this page. */
+  #btn-pay { min-height: 48px; width: 100%; }
 }
 
 /* ── Buyer portal (portal.html/portal.js) ─────────────────────────────── */
@@ -1744,17 +1810,56 @@ table.data td.sched-detail-cell {
 @media (max-width: 640px) {
   #btn-signout { display: none; }
   .signout-icon-btn { display: grid; }
+
+  /* Columns nothing else on the row depends on — hidden per-cell rather than
+     dropping whole tables to a card layout, so the same table() call works
+     at every width. table.data's 620px floor exists for the full column
+     set; once most of it is hidden, keeping that floor would force the
+     surviving 2-3 columns into their own needless horizontal scroll,
+     defeating the point of hiding the rest. */
+  .hide-mobile { display: none; }
+  table.data { min-width: 0; }
+
+  /* Payments → Schedule's collapsed buyer row: name+badge on their own
+     line, unit and balance sharing the next one, the paid-count column
+     gone (hide-mobile, above). table-cell boxes are blockified once their
+     parent is a flex container, so the <td>s stack without a markup
+     change — same technique table.data already relies on elsewhere. */
+  tr.buyer-summary-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  tr.buyer-summary-row > td { display: block; padding: 0; border-bottom: none; }
+  tr.buyer-summary-row > td.cell-primary { flex: 1 1 100%; }
+  tr.buyer-summary-row > td.num { margin-left: auto; }
+  /* Higher specificity than the block above, so the paid-count cell stays
+     hidden rather than being un-hidden by "> td { display: block }". */
+  tr.buyer-summary-row > td.hide-mobile { display: none; }
+
+  /* At-risk row: name/meta, amount and actions were three visual groups
+     squeezed onto one line. Stacked, each gets the width it actually needs;
+     .record-top already separates name+meta from the amount into two child
+     nodes, so this is one rule rather than a markup change. */
+  .record-top { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .record-actions .action-link { flex: 1 1 auto; text-align: center; }
 }
 
 @media (max-width: 480px) {
   .page-head { flex-direction: column; align-items: flex-start; }
-  .stat-value { font-size: 22px; }
+  /* naira() renders every digit; on a 4-tile KPI grid at one column wide
+     that is still a long string. The dashboard swaps in nairaShort() at
+     this width in JS — see R.screens.dashboard — so this only has to
+     shrink the type, not fit ₦28,450,000 into it. */
+  .stat-value { font-size: 18px; }
   /* 15px, not 16px. At 16px the brief's body text outgrew the greeting above
      it, which inverts the hierarchy on exactly the screens with least room to
      spare. The greeting's clamp() already floors at 24px, so this keeps a clear
      step between them. */
   .brief-body { font-size: 15px; }
-  .toasts { left: 12px; right: 12px; bottom: 12px; max-width: none; }
+  .toasts { left: 12px; right: 12px; bottom: 12px; max-width: none; padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+  /* Import CSV / Add buyer / Export CSV etc. — sharing the row evenly beats
+     the default content-width wrap, which left a lopsided last button on
+     its own line. */
+  .page-actions { flex-wrap: wrap; gap: 8px; }
+  .page-actions .btn { flex: 1 1 auto; }
 }
 
 /* Printing an investor report should produce paper, not a screenshot of a

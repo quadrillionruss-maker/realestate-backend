@@ -1452,10 +1452,10 @@ test('normalizes every form a buyer list contains', () => {
   assert.strictEqual(normalizeNigerianPhone(''), null);
 });
 
-// waNumber() is the frontend's own normalizer, feeding wa.me links directly —
-// a different file from notificationService's normalizeNigerianPhone above,
-// tested separately because a bug here renders a broken link in the browser,
-// not just a malformed outbound SMS.
+// waNumber() is the frontend's own normalizer, feeding WhatsApp links
+// directly — a different file from notificationService's
+// normalizeNigerianPhone above, tested separately because a bug here renders
+// a broken link in the browser, not just a malformed outbound SMS.
 test('waNumber accepts every normal form and produces exactly 13 digits', () => {
   assert.strictEqual(waNumber('08031234567'), '2348031234567');
   assert.strictEqual(waNumber('+234 803 123 4567'), '2348031234567');
@@ -1473,10 +1473,14 @@ test('waNumber returns null for anything that does not normalize to 13 digits', 
 });
 
 test('waLink renders no link at all for a number waNumber rejects', () => {
-  // A broken wa.me link — one WhatsApp opens and then refuses — is worse than
-  // no link, because it looks like it should have worked.
+  // A broken link — one WhatsApp opens and then refuses — is worse than no
+  // link, because it looks like it should have worked.
   assert.strictEqual(waLink('12345'), null);
-  assert.strictEqual(waLink('08031234567'), 'https://wa.me/2348031234567');
+  // web.whatsapp.com/send, not wa.me — wa.me hands off to the desktop app,
+  // which answers "invalid number" for a genuinely valid one on a machine
+  // that has never linked it to a phone. web.whatsapp.com/send stays in the
+  // browser instead.
+  assert.strictEqual(waLink('08031234567'), 'https://web.whatsapp.com/send?phone=2348031234567');
 });
 
 // naturalSort backs the Units screen, the reservation modal's unit dropdown
