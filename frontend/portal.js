@@ -287,7 +287,7 @@
             '<div class="stat-label">' + (nextDue.property_type === 'rental' ? 'Next rent due' : 'Next payment') + '</div>' +
             '<div class="flex-row justify-between gap-14 align-end mt-8px">' +
               '<div><div class="mono fs-21">' + esc(naira(nextDue.amount_due)) + '</div>' +
-                '<div class="page-sub">due ' + esc(fmtDate(nextDue.due_date)) +
+                '<div class="page-sub">due <span class="nowrap">' + esc(fmtDate(nextDue.due_date)) + '</span>' +
                   (nextDue.unit_number ? ' · Unit ' + esc(nextDue.unit_number) : '') + '</div></div>' +
               '<button class="btn brass" id="btn-pay" data-schedule="' + esc(nextDue.schedule_id) + '">Pay now</button>' +
             '</div>' +
@@ -338,6 +338,11 @@
       session(PAID_KEY, null);
       justPaidSchedule = '';
       toast('Payment confirmed. Your receipt is on its way.', 'ok');
+      // The toast just said this — the banner's own "we are confirming"
+      // wording would otherwise sit on the page, now stale, until the next
+      // full reload.
+      var confirmedBanner = el('paid-banner');
+      if (confirmedBanner) confirmedBanner.remove();
       return;
     }
 
@@ -404,8 +409,8 @@
                 '<span class="sched-main"><span class="mono">' + esc(naira(row.amount_due)) + '</span>' +
                   '<span class="page-sub">' +
                     (row.status === 'paid'
-                      ? 'paid ' + esc(fmtDate(row.paid_at || row.due_date))
-                      : 'due ' + esc(fmtDate(row.due_date))) +
+                      ? 'paid <span class="nowrap">' + esc(fmtDate(row.paid_at || row.due_date)) + '</span>'
+                      : 'due <span class="nowrap">' + esc(fmtDate(row.due_date)) + '</span>') +
                   '</span></span>' +
                 // A row the buyer has just paid shows "confirming", not
                 // "pending" with a live Pay button beside it. That combination
@@ -415,7 +420,12 @@
                   ? '<span class="badge pending">confirming…</span>'
                   : '<span class="badge ' + esc(row.status) + '">' + esc(row.status) + '</span>') +
                 (row.status !== 'paid' && row.id !== justPaidSchedule
-                  ? '<button class="btn-quiet" data-schedule="' + esc(row.id) + '">Pay</button>'
+                  // Every row's button says just "Pay" visually — fine
+                  // sighted, since it sits next to its own amount and date,
+                  // but a screen reader lists all of them with no context
+                  // distinguishing one installment's button from another's.
+                  ? '<button class="btn-quiet" data-schedule="' + esc(row.id) + '" aria-label="Pay installment ' +
+                    row.installment_number + ', ' + esc(naira(row.amount_due)) + ', due ' + esc(fmtDate(row.due_date)) + '">Pay</button>'
                   : '') +
               '</div>';
             }).join('') + '</div>'

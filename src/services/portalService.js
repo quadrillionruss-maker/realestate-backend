@@ -167,6 +167,13 @@ async function loadPortalAccount(customer) {
   let overdueAmount = 0;
   let overdueCount = 0;
   let nextDue = null;
+  // A buyer whose only open installments are overdue (nothing left
+  // pending) used to get no "next payment" card at all — nextDue stayed
+  // null forever, since the loop below only ever populated it from a
+  // pending row. Tracked separately and used only when nothing pending
+  // exists, so an upcoming pending row still wins over an overdue one when
+  // both are present — this is a fallback, not a re-ranking.
+  let nextOverdue = null;
   let tenancy = null;
 
   for (const reservation of reservations || []) {
@@ -203,6 +210,17 @@ async function loadPortalAccount(customer) {
         if (row.status === 'overdue') {
           overdueAmount += Number(row.amount_due || 0);
           overdueCount += 1;
+          if (!nextOverdue || row.due_date < nextOverdue.due_date) {
+            nextOverdue = {
+              schedule_id: row.id,
+              due_date: row.due_date,
+              amount_due: Number(row.amount_due || 0),
+              installment_number: row.installment_number,
+              unit_number: reservation.re_units?.unit_number || null,
+              project_name: reservation.re_units?.re_projects?.name || null,
+              property_type: reservation.property_type || 'off_plan',
+            };
+          }
         }
         if (row.status === 'pending' && (!nextDue || row.due_date < nextDue.due_date)) {
           nextDue = {
@@ -220,6 +238,8 @@ async function loadPortalAccount(customer) {
       }
     }
   }
+
+  if (!nextDue) nextDue = nextOverdue;
 
   // A reallocation row moves credit that was already counted once, on the
   // payment it came from — summing it again here would show the buyer a

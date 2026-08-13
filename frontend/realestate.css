@@ -1430,7 +1430,11 @@ table.data td.num, table.data th.num {
 
 .sched.paid .sched-n { border-color: rgba(116, 171, 132, 0.4); color: var(--moss); }
 .sched.overdue .sched-n { border-color: rgba(205, 95, 67, 0.4); color: var(--clay); }
-.sched-main { flex: 1; min-width: 0; }
+/* Stacked, not inline — .mono (amount) and .page-sub (due date) used to sit
+   as adjacent spans with no separator in the markup, reading as
+   "₦2,166,667due 13 Sep 2026". column-flex gives each its own line instead
+   of asking every call site to remember a literal space. */
+.sched-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 
 /* The collapsed stand-in for a run of settled installments — same row rhythm
    as .sched so the schedule does not visibly jump when it expands. */
@@ -1535,12 +1539,19 @@ table.data td.sched-detail-cell {
   font-weight: 600;
   letter-spacing: 0.03em;
   text-transform: uppercase;
-  opacity: 0;
   transition: opacity .15s var(--ease);
 }
 
-.logo-upload:hover .logo-upload-overlay,
-.logo-upload:focus-visible .logo-upload-overlay { opacity: 1; }
+/* A touchscreen never fires :hover, so gating the "Change" label behind it
+   left no way to discover the control short of already knowing it was
+   there. Only a device that actually has a hover state gets it hidden by
+   default; touch gets it always-on (this covers both the team logo here
+   and the personal avatar in realestate.js, which share this class). */
+@media (hover: hover) {
+  .logo-upload-overlay { opacity: 0; }
+  .logo-upload:hover .logo-upload-overlay,
+  .logo-upload:focus-visible .logo-upload-overlay { opacity: 1; }
+}
 
 .logo-upload.is-working .logo-upload-overlay { opacity: 1; }
 .logo-upload.is-working .logo-upload-overlay::after {
@@ -1666,6 +1677,17 @@ table.data td.sched-detail-cell {
   .gate { grid-template-columns: 1fr; }
   .gate-brand { display: none; }
   .gate-form-wrap { padding: 28px 20px; align-items: start; }
+
+  /* The app-wide touch sizing for form fields only starts at 820px, but the
+     gate itself already switches to this single-column card layout at
+     900px — between the two, a tablet or a landscape phone got the mobile
+     card with small, non-zoom-safe desktop-sized inputs inside it. Scoped
+     to the gate's own card so it doesn't move the 820px threshold anywhere
+     else in the app. */
+  .gate-card .field input, .gate-card .field select, .gate-card .field textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
 
   /* The brand panel is gone, so the wordmark moves into the card. Without this
      a phone user saw "Welcome back" over a bare dark form with no indication of
@@ -1828,10 +1850,42 @@ table.data td.sched-detail-cell {
   tr.buyer-summary-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
   tr.buyer-summary-row > td { display: block; padding: 0; border-bottom: none; }
   tr.buyer-summary-row > td.cell-primary { flex: 1 1 100%; }
+  /* The overdue badge is emitted right after the buyer's name in the same
+     cell — floating it is the one-property way to pin it to the row's
+     right edge without turning the name into its own flex child. */
+  tr.buyer-summary-row > td.cell-primary .badge { float: right; }
+  /* The project name under the unit number would make this a three-line
+     row; the spec here is strictly two, so it drops on mobile only. */
+  tr.buyer-summary-row > td .cell-meta { display: none; }
   tr.buyer-summary-row > td.num { margin-left: auto; }
   /* Higher specificity than the block above, so the paid-count cell stays
      hidden rather than being un-hidden by "> td { display: block }". */
   tr.buyer-summary-row > td.hide-mobile { display: none; }
+  /* The column headers describe a layout mobile no longer uses — the two
+     lines above stand in for them. Scoped to the one table.data that holds
+     this row, not table.data generally. */
+  .sched-buyer-table thead { display: none; }
+
+  /* Installment row — shared verbatim across the buyer drawer, the
+     payments-accordion detail, the restructure preview and the buyer
+     portal (see the 820px breakpoint above). display:contents on the
+     amount/date wrapper promotes .mono and .page-sub to be direct flex
+     items of .sched itself, so they can be reordered onto their own
+     lines — amount + badge, then due date, then actions full width —
+     without a markup change at any of the four call sites. */
+  .sched { flex-wrap: wrap; row-gap: 8px; }
+  .sched-main { display: contents; }
+  .sched-n { order: 1; }
+  .sched .mono { order: 2; }
+  .sched > .badge { order: 3; margin-left: auto; }
+  .sched .page-sub { order: 4; flex-basis: 100%; }
+  .sched > .btn-quiet { order: 5; flex: 1 1 auto; text-align: center; }
+
+  /* Settings → People: up to three action buttons (Change role / Make
+     owner / Remove) stay on one tidy nowrap line on desktop; on mobile
+     that same rule would force the row into horizontal scroll instead of
+     just wrapping the buttons onto their own lines. */
+  .people-actions { white-space: normal; }
 
   /* At-risk row: name/meta, amount and actions were three visual groups
      squeezed onto one line. Stacked, each gets the width it actually needs;

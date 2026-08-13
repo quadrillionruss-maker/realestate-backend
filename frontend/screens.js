@@ -1842,7 +1842,8 @@
     return '<div class="sched ' + esc(s.status) + '">' +
       '<span class="sched-n">' + s.installment_number + '</span>' +
       '<span class="sched-main"><span class="mono">' + naira(s.amount_due) + '</span>' +
-        '<span class="page-sub">due ' + esc(fmtDate(s.due_date)) + (s.paid_at ? ' · paid ' + esc(fmtDate(s.paid_at)) : '') + '</span></span>' +
+        '<span class="page-sub">due <span class="nowrap">' + esc(fmtDate(s.due_date)) + '</span>' +
+          (s.paid_at ? ' · paid <span class="nowrap">' + esc(fmtDate(s.paid_at)) + '</span>' : '') + '</span></span>' +
       badge(s.status) +
       (s.status !== 'paid' && R.can('payments.record')
         ? '<button class="btn-quiet" data-pay="' + esc(s.id) + '" data-outstanding="' + esc(s.amount_due) + '">Record</button>'
@@ -2113,7 +2114,7 @@
             ? '<div class="label mt-2">New schedule</div><div>' + rows.map(function (row) {
                 return '<div class="sched"><span class="sched-n">' + row.installment_number + '</span>' +
                   '<span class="sched-main"><span class="mono">' + naira(row.amount_due) + '</span>' +
-                  '<span class="page-sub">due ' + esc(fmtDate(row.due_date)) + '</span></span></div>';
+                  '<span class="page-sub">due <span class="nowrap">' + esc(fmtDate(row.due_date)) + '</span></span></span></div>';
               }).join('') + '</div>'
             : '';
         } catch (err) {
@@ -2567,7 +2568,7 @@
             stat(thirdStatLabel, String(openRowCount)) +
           '</div>' +
 
-          card(null, table(
+          '<div class="sched-buyer-table">' + card(null, table(
             [{ label: 'Buyer' }, { label: 'Unit' }, { label: 'Paid', hideMobile: true }, { label: 'Remaining', num: true }],
             p.slice,
             buyerRow,
@@ -2575,7 +2576,7 @@
               emptyTitle: tab === 'overdue' ? 'Nothing is overdue' : tab === 'due_week' ? 'Nothing due this week' : 'Nothing outstanding',
               emptyHint: 'Reservations with an open payment plan appear here.',
             }
-          ), { flush: true }) +
+          ), { flush: true }) + '</div>' +
           paginationControls(p);
 
         wireScheduleRowActions(view);
@@ -2696,8 +2697,9 @@
     return '<div class="sched ' + esc(s.status) + '">' +
       '<span class="sched-n">' + s.installment_number + '</span>' +
       '<span class="sched-main"><span class="mono">' + naira(s.amount_due) + '</span>' +
-        '<span class="page-sub">' + (s.status === 'overdue' ? 'overdue since ' : 'due ') + esc(fmtDate(s.due_date)) +
-          (s.paid_at ? ' · paid ' + esc(fmtDate(s.paid_at)) : '') + '</span></span>' +
+        '<span class="page-sub">' + (s.status === 'overdue' ? 'overdue since ' : 'due ') +
+          '<span class="nowrap">' + esc(fmtDate(s.due_date)) + '</span>' +
+          (s.paid_at ? ' · paid <span class="nowrap">' + esc(fmtDate(s.paid_at)) + '</span>' : '') + '</span></span>' +
       badge(s.status) +
       (recordable
         ? '<button class="btn-quiet" data-record="' + esc(s.id) + '" data-outstanding="' + esc(s.amount_outstanding) +
@@ -2963,7 +2965,7 @@
                 '<span class="sched-n">' + s.installment_number + '</span>' +
                 '<span class="sched-main"><span class="mono">' + naira(s.amount_outstanding) + '</span>' +
                   '<span class="page-sub">' + (unit.unit_number ? 'Unit ' + esc(unit.unit_number) + ' · ' : '') +
-                    'due ' + esc(fmtDate(s.due_date)) + '</span></span>' +
+                    'due <span class="nowrap">' + esc(fmtDate(s.due_date)) + '</span></span></span>' +
                 badge(s.status) +
                 '<button class="btn-quiet" data-allocate="' + esc(s.id) + '">Apply here</button>' +
               '</div>';
@@ -3011,17 +3013,25 @@
           '<button class="btn primary" id="btn-new-doc">New allocation letter</button>') +
 
         card(null, table(
-          [{ label: 'Type' }, { label: 'Buyer' }, { label: 'Unit' }, { label: 'Status' }, { label: 'Generated' }, { label: '' }],
+          // Type and Buyer used to be two separate columns — on a phone,
+          // hiding Unit/Generated alone still left Buyer's own column wide
+          // enough (a real name easily runs to two or three words) to push
+          // the Download/Generate button off-screen anyway. Folding Buyer
+          // in under Type as a second line reclaims that whole column,
+          // the same cell-primary/cell-meta idiom already used for
+          // Project+Location and Tenant+Unit elsewhere on this screen set.
+          [{ label: 'Document' }, { label: 'Unit', hideMobile: true }, { label: 'Status' },
+            { label: 'Generated', hideMobile: true }, { label: '' }],
           documents,
           function (d) {
             var reservation = d.re_reservations || {};
             var unit = reservation.re_units || {};
             return '<tr>' +
-              '<td class="cell-primary">' + esc(String(d.doc_type).replace(/_/g, ' ')) + '</td>' +
-              '<td>' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</td>' +
-              '<td class="muted">' + esc(unit.unit_number || '—') + '</td>' +
+              '<td class="cell-primary">' + esc(String(d.doc_type).replace(/_/g, ' ')) +
+                '<div class="cell-meta">' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</div></td>' +
+              '<td class="muted hide-mobile">' + esc(unit.unit_number || '—') + '</td>' +
               '<td>' + badge(d.status) + '</td>' +
-              '<td class="muted">' + esc(d.generated_at ? fmtDate(d.generated_at) : '—') + '</td>' +
+              '<td class="muted hide-mobile">' + esc(d.generated_at ? fmtDate(d.generated_at) : '—') + '</td>' +
               '<td class="right nowrap">' + (d.status === 'generated'
                 ? '<button class="btn-quiet" data-download="' + esc(d.id) + '">Download</button>'
                 : '<button class="btn-quiet" data-generate="' + esc(d.id) + '">Generate</button>') + '</td>' +
@@ -3054,9 +3064,14 @@
           };
         });
 
-        R.modal({
+        var panel = R.modal({
           title: 'New allocation letter',
           body:
+            // Focused first (modal() focuses the first real input), so typing
+            // to narrow the list is possible the instant the dialog opens —
+            // useful the moment a project has more than a handful of buyers.
+            '<div class="field"><label for="doc-search">Search buyer</label>' +
+              '<input class="input" id="doc-search" type="text" placeholder="Type a name to filter…" autocomplete="off"></div>' +
             '<div class="field"><label for="doc-res">Reservation</label>' +
               '<select class="select" id="doc-res" name="reservation_id">' + options(list, 'id', 'label') + '</select></div>' +
             '<p class="field-hint">The letter uses the letterhead from Settings. Set your company name and logo there first if you have not.</p>',
@@ -3079,6 +3094,28 @@
             }
             R.reload();
           },
+        });
+
+        // Client-side only — the list is already loaded in full above, so
+        // there is nothing worth round-tripping to the server for.
+        var search = R.qs('#doc-search', panel.root);
+        var select = R.qs('#doc-res', panel.root);
+        search.addEventListener('input', function () {
+          var q = search.value.trim().toLowerCase();
+          var options_ = R.qsa('option', select);
+          var selectedStillVisible = false;
+          options_.forEach(function (opt) {
+            var match = !q || opt.textContent.toLowerCase().indexOf(q) !== -1;
+            opt.hidden = !match;
+            if (match && opt.selected) selectedStillVisible = true;
+          });
+          // Filtering out the buyer that was selected must not leave a
+          // hidden option silently chosen underneath — the dropdown jumps
+          // to whichever name is still on screen instead.
+          if (!selectedStillVisible) {
+            var firstVisible = options_.filter(function (opt) { return !opt.hidden; })[0];
+            if (firstVisible) firstVisible.selected = true;
+          }
         });
       });
     },
@@ -3338,19 +3375,21 @@
 
         (canInvestor
           ? card('By project', table(
-              [{ label: 'Project' }, { label: 'Units' }, { label: 'Sold', num: true }, { label: 'Sell-through', num: true },
-                { label: 'Contracted', num: true }, { label: 'Collected', num: true }, { label: 'Collection rate', num: true },
+              [{ label: 'Project' }, { label: 'Units', hideMobile: true }, { label: 'Sold', num: true, hideMobile: true },
+                { label: 'Sell-through', num: true, hideMobile: true },
+                { label: 'Contracted', num: true, hideMobile: true }, { label: 'Collected', num: true },
+                { label: 'Collection rate', num: true, hideMobile: true },
                 { label: 'Overdue', num: true }],
               report.projects,
               function (p) {
                 return '<tr>' +
                   '<td class="cell-primary">' + esc(p.name) + '<div class="cell-meta">' + esc(p.location || '') + '</div></td>' +
-                  '<td class="muted">' + p.units.total + '</td>' +
-                  '<td class="num">' + p.units.sold + '</td>' +
-                  '<td class="num muted">' + p.sell_through_rate + '%</td>' +
-                  '<td class="num">' + nairaShort(p.contracted_value) + '</td>' +
+                  '<td class="muted hide-mobile">' + p.units.total + '</td>' +
+                  '<td class="num hide-mobile">' + p.units.sold + '</td>' +
+                  '<td class="num muted hide-mobile">' + p.sell_through_rate + '%</td>' +
+                  '<td class="num hide-mobile">' + nairaShort(p.contracted_value) + '</td>' +
                   '<td class="num moss">' + nairaShort(p.collected_total) + '</td>' +
-                  '<td class="num ' + (p.collection_rate >= 70 ? 'moss' : p.collection_rate < 40 ? 'clay' : '') + '">' + p.collection_rate + '%</td>' +
+                  '<td class="num hide-mobile ' + (p.collection_rate >= 70 ? 'moss' : p.collection_rate < 40 ? 'clay' : '') + '">' + p.collection_rate + '%</td>' +
                   '<td class="num ' + (p.receivables_overdue ? 'clay' : 'muted') + '">' + nairaShort(p.receivables_overdue) + '</td>' +
                 '</tr>';
               },
@@ -3373,13 +3412,13 @@
               '</div>', { flush: false }) +
 
             card('Renewals due in the next 90 days', table(
-              [{ label: 'Tenant' }, { label: 'Unit' }, { label: 'Monthly rent', num: true },
+              [{ label: 'Tenant' }, { label: 'Unit', hideMobile: true }, { label: 'Monthly rent', num: true },
                 { label: 'Tenancy ends' }, { label: '' }],
               rental.upcoming_renewals,
               function (r) {
                 return '<tr>' +
                   '<td class="cell-primary">' + esc(r.tenant_name || '—') + '</td>' +
-                  '<td>' + esc(r.unit_number || '—') + '<div class="cell-meta">' + esc(r.project_name || '') + '</div></td>' +
+                  '<td class="hide-mobile">' + esc(r.unit_number || '—') + '<div class="cell-meta">' + esc(r.project_name || '') + '</div></td>' +
                   '<td class="num">' + naira(r.current_monthly_rent) + '</td>' +
                   '<td class="muted">' + esc(fmtDate(r.tenancy_end_date)) +
                     '<div class="cell-meta">' + R.plural(r.days_remaining, 'day') + ' left</div></td>' +
@@ -3710,23 +3749,25 @@
       logoBlock +
 
       card('People', table(
-        [{ label: 'Name' }, { label: 'Email' }, { label: 'Role' }, { label: 'Last active' },
-          { label: 'Status' }, { label: '' }],
+        [{ label: 'Name' }, { label: 'Email', hideMobile: true }, { label: 'Role' },
+          { label: 'Last active', hideMobile: true }, { label: 'Status' }, { label: '' }],
         team.members,
         function (m) {
           var canManage = m.role !== 'owner' && m.id && R.can('team.manageMembers');
           return '<tr>' +
             '<td class="cell-primary">' + esc(m.full_name || '—') + '</td>' +
-            '<td class="muted">' + esc(m.email || '') + '</td>' +
+            '<td class="muted hide-mobile">' + esc(m.email || '') + '</td>' +
             '<td class="muted">' + esc(m.role_label || m.role) +
               (m.status === 'invited' && m.invited_role && m.invited_role !== m.role
                 ? '<div class="cell-meta">invited as ' + esc(m.invited_role) + '</div>' : '') + '</td>' +
-            '<td class="muted">' + esc(m.last_login_at ? R.fmtRelative(m.last_login_at) : 'never signed in') + '</td>' +
+            '<td class="muted hide-mobile">' + esc(m.last_login_at ? R.fmtRelative(m.last_login_at) : 'never signed in') + '</td>' +
             '<td>' + badge(m.status) + '</td>' +
             // The owner cannot be removed or re-roled — the API refuses it,
             // and offering the buttons anyway is just a dead end with a
-            // confirmation on it.
-            '<td class="right nowrap">' + (
+            // confirmation on it. nowrap keeps up to three buttons on one
+            // tidy line on desktop; people-actions lets them wrap onto their
+            // own lines once the row is too narrow for that, on mobile.
+            '<td class="right nowrap people-actions">' + (
               canManage
                 ? '<button class="btn-quiet" data-change-role="' + esc(m.id) + '" data-current="' + esc(m.role) +
                   '" data-name="' + esc(m.full_name || m.email || 'this person') + '">Change role</button> '
@@ -3751,12 +3792,12 @@
       }) +
 
       card('Sales reps', table(
-        [{ label: 'Rep' }, { label: 'Email' }, { label: 'Commission', num: true }, { label: 'Status' }, { label: '' }],
+        [{ label: 'Rep' }, { label: 'Email', hideMobile: true }, { label: 'Commission', num: true }, { label: 'Status' }, { label: '' }],
         reps,
         function (rep) {
           return '<tr>' +
             '<td class="cell-primary">' + esc((rep.users && rep.users.full_name) || '—') + '</td>' +
-            '<td class="muted">' + esc((rep.users && rep.users.email) || '') + '</td>' +
+            '<td class="muted hide-mobile">' + esc((rep.users && rep.users.email) || '') + '</td>' +
             '<td class="num">' + (rep.commission_rate || 0) + '%</td>' +
             '<td>' + badge(rep.active ? 'active' : 'none') + '</td>' +
             '<td class="right"><button class="btn-quiet" data-rate="' + esc(rep.id) + '" data-current="' + esc(rep.commission_rate || 0) + '">Set rate</button></td>' +
@@ -4148,12 +4189,12 @@
     view.innerHTML = head('Activity log', 'Who did what, when. Append-only — nothing in this product can edit or delete it.') + tabs +
 
       card('Actions', table(
-        [{ label: 'When' }, { label: 'Who' }, { label: 'Action' }, { label: 'Detail' }],
+        [{ label: 'When' }, { label: 'Who', hideMobile: true }, { label: 'Action' }, { label: 'Detail' }],
         entries,
         function (e) {
           return '<tr>' +
             '<td class="muted nowrap">' + esc(R.fmtDateTime(e.created_at)) + '</td>' +
-            '<td class="muted">' + esc(e.actor_email || e.actor_kind) + '</td>' +
+            '<td class="muted hide-mobile">' + esc(e.actor_email || e.actor_kind) + '</td>' +
             '<td><span class="mono fs-11-5">' + esc(e.action) + '</span></td>' +
             '<td class="muted">' + esc(e.summary || '') + '</td>' +
           '</tr>';
@@ -4162,13 +4203,13 @@
       ), { flush: true }) +
 
       card('Messages sent', table(
-        [{ label: 'When' }, { label: 'Channel' }, { label: 'To' }, { label: 'Subject' }, { label: 'Result' }],
+        [{ label: 'When' }, { label: 'Channel' }, { label: 'To', hideMobile: true }, { label: 'Subject' }, { label: 'Result' }],
         notifications,
         function (n) {
           return '<tr>' +
             '<td class="muted nowrap">' + esc(R.fmtDateTime(n.created_at)) + '</td>' +
             '<td class="muted">' + esc(n.channel) + '</td>' +
-            '<td class="muted">' + esc(n.recipient) + '</td>' +
+            '<td class="muted hide-mobile">' + esc(n.recipient) + '</td>' +
             '<td class="muted">' + esc(n.subject || n.template || '') + '</td>' +
             '<td>' + badge(n.status) + (n.error ? '<div class="cell-meta">' + esc(n.error) + '</div>' : '') + '</td>' +
           '</tr>';
