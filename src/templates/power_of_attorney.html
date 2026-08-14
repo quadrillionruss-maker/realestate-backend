@@ -1,0 +1,84 @@
+<!-- Irrevocable power of attorney — SECTION 8's default template. Common in
+     Nigerian off-plan sales to let a buyer deal with (occupy, lease,
+     mortgage, or further assign) a unit pending the Company's perfection of
+     registered title. Same placeholder convention as the other two
+     SECTION 8 templates. -->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 25mm 20mm; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; font-size: 11.5pt; line-height: 1.75; }
+  .letterhead { display: flex; justify-content: space-between; align-items: center; border-bottom: 3px double #1a1a1a; padding-bottom: 12px; margin-bottom: 32px; }
+  .letterhead .company { font-size: 15pt; font-weight: bold; letter-spacing: 0.5px; }
+  h1 { font-size: 13pt; text-align: center; text-decoration: underline; text-transform: uppercase; letter-spacing: 1px; margin: 28px 0 6px; }
+  .subtitle { text-align: center; font-size: 10.5pt; margin-bottom: 28px; }
+  .recital { margin: 10px 0; }
+  table.schedule { width: 100%; border-collapse: collapse; margin: 20px 0; }
+  table.schedule td { padding: 8px 12px; border: 1px solid #999; }
+  table.schedule td:first-child { font-weight: bold; width: 35%; background: #f5f5f0; }
+  .clause-title { font-weight: bold; margin-top: 22px; }
+  .execution { margin-top: 50px; }
+  .signature-block { margin-top: 40px; }
+  .signature-line { border-top: 1px solid #1a1a1a; width: 260px; padding-top: 6px; font-size: 10.5pt; margin-top: 46px; }
+  .witness-block { margin-top: 40px; font-size: 10.5pt; }
+  .fineprint { margin-top: 28px; font-size: 9.5pt; color: #555; }
+</style>
+</head>
+<body>
+  <div class="letterhead"><div class="company">{{company_name}}</div></div>
+
+  <h1>Irrevocable Power of Attorney</h1>
+  <div class="subtitle">Ref: {{reference_number}} &nbsp;·&nbsp; {{date}}</div>
+
+  <p class="recital">KNOW ALL MEN BY THESE PRESENTS that <strong>{{company_name}}</strong> (hereinafter called
+  "the Donor") is the developer and beneficial owner of the property known as {{project_line}}, and having
+  received the full consideration of {{total_amount}} from <strong>{{buyer_name}}</strong> (hereinafter called
+  "the Donee") in respect of the unit described in the Schedule below, DO HEREBY IRREVOCABLY APPOINT the Donee
+  to be the true and lawful Attorney of the Donor, in the name of and on behalf of the Donor, pending the
+  perfection of registered title, to do all or any of the following acts in respect of the said unit:</p>
+
+  <table class="schedule">
+    <tr><td>Development</td><td>{{project_line}}</td></tr>
+    <tr><td>Unit Number</td><td>{{unit_number}}</td></tr>
+    <tr><td>Unit Type</td><td>{{unit_type}}</td></tr>
+    <tr><td>Consideration Received</td><td>{{total_amount}}</td></tr>
+  </table>
+
+  <p class="clause-title">POWERS GRANTED</p>
+  <p class="recital">1. To take possession of, occupy, and quietly enjoy the said unit.</p>
+  <p class="recital">2. To let, lease or otherwise grant a licence to occupy the said unit to a third party.</p>
+  <p class="recital">3. To use the said unit as security for a loan or mortgage facility, subject to any
+  conditions the Donor's own financing arrangements over the development require.</p>
+  <p class="recital">4. To further assign, sell or otherwise dispose of the Donee's interest in the said unit,
+  subject to notifying the Donor in writing of any such dealing.</p>
+  <p class="recital">5. Generally to sign, execute and deliver all documents and to do all other acts and things
+  necessary to give full effect to the powers granted above, as fully and effectually as the Donor could have
+  done itself.</p>
+
+  <p class="recital">AND the Donor hereby declares that this Power of Attorney is given for valuable
+  consideration and is accordingly irrevocable, and that this instrument shall remain in force until the Deed of
+  Assignment in respect of the said unit is executed and registered in favour of the Donee, whereupon it shall
+  become spent.</p>
+
+  <div class="execution">
+    <p>IN WITNESS WHEREOF the Donor has executed this Power of Attorney the day and year first above written.</p>
+
+    <div class="signature-line">For the Donor — Authorised Signatory<br>{{company_name}}</div>
+
+    <div class="signature-block">
+      <div>Acknowledged by the Donee — {{buyer_name}}</div>
+      {{signature_block}}
+    </div>
+
+    <div class="witness-block">
+      Witness Name: ____________________________<br>
+      Witness Signature: ____________________________<br>
+      Witness Address: ____________________________
+    </div>
+  </div>
+
+  <div class="fineprint">This instrument is generated from Archta and reflects the terms on file as of {{date}}.</div>
+</body>
+</html>

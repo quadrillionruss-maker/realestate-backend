@@ -1,9 +1,16 @@
 # AI Workforce — Deal Manager & Agents
 
-> **STATUS: V2+ ARCHITECTURE. DO NOT BUILD YET.**
-> v1 ships exactly ONE worker: the Sales Operations Manager
-> (`src/services/aiBrief.js` + the daily cron). Everything below is the
-> documented growth path so v1 decisions stay compatible with it.
+> **STATUS: V2 — IN BUILD as of 2026-08-13.**
+> The hard gates below (≥3 paying customers, manual workflow already
+> live, Deal Manager auditability) were a v1-era guard against building a
+> demo instead of a company. They are explicitly superseded by product
+> decision on this date, not silently bypassed — v2 is being built now,
+> gated instead by the Deal Manager's own runtime checks (workspace has
+> WhatsApp configured, buyer hasn't opted out, a human isn't already
+> handling this conversation, nothing sent twice in a day) rather than a
+> pre-build checklist. `src/services/dealManager.js` and the five agents
+> in `src/services/*Agent.js` are the current implementation of this
+> document, run from `src/jobs/daily.js`.
 
 ## The organizing idea
 Not features — **employees**. Each agent has a scope, tools, and a
@@ -42,10 +49,21 @@ Seller Agent, Mortgage Agent, MLS integrations.
 2. **Agents share state through the database, not through each other.**
    The schema IS the shared memory. That's why v1's tables carry
    `organization_id` everywhere and why tasks have a `source` column.
-3. **Every agent output is a proposal by default.** Auto-execution is a
-   per-action, per-org permission granted later, never assumed.
+3. **Every agent output is a proposal by default — auto-execution is a
+   granted permission, not an assumption.** For the v2 build, that
+   permission is granted at the workspace level by configuring WhatsApp
+   under Settings: an org with no WhatsApp credentials on file gets
+   proposals only (tasks, brief items), exactly like v1. Configuring
+   WhatsApp is the org's opt-in to the Collections/Document/Sales agents
+   actually sending. A future per-action grant (approve this specific
+   message before it sends) is a finer-grained version of the same idea,
+   not built yet.
 4. **One brain.** New agents plug into the Deal Manager's context; we never
    ship nine disconnected chatbots.
+5. **The Deal Manager decides before an agent acts, every time.** Configured,
+   not already human-handled (a rep replied in the last 24h), not already
+   sent today, not opted out — all four, checked fresh per action, not
+   cached. See `dealManager.clearance()`.
 
 ## Hard gates before building each agent
 An agent gets built only when: (a) ≥3 paying customers ask for that job to

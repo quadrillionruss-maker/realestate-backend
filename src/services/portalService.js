@@ -33,6 +33,7 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 // total_amount ... so nothing has to know whether a plan has ever been
 // restructured."
 const { contractValue } = require('./restructureService');
+const { getMilestonesForProjects, currentMilestoneSummary } = require('./constructionService');
 
 const PORTAL_AUDIENCE = 're-portal';
 
@@ -79,7 +80,7 @@ async function verifyPortalToken(token) {
 
   const { data: customer, error } = await supabaseAdmin
     .from('re_customers')
-    .select('id, organization_id, full_name, email, phone, portal_token_version')
+    .select('id, organization_id, full_name, email, phone, portal_token_version, referral_code, referral_credit_balance')
     .eq('id', claims.cid)
     .maybeSingle();
   if (error) throw error;
@@ -105,7 +106,7 @@ async function loadPortalAccount(customer) {
       .from('re_reservations')
       .select(`
         id, status, reserved_at, property_type, tenancy_start_date, tenancy_end_date,
-        re_units(unit_number, unit_type, size_sqm, list_price, re_projects(name, location)),
+        re_units(unit_number, unit_type, size_sqm, list_price, re_projects(id, name, location)),
         re_installment_plans(
           id, total_amount, original_total_amount, status, number_of_installments, frequency, start_date,
           re_installment_schedule(id, installment_number, due_date, amount_due, status, paid_at)
@@ -253,12 +254,32 @@ async function loadPortalAccount(customer) {
     .update({ portal_last_seen_at: new Date().toISOString() })
     .eq('id', customer.id);
 
+  // Construction progress (SECTION 2) is per-reservation, not a single
+  // account-wide fact — a buyer holding units in two different projects
+  // sees each project's own stage. Attached here rather than fetched
+  // separately by the frontend so the portal stays a single round trip.
+  const portalProjectIds = (reservations || [])
+    .map((r) => r.re_units?.re_projects?.id)
+    .filter(Boolean);
+  const milestonesByProject = await getMilestonesForProjects(customer.organization_id, portalProjectIds);
+  for (const reservation of reservations || []) {
+    const projectId = reservation.re_units?.re_projects?.id;
+    reservation.construction = projectId && milestonesByProject[projectId]
+      ? currentMilestoneSummary(milestonesByProject[projectId])
+      : null;
+  }
+
   return {
     customer: {
       id: customer.id,
       full_name: customer.full_name,
       email: customer.email,
       phone: customer.phone,
+      // SECTION 5 — the buyer's own code to share, and any credit earned
+      // from a referral that has already converted but had nothing open to
+      // apply against yet (see referralService.applyCreditToOutstandingBalance).
+      referral_code: customer.referral_code,
+      referral_credit_balance: round2(customer.referral_credit_balance || 0),
     },
     developer: {
       company_name: settings?.company_name || null,

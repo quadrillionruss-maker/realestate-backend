@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#0A5C42">
+  <!-- A personal link, same reasoning as portal.html. -->
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Sign your document</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23090909'/%3E%3Cpath d='M16 7l7 9-7 9-7-9z' fill='%23c9a45c'/%3E%3C/svg%3E">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600&family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./realestate.css">
+
+  <script src="./config.js"></script>
+</head>
+
+<!-- ══ SECTION 8 — e-signature ═════════════════════════════════════════════
+     The buyer's other standalone page, alongside portal.html: one document,
+     read it, sign it, done. The token arrives in the URL fragment for the
+     same reason portal.js's does — never sent to a server, never in an
+     access log or a Referer header. -->
+<body class="portal-body">
+
+<div class="portal-wrap">
+
+  <header class="portal-header">
+    <span class="portal-mark">◆</span>
+    <span class="serif portal-brand">Sign your document</span>
+  </header>
+
+  <div id="sign-view">
+    <div class="skeleton portal-skeleton-title"></div>
+    <div class="skeleton portal-skeleton-line-1"></div>
+    <div class="skeleton portal-skeleton-line-2"></div>
+  </div>
+
+  <footer class="portal-footer">This link is personal to you — please do not forward it.</footer>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="./sign.js"></script>
+</body>
+</html>

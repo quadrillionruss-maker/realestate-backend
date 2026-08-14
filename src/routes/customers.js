@@ -6,6 +6,8 @@ const { issuePortalToken, portalUrl } = require('../services/portalService');
 const notify = require('../services/notificationService');
 const { audit } = require('../services/auditService');
 const { sanitizeSearchTerm } = require('../utils/searchFilter');
+const creditScore = require('../services/creditScoreService');
+const referrals = require('../services/referralService');
 const router = express.Router();
 
 router.get('/', requirePermission('customers.read'), async (req, res, next) => {
@@ -42,7 +44,15 @@ router.get('/', requirePermission('customers.read'), async (req, res, next) => {
 
     const { data, error } = await query;
     if (error) throw error;
-    res.json(data);
+
+    // SECTION 3 — credit_score is a judgment built from payment behaviour,
+    // the same category of fact as an amount. Documentation, who "must
+    // never see what a buyer paid", does not see this either.
+    const rows = canAccess(req.orgRole, 'financial.view')
+      ? data
+      : (data || []).map((c) => ({ ...c, credit_score: null }));
+
+    res.json(rows);
   } catch (e) { next(e); }
 });
 
@@ -95,6 +105,8 @@ router.get('/:id', requirePermission('customers.read'), async (req, res, next) =
 // single-customer response, never the list (re_customers itself carries no
 // amount of its own).
 function stripFinancials(customer) {
+  // SECTION 3 — same boundary as every amount on this object.
+  customer.credit_score = null;
   for (const reservation of customer.re_reservations || []) {
     if (reservation.re_units) reservation.re_units.list_price = null;
     const plans = Array.isArray(reservation.re_installment_plans)
@@ -153,7 +165,7 @@ async function findUnallocatedCredit(orgId, customer) {
 
 router.post('/', requirePermission('customers.create'), async (req, res, next) => {
   try {
-    const { full_name, email, phone, source } = req.body || {};
+    const { full_name, email, phone, source, referral_code: referralCode } = req.body || {};
     if (!full_name) return res.status(400).json({ error: 'full_name is required' });
 
     const { data, error } = await supabaseAdmin
@@ -171,19 +183,30 @@ router.post('/', requirePermission('customers.create'), async (req, res, next) =
         // rep is added to the workspace tomorrow.
         created_by_user_id: req.userId,
       })
+      // referral_code itself is left to the column's own DB default
+      // (migrations/024) — same convention as never setting `id` by hand.
       .select()
       .single();
     if (error) throw error;
+
+    // SECTION 5 — links referred_by_customer_id and opens the
+    // re_customer_referrals workflow row. Never blocks buyer creation on a
+    // bad or unused code — see referralService.linkReferral's own comment.
+    let referral = null;
+    if (referralCode) {
+      referral = await referrals.linkReferral(req.orgId, data, referralCode);
+    }
 
     audit(req, {
       action: 'customer.created',
       entityType: 're_customers',
       entityId: data.id,
-      summary: `Buyer added: ${data.full_name}`,
-      metadata: { source: data.source || null },
+      summary: `Buyer added: ${data.full_name}`
+        + (referral ? ' — referred by an existing buyer' : ''),
+      metadata: { source: data.source || null, referred_by_customer_id: referral?.referring_customer_id || null },
     });
 
-    res.status(201).json(data);
+    res.status(201).json(referral ? { ...data, referred_by_customer_id: referral.referring_customer_id } : data);
   } catch (e) { next(e); }
 });
 
@@ -219,6 +242,34 @@ router.patch('/:id', requirePermission('customers.update'), async (req, res, nex
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Customer not found' });
     res.json(data);
+  } catch (e) { next(e); }
+});
+
+// SECTION 3 — credit score breakdown. Gated the same way a naira figure
+// on this screen always is: customers.read opens the door, financial.view
+// decides whether what comes back has real numbers in it. A score is a
+// judgment built FROM payment behaviour, so Documentation — who "must
+// never see what a buyer paid" — gets the same 403 here it would get from
+// any other financial content on this buyer.
+router.get('/:id/credit-score', requirePermission('customers.read'), async (req, res, next) => {
+  try {
+    if (!canAccess(req.orgRole, 'financial.view')) {
+      return res.status(403).json({ success: false, error: 'This role cannot view financial standing.' });
+    }
+
+    let query = supabaseAdmin
+      .from('re_customers')
+      .select('id, full_name, created_by_user_id')
+      .eq('id', req.params.id)
+      .eq('organization_id', req.orgId);
+    if (isOwnRecordsOnly(req.orgRole)) query = query.eq('created_by_user_id', req.userId);
+
+    const { data: customer, error } = await query.maybeSingle();
+    if (error) throw error;
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const { score, breakdown } = await creditScore.computeBreakdown(req.orgId, customer.id);
+    res.json({ customer_id: customer.id, score, tier: creditScore.tier(score), breakdown });
   } catch (e) { next(e); }
 });
 

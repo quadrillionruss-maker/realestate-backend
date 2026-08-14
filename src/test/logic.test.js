@@ -56,6 +56,25 @@ const {
   isDowngrade, capabilitiesLostGoingFrom,
 } = require('../services/permissions');
 const { encrypt, decrypt, last4 } = require('../utils/credentials');
+const {
+  MILESTONE_NAMES, sequenceProgressPercent, currentMilestoneSummary,
+} = require('../services/constructionService');
+const {
+  WEIGHTS, computeFromHistory, tier,
+} = require('../services/creditScoreService');
+const { allocateCredit } = require('../services/referralService');
+const { buildFallbackForecast, resolveRefs: resolveForecastRefs } = require('../services/forecastService');
+const { buildFallbackRecommendation } = require('../services/planRecommendationService');
+const {
+  SIGNABLE_DOC_TYPES, fillPlaceholders, verifySigningToken,
+} = require('../services/documentService');
+const { INTENTS, keywordIntent } = require('../services/whatsappBotService');
+const {
+  extractPromisedDate, WILL_PAY_RE, ALREADY_PAID_RE, CANNOT_PAY_RE,
+} = require('../services/collectionsAgent');
+const { bucketFor, MAX_MESSAGES_PER_LEAD } = require('../services/salesAgent');
+const { isDue: financeIsDue, collectRecipientEmails } = require('../services/financeAgent');
+const { isDue: marketIntelIsDue } = require('../services/marketIntelAgent');
 const { authenticate } = require('../middleware/auth');
 // Route files export only `router` normally — these three attach a couple of
 // extra properties purely so this offline suite can assert on their pure
@@ -1588,6 +1607,494 @@ test('sales_director is refused: waive, delete, investor report, mark commission
   assert.strictEqual(canAccess('sales_director', 'recycle.delete'), false);
   assert.strictEqual(canAccess('sales_director', 'reports.investor'), false);
   assert.strictEqual(canAccess('sales_director', 'commissions.markPaid'), false);
+});
+
+// SECTION 1 — multi-branch/multi-company: folding a workspace into or out of
+// a group is owner-level by the same reasoning as turning a solo workspace
+// into a team — only sales_director and below are checked here since
+// permissions.js already asserts owner passes every action in the matrix.
+test('group.manage (create/attach/detach a branch) is owner-only', () => {
+  assert.ok(canAccess('owner', 'group.manage'));
+  assert.strictEqual(canAccess('sales_director', 'group.manage'), false);
+  assert.strictEqual(canAccess('sales_rep', 'group.manage'), false);
+  assert.strictEqual(canAccess('collections', 'group.manage'), false);
+  assert.strictEqual(canAccess('documentation', 'group.manage'), false);
+});
+
+// SECTION 2 — construction milestones: "Add milestone management UI to the
+// Projects screen — owner and sales_director only" from the product spec.
+// Reading progress stays open to everyone who can read inventory at all
+// (inventory.read is ALL), asserted at the route level, not here.
+test('construction.manage is owner + sales_director only', () => {
+  assert.ok(canAccess('owner', 'construction.manage'));
+  assert.ok(canAccess('sales_director', 'construction.manage'));
+  assert.strictEqual(canAccess('sales_rep', 'construction.manage'), false);
+  assert.strictEqual(canAccess('collections', 'construction.manage'), false);
+  assert.strictEqual(canAccess('documentation', 'construction.manage'), false);
+});
+
+test('sequenceProgressPercent reads position in the five-stage sequence, not the milestone\'s own completion %', () => {
+  // "You are now X% closer to your handover date" — reaching stage 3 of 5
+  // (Roofing) is 60% of the way through the SEQUENCE regardless of how far
+  // along Roofing's own tracked percentage happens to sit.
+  assert.strictEqual(sequenceProgressPercent('Foundation'), 20);
+  assert.strictEqual(sequenceProgressPercent('Superstructure'), 40);
+  assert.strictEqual(sequenceProgressPercent('Roofing'), 60);
+  assert.strictEqual(sequenceProgressPercent('Finishing'), 80);
+  assert.strictEqual(sequenceProgressPercent('Handover'), 100);
+});
+
+test('MILESTONE_NAMES is the fixed five, in order', () => {
+  assert.deepStrictEqual(MILESTONE_NAMES, ['Foundation', 'Superstructure', 'Roofing', 'Finishing', 'Handover']);
+});
+
+test('currentMilestoneSummary picks the first not-yet-completed stage', () => {
+  const milestones = MILESTONE_NAMES.map((name, i) => ({
+    id: `m-${i}`, name, status: i < 2 ? 'completed' : 'pending', completion_percentage: i < 2 ? 100 : 0,
+    target_date: null, completed_date: i < 2 ? '2026-01-01' : null, photos: [],
+  }));
+  const current = currentMilestoneSummary(milestones);
+  assert.strictEqual(current.name, 'Roofing'); // first non-completed: index 2
+});
+
+test('currentMilestoneSummary falls back to the last stage once every milestone is completed', () => {
+  const milestones = MILESTONE_NAMES.map((name) => ({
+    id: name, name, status: 'completed', completion_percentage: 100,
+    target_date: null, completed_date: '2026-01-01', photos: [],
+  }));
+  const current = currentMilestoneSummary(milestones);
+  assert.strictEqual(current.name, 'Handover');
+});
+
+test('currentMilestoneSummary surfaces the LATEST photo, not the first', () => {
+  const milestones = [{
+    id: 'm-1', name: 'Foundation', status: 'in_progress', completion_percentage: 50,
+    target_date: null, completed_date: null,
+    photos: [{ url: 'https://x/first.jpg' }, { url: 'https://x/latest.jpg' }],
+  }];
+  assert.strictEqual(currentMilestoneSummary(milestones).latest_photo_url, 'https://x/latest.jpg');
+});
+
+// SECTION 3 — buyer credit scoring. computeFromHistory is the pure core of
+// creditScoreService (computeBreakdown/recompute wrap it with a database
+// read and write) — fixtures below mirror exactly the shape
+// loadCustomerHistory hands it: reservations carrying escalation_stage and
+// nested installment schedules, plus a flat promises array.
+function schedRow(status, dueDate, paidAt) {
+  return { status, due_date: dueDate, paid_at: paidAt };
+}
+function reservation(stage, rows) {
+  return { escalation_stage: stage, re_installment_plans: [{ re_installment_schedule: rows }] };
+}
+
+test('computeFromHistory scores a buyer with no history at all as a perfect 100', () => {
+  // "Nothing on record" reads as "no problem on record" — a brand-new buyer
+  // is not penalised for having no payments, promises or reservations yet.
+  const { score, breakdown } = computeFromHistory({ reservations: [], promises: [] });
+  assert.strictEqual(score, 100);
+  assert.strictEqual(breakdown.payment_consistency.points, WEIGHTS.consistency);
+  assert.strictEqual(breakdown.promise_reliability.points, WEIGHTS.promises);
+  assert.strictEqual(breakdown.response_rate.points, WEIGHTS.response);
+  assert.strictEqual(breakdown.default_history.points, WEIGHTS.defaults);
+});
+
+test('computeFromHistory: payment consistency is on-time paid ÷ everything that has actually come due', () => {
+  const rows = [
+    schedRow('paid', '2026-01-01', '2026-01-01'),   // on time
+    schedRow('paid', '2026-02-01', '2026-02-05'),    // paid, but after due_date — a default event
+    schedRow('overdue', '2026-03-01', null),          // currently overdue — due, and a default event
+    schedRow('pending', '2026-04-01', null),          // not yet due — counts toward neither side
+  ];
+  const { breakdown } = computeFromHistory({ reservations: [reservation('none', rows)], promises: [] });
+  assert.strictEqual(breakdown.payment_consistency.total_due, 3);
+  assert.strictEqual(breakdown.payment_consistency.on_time, 1);
+  // round(40 * 1/3) = 13
+  assert.strictEqual(breakdown.payment_consistency.points, Math.round(WEIGHTS.consistency * (1 / 3)));
+  assert.strictEqual(breakdown.default_history.default_events, 2);
+});
+
+test('computeFromHistory: promise reliability ignores open and cancelled promises', () => {
+  const promises = [
+    { status: 'kept' }, { status: 'kept' }, { status: 'broken' },
+    { status: 'open' }, { status: 'cancelled' },
+  ];
+  const { breakdown } = computeFromHistory({ reservations: [], promises });
+  assert.strictEqual(breakdown.promise_reliability.resolved, 3); // open + cancelled excluded
+  assert.strictEqual(breakdown.promise_reliability.kept, 2);
+  // round(20 * 2/3) = 13
+  assert.strictEqual(breakdown.promise_reliability.points, Math.round(WEIGHTS.promises * (2 / 3)));
+});
+
+test('computeFromHistory: response rate reads the WORST escalation stage across all reservations', () => {
+  const withLegal = [reservation('none', []), reservation('legal', [])];
+  const { breakdown } = computeFromHistory({ reservations: withLegal, promises: [] });
+  // legal is the last of 5 stages (index 4) — worst possible response ratio, 0 points.
+  assert.strictEqual(breakdown.response_rate.points, 0);
+  assert.strictEqual(breakdown.response_rate.worst_escalation_stage, 'Legal review');
+});
+
+test('computeFromHistory: default history is floored at 5 events, never scores negative', () => {
+  const rows = Array.from({ length: 8 }, (_, i) => schedRow('overdue', `2026-0${(i % 9) + 1}-01`, null));
+  const { score, breakdown } = computeFromHistory({ reservations: [reservation('none', rows)], promises: [] });
+  assert.strictEqual(breakdown.default_history.default_events, 8);
+  assert.strictEqual(breakdown.default_history.points, 0);
+  assert.ok(score >= 0);
+});
+
+test('tier() matches the product spec\'s four bands exactly at their boundaries', () => {
+  assert.strictEqual(tier(100).key, 'excellent');
+  assert.strictEqual(tier(80).key, 'excellent');
+  assert.strictEqual(tier(79).key, 'good');
+  assert.strictEqual(tier(60).key, 'good');
+  assert.strictEqual(tier(59).key, 'fair');
+  assert.strictEqual(tier(40).key, 'fair');
+  assert.strictEqual(tier(39).key, 'at_risk');
+  assert.strictEqual(tier(0).key, 'at_risk');
+});
+
+// SECTION 5 — buyer referral network. allocateCredit is the pure allocation
+// core of referralService.applyCreditToOutstandingBalance — fixtures mirror
+// the shape that function builds from the buyer's open schedule rows.
+function openRow(id, planId, amountDue, dueDate, status) {
+  return { id, plan_id: planId, amount_due: amountDue, due_date: dueDate, status: status || 'pending' };
+}
+
+test('allocateCredit fully absorbed by one row leaves it reduced but still owed', () => {
+  const rows = [openRow('r1', 'p1', 50000, '2026-03-01')];
+  const { rowUpdates, applied, remaining } = allocateCredit(rows, 20000);
+  assert.strictEqual(applied, 20000);
+  assert.strictEqual(remaining, 0);
+  assert.strictEqual(rowUpdates.length, 1);
+  assert.strictEqual(rowUpdates[0].amount_due, 30000);
+  assert.strictEqual(rowUpdates[0].status, 'pending'); // still owed, not waived
+});
+
+test('allocateCredit that exactly covers a row marks it waived, not paid', () => {
+  const rows = [openRow('r1', 'p1', 20000, '2026-03-01', 'overdue')];
+  const { rowUpdates } = allocateCredit(rows, 20000);
+  assert.strictEqual(rowUpdates[0].amount_due, 0);
+  assert.strictEqual(rowUpdates[0].status, 'waived');
+});
+
+test('allocateCredit applies earliest due_date first, across multiple plans', () => {
+  const rows = [
+    openRow('later', 'p1', 10000, '2026-06-01'),
+    openRow('earlier', 'p2', 10000, '2026-01-01'),
+  ];
+  // Enough to fully absorb the earlier row and partially the later one.
+  const { rowUpdates } = allocateCredit(rows, 15000);
+  const earlier = rowUpdates.find((r) => r.id === 'earlier');
+  const later = rowUpdates.find((r) => r.id === 'later');
+  assert.strictEqual(earlier.amount_due, 0);
+  assert.strictEqual(earlier.status, 'waived');
+  assert.strictEqual(later.amount_due, 5000);
+});
+
+test('allocateCredit exceeding every open row leaves the excess as remaining', () => {
+  const rows = [openRow('r1', 'p1', 10000, '2026-01-01')];
+  const { applied, remaining } = allocateCredit(rows, 30000);
+  assert.strictEqual(applied, 10000);
+  assert.strictEqual(remaining, 20000);
+});
+
+test('allocateCredit against no open rows applies nothing', () => {
+  const { applied, remaining, rowUpdates } = allocateCredit([], 15000);
+  assert.strictEqual(applied, 0);
+  assert.strictEqual(remaining, 15000);
+  assert.strictEqual(rowUpdates.length, 0);
+});
+
+test('allocateCredit sums each touched plan\'s delta correctly for two rows on the same plan', () => {
+  const rows = [
+    openRow('r1', 'p1', 8000, '2026-01-01'),
+    openRow('r2', 'p1', 8000, '2026-02-01'),
+  ];
+  const { planDeltas } = allocateCredit(rows, 12000);
+  assert.strictEqual(planDeltas.get('p1'), 12000);
+});
+
+test('reports.referrals is owner + sales_director only, same tier as collections/rental', () => {
+  assert.ok(canAccess('owner', 'reports.referrals'));
+  assert.ok(canAccess('sales_director', 'reports.referrals'));
+  assert.strictEqual(canAccess('sales_rep', 'reports.referrals'), false);
+  assert.strictEqual(canAccess('collections', 'reports.referrals'), false);
+  assert.strictEqual(canAccess('documentation', 'reports.referrals'), false);
+});
+
+// SECTION 6 — AI sales forecasting. buildFallbackForecast and resolveRefs
+// are the pure parts of forecastService (gatherForecastState/generateForecast
+// touch the database and, for the model path, OpenAI — not exercised here).
+test('buildFallbackForecast projects flat from the average of the last 3 months on record', () => {
+  const state = {
+    today: '2026-04-01',
+    overall: {
+      total_overdue_amount: 0,
+      default_rate_percent: 0,
+      monthly_collections_last_12: [
+        { month: '2026-01', amount: 1_000_000 },
+        { month: '2026-02', amount: 2_000_000 },
+        { month: '2026-03', amount: 3_000_000 },
+      ],
+    },
+    projects: [],
+    risk_candidates: [],
+  };
+  const forecast = buildFallbackForecast(state);
+  // average of 1m, 2m, 3m = 2m
+  assert.strictEqual(forecast.projected_collections_3mo.month_1, 2_000_000);
+  assert.strictEqual(forecast.projected_collections_3mo.month_2, 2_000_000);
+  assert.strictEqual(forecast.projected_collections_3mo.month_3, 2_000_000);
+});
+
+test('buildFallbackForecast projects a completion date from remaining balance ÷ 6-month collection rate', () => {
+  const state = {
+    today: '2026-01-01',
+    overall: { total_overdue_amount: 0, default_rate_percent: 0, monthly_collections_last_12: [] },
+    projects: [{
+      project_ref: 'PROJECT_1', remaining_balance: 3_000_000, avg_monthly_collection_last_6mo: 1_000_000,
+    }],
+    risk_candidates: [],
+  };
+  const forecast = buildFallbackForecast(state);
+  // 3,000,000 / 1,000,000 = 3 months from 2026-01-01
+  assert.strictEqual(forecast.project_completions[0].projected_completion_date, '2026-04-01');
+});
+
+test('buildFallbackForecast leaves the completion date null when the project has no recent collections', () => {
+  const state = {
+    today: '2026-01-01',
+    overall: { total_overdue_amount: 0, default_rate_percent: 0, monthly_collections_last_12: [] },
+    projects: [{ project_ref: 'PROJECT_1', remaining_balance: 3_000_000, avg_monthly_collection_last_6mo: 0 }],
+    risk_candidates: [],
+  };
+  const forecast = buildFallbackForecast(state);
+  assert.strictEqual(forecast.project_completions[0].projected_completion_date, null);
+});
+
+test('buildFallbackForecast ranks default risks in the order risk_candidates were given (worst-first is the caller\'s job)', () => {
+  const state = {
+    today: '2026-01-01',
+    overall: { total_overdue_amount: 500_000, default_rate_percent: 12, monthly_collections_last_12: [] },
+    projects: [],
+    risk_candidates: [
+      { customer_ref: 'BUYER_1', credit_score: 30, tier: 'at_risk', overdue_installments: 3, overdue_amount: 500_000, escalation_stage: 'legal' },
+      { customer_ref: 'BUYER_2', credit_score: 70, tier: 'good', overdue_installments: 0, overdue_amount: 0, escalation_stage: 'none' },
+    ],
+  };
+  const forecast = buildFallbackForecast(state);
+  assert.strictEqual(forecast.default_risks.length, 2);
+  assert.strictEqual(forecast.default_risks[0].customer_ref, 'BUYER_1');
+  assert.match(forecast.default_risks[0].risk_reason, /overdue/i);
+  assert.match(forecast.default_risks[1].risk_reason, /no installments currently overdue/i);
+});
+
+test('resolveRefs swaps project_ref/customer_ref tokens for real names and never leaks the token itself', () => {
+  const nameByProjectRef = new Map([['PROJECT_1', 'Lekki Gardens Phase 2']]);
+  const nameByCustomerRef = new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo']]);
+  const raw = {
+    projected_collections_3mo: { month_1: 1, month_2: 1, month_3: 1, reasoning: 'x' },
+    project_completions: [{ project_ref: 'PROJECT_1', projected_completion_date: null, reasoning: 'x' }],
+    default_risks: [{ customer_ref: 'BUYER_1', risk_reason: 'x' }],
+    recommended_actions: [],
+  };
+  const resolved = resolveForecastRefs(raw, nameByProjectRef, nameByCustomerRef);
+  assert.strictEqual(resolved.project_completions[0].project_name, 'Lekki Gardens Phase 2');
+  assert.strictEqual(resolved.default_risks[0].customer_name, 'Mrs Adeyemi Okonkwo');
+  assert.strictEqual(resolved.project_completions[0].project_ref, undefined);
+  assert.strictEqual(resolved.default_risks[0].customer_ref, undefined);
+});
+
+test('reports.forecast is owner-only, same tier as reports.investor', () => {
+  assert.ok(canAccess('owner', 'reports.forecast'));
+  assert.strictEqual(canAccess('sales_director', 'reports.forecast'), false);
+  assert.strictEqual(canAccess('sales_rep', 'reports.forecast'), false);
+});
+
+// SECTION 7 — smart payment plan AI. buildFallbackRecommendation is the pure
+// tier-based heuristic used with no OPENAI_API_KEY or on a failed model call
+// (planRecommendationService.gatherPlanState/recommendPlan touch the
+// database and, for the model path, OpenAI — not exercised here).
+test('buildFallbackRecommendation shortens the plan and raises the deposit as credit tier worsens', () => {
+  const excellent = buildFallbackRecommendation({ buyer_credit_score: 90, buyer_credit_tier: 'excellent' });
+  const atRisk = buildFallbackRecommendation({ buyer_credit_score: 20, buyer_credit_tier: 'at_risk' });
+  assert.ok(atRisk.recommended_installments < excellent.recommended_installments);
+  assert.ok(atRisk.recommended_deposit_percent > excellent.recommended_deposit_percent);
+  assert.strictEqual(excellent.recommended_frequency, 'monthly');
+  assert.strictEqual(atRisk.recommended_frequency, 'monthly');
+});
+
+test('buildFallbackRecommendation stays within the schema\'s bounds for every tier', () => {
+  for (const tier of ['excellent', 'good', 'fair', 'at_risk']) {
+    const rec = buildFallbackRecommendation({ buyer_credit_score: 50, buyer_credit_tier: tier });
+    assert.ok(rec.recommended_installments >= 1 && rec.recommended_installments <= 120);
+    assert.ok(rec.recommended_deposit_percent >= 0 && rec.recommended_deposit_percent <= 100);
+    assert.ok(['monthly', 'quarterly'].includes(rec.recommended_frequency));
+    assert.ok(rec.reasoning.length > 0);
+  }
+});
+
+test('buildFallbackRecommendation defaults to the "good" heuristic for an unrecognised tier', () => {
+  const rec = buildFallbackRecommendation({ buyer_credit_score: 65, buyer_credit_tier: 'unknown' });
+  const good = buildFallbackRecommendation({ buyer_credit_score: 65, buyer_credit_tier: 'good' });
+  assert.strictEqual(rec.recommended_installments, good.recommended_installments);
+  assert.strictEqual(rec.recommended_deposit_percent, good.recommended_deposit_percent);
+});
+
+// SECTION 8 — legal document automation + e-signature.
+test('SIGNABLE_DOC_TYPES is exactly the three contract types a buyer must countersign', () => {
+  assert.deepStrictEqual(
+    [...SIGNABLE_DOC_TYPES].sort(),
+    ['deed_of_assignment', 'power_of_attorney', 'subscriber_agreement'].sort()
+  );
+});
+
+test('fillPlaceholders escapes ordinary values but leaves rawKeys HTML intact', () => {
+  const out = fillPlaceholders(
+    '<p>{{buyer_name}}</p>{{signature_block}}',
+    { buyer_name: '<script>alert(1)</script>', signature_block: '<img src="x.png">' },
+    ['signature_block']
+  );
+  assert.ok(out.includes('&lt;script&gt;'), 'buyer_name was escaped');
+  assert.ok(!out.includes('<script>'), 'raw script tag did not survive');
+  assert.ok(out.includes('<img src="x.png">'), 'signature_block was inserted as raw HTML');
+});
+
+test('fillPlaceholders substitutes every occurrence of a repeated token', () => {
+  const out = fillPlaceholders('{{unit_number}} / {{unit_number}}', { unit_number: 'A12' });
+  assert.strictEqual(out, 'A12 / A12');
+});
+
+test('fillPlaceholders leaves an unrecognised token alone rather than blanking it', () => {
+  const out = fillPlaceholders('{{buyer_name}} {{something_else}}', { buyer_name: 'Ada' });
+  assert.strictEqual(out, 'Ada {{something_else}}');
+});
+
+test('verifySigningToken accepts a token minted for the document-signing audience', () => {
+  const token = jwt.sign({ did: 'doc-1', org: 'org-1' }, env.jwt.secret, {
+    algorithm: 'HS256', audience: 're-document-sign', expiresIn: '14d',
+  });
+  const claims = verifySigningToken(token);
+  assert.strictEqual(claims.did, 'doc-1');
+  assert.strictEqual(claims.org, 'org-1');
+});
+
+test('verifySigningToken rejects a staff token (no audience) presented as a signing link', () => {
+  const staffToken = auth.issueToken({ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', email: 'a@b.c' });
+  assert.throws(() => verifySigningToken(staffToken));
+});
+
+test('verifySigningToken rejects a portal token (aud:re-portal) presented as a signing link', () => {
+  const portalToken = portal.issuePortalToken({
+    id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    organization_id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    portal_token_version: 0,
+  });
+  assert.throws(() => verifySigningToken(portalToken));
+});
+
+test('verifySigningToken rejects an expired token', () => {
+  const expired = jwt.sign({ did: 'doc-1', org: 'org-1' }, env.jwt.secret, {
+    algorithm: 'HS256', audience: 're-document-sign', expiresIn: '-1s',
+  });
+  assert.throws(() => verifySigningToken(expired));
+});
+
+// SECTION 9 — WhatsApp native mini app. keywordIntent is the deterministic
+// fallback used with no OPENAI_API_KEY or on a failed classification call —
+// classifyIntent itself delegates straight to it in this offline suite
+// (env.openai.apiKey is unset here), so testing both together also proves
+// that wiring.
+test('INTENTS is exactly the five the product spec names', () => {
+  assert.deepStrictEqual([...INTENTS].sort(), [
+    'check_balance', 'get_receipt', 'next_payment', 'pay_now', 'speak_to_agent',
+  ].sort());
+});
+
+test('keywordIntent recognises each of the five intents from plain phrasing', () => {
+  assert.strictEqual(keywordIntent('can I get my receipt please'), 'get_receipt');
+  assert.strictEqual(keywordIntent('I want to pay online now'), 'pay_now');
+  assert.strictEqual(keywordIntent('what is my outstanding balance'), 'check_balance');
+  assert.strictEqual(keywordIntent('when is my next payment due'), 'next_payment');
+  assert.strictEqual(keywordIntent('my agent never called me back, this is unacceptable'), 'speak_to_agent');
+});
+
+test('keywordIntent defaults to speak_to_agent for a genuinely unclear message', () => {
+  assert.strictEqual(keywordIntent('hello good morning'), 'speak_to_agent');
+  assert.strictEqual(keywordIntent(''), 'speak_to_agent');
+});
+
+// SECTION 11 — the five v2 agents + Deal Manager. Only the pure parts are
+// exercised offline here — everything else in these five files reads or
+// writes the database, sends via notificationService, or calls OpenAI.
+section('SECTION 11 — v2 agents');
+
+test('collectionsAgent: WILL_PAY_RE / ALREADY_PAID_RE / CANNOT_PAY_RE match the phrasings they are meant to, and nothing else', () => {
+  assert.ok(WILL_PAY_RE.test('I will pay on Friday'));
+  assert.ok(WILL_PAY_RE.test("I'll pay by the 15th"));
+  assert.strictEqual(WILL_PAY_RE.test('what is my balance'), false);
+
+  assert.ok(ALREADY_PAID_RE.test('I have already paid this'));
+  assert.ok(ALREADY_PAID_RE.test('I paid yesterday'));
+  assert.strictEqual(ALREADY_PAID_RE.test('I will pay tomorrow'), false);
+
+  assert.ok(CANNOT_PAY_RE.test('I cannot pay this month'));
+  assert.ok(CANNOT_PAY_RE.test("I can't pay right now"));
+  assert.strictEqual(CANNOT_PAY_RE.test('I will pay Friday'), false);
+});
+
+test('collectionsAgent.extractPromisedDate recognises tomorrow, a weekday name, and an explicit date', () => {
+  // 2026-01-01 is a Thursday.
+  assert.strictEqual(extractPromisedDate('I will pay tomorrow', '2026-01-01'), '2026-01-02');
+  assert.strictEqual(extractPromisedDate('I will pay Friday', '2026-01-01'), '2026-01-02');
+  assert.strictEqual(extractPromisedDate('I will pay by 15/03', '2026-01-01'), '2026-03-15');
+});
+
+test('collectionsAgent.extractPromisedDate defaults to a week out when no date is recognised', () => {
+  assert.strictEqual(extractPromisedDate('I will pay soon, please be patient', '2026-01-01'), '2026-01-08');
+});
+
+test('collectionsAgent.extractPromisedDate never resolves a weekday to today itself', () => {
+  // 2026-01-01 IS a Thursday — "pay Thursday" must mean next week's, not today.
+  assert.strictEqual(extractPromisedDate('I will pay Thursday', '2026-01-01'), '2026-01-08');
+});
+
+test('salesAgent.bucketFor maps lead age to the right one of three messages', () => {
+  assert.strictEqual(bucketFor(0), 'welcome');
+  assert.strictEqual(bucketFor(2.9), 'welcome');
+  assert.strictEqual(bucketFor(3), 'followup');
+  assert.strictEqual(bucketFor(6.9), 'followup');
+  assert.strictEqual(bucketFor(7), 'checkin');
+  assert.strictEqual(bucketFor(30), 'checkin');
+});
+
+test('salesAgent never sends more than 3 messages to one unconverted lead, per the product spec', () => {
+  assert.strictEqual(MAX_MESSAGES_PER_LEAD, 3);
+});
+
+test('financeAgent.isDue is true only on the 1st of the month, read in Africa/Lagos', () => {
+  assert.ok(financeIsDue(new Date('2026-03-01T10:00:00Z')));
+  assert.strictEqual(financeIsDue(new Date('2026-03-15T10:00:00Z')), false);
+  assert.strictEqual(financeIsDue(new Date('2026-03-31T10:00:00Z')), false);
+});
+
+test('financeAgent.collectRecipientEmails combines notify_md_email and investor_emails, de-duplicated', () => {
+  const emails = collectRecipientEmails({
+    notify_md_email: 'md@company.com',
+    investor_emails: 'investor1@x.com, md@company.com , investor2@x.com',
+  });
+  assert.deepStrictEqual(emails, ['md@company.com', 'investor1@x.com', 'investor2@x.com']);
+});
+
+test('financeAgent.collectRecipientEmails returns an empty list when nothing is configured', () => {
+  assert.deepStrictEqual(collectRecipientEmails({}), []);
+  assert.deepStrictEqual(collectRecipientEmails(null), []);
+});
+
+test('marketIntelAgent.isDue is true only on Mondays, read in Africa/Lagos', () => {
+  // 2026-01-05 is a Monday.
+  assert.ok(marketIntelIsDue(new Date('2026-01-05T10:00:00Z')));
+  assert.strictEqual(marketIntelIsDue(new Date('2026-01-06T10:00:00Z')), false);
+  assert.strictEqual(marketIntelIsDue(new Date('2026-01-11T10:00:00Z')), false); // Sunday
 });
 
 test('sales_director CAN restructure plans, renew tenancies, approve commissions and read the full brief', () => {

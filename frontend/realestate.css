@@ -1041,6 +1041,19 @@ table.data td.num, table.data th.num {
   background: var(--panel-3); color: var(--text-faint); border-color: var(--line-2);
 }
 
+/* SECTION 3 — credit score tiers. Excellent and Good both read as moss,
+   distinguished by the number in the badge itself rather than a fourth hue
+   this palette does not otherwise have (see creditScoreService.js's tier()). */
+.badge.credit-excellent, .badge.credit-good {
+  background: var(--moss-wash); color: var(--moss); border-color: rgba(116, 171, 132, 0.28);
+}
+.badge.credit-fair {
+  background: var(--gold-wash); color: var(--gold); border-color: var(--line-gold);
+}
+.badge.credit-at_risk {
+  background: var(--clay-wash); color: var(--clay); border-color: rgba(205, 95, 67, 0.28);
+}
+
 /* Risk chips in the morning brief. Severity is carried by a left rule rather
    than by tinting the whole chip, so a column of eight is still readable. */
 .risk-chip {
@@ -1824,6 +1837,33 @@ table.data td.sched-detail-cell {
 .portal-empty-body.sm { padding: 30px 20px; }
 .portal-empty-icon { font-size: 26px; opacity: .3; margin-bottom: 12px; }
 .portal-empty-title { font-size: 20px; margin-bottom: 8px; }
+
+/* SECTION 8 — sign.html's signature capture. touch-action:none stops the
+   page itself from scrolling while a finger drags across the canvas on
+   mobile, which is where most buyers actually sign. */
+.sig-canvas {
+  width: 100%;
+  max-width: 600px;
+  height: 180px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: #fff;
+  touch-action: none;
+  cursor: crosshair;
+  display: block;
+}
+.sig-typed-input { font-family: 'Brush Script MT', cursive; font-size: 22px; }
+
+/* SECTION 2 — construction progress's latest milestone photo. Contained,
+   not cropped: a site photo's aspect ratio is part of what it shows. */
+.construction-photo { width: 100%; max-height: 320px; object-fit: cover; border-radius: 8px; display: block; }
+
+/* The Projects screen's milestone editor — five of these stacked inside
+   one modal, each with its own Save and its own photo picker. */
+.milestone-editor { padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.milestone-editor:last-child { border-bottom: none; padding-bottom: 0; }
+.milestone-photos { display: flex; flex-wrap: wrap; gap: 8px; }
+.milestone-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line-2); }
 
 /* Below this the search bar is squeezed between the hamburger and "Sign
    out" until there is no usable width left to type a search into. The text

@@ -1174,6 +1174,18 @@
     });
   }
 
+  // The Group nav item — hidden by default (see index.html's comment on
+  // #nav-group-group) and shown only for the small minority of owners who
+  // actually own a parent_organizations row. Unlike the workspace switcher,
+  // this never changes X-Workspace-Id — it just navigates to #/group, a
+  // screen backed by GET /group/dashboard, which is scoped by the caller's
+  // own id rather than by whichever workspace happens to be selected.
+  function renderGroupLink(me) {
+    var group = el('nav-group-group');
+    if (!group) return;
+    group.classList.toggle('hidden', !me.is_group_owner);
+  }
+
   // The sidebar footer's identity block — split out of enterApp() so the
   // account modal can refresh it in place after an edit, without a full
   // reload() (which only re-renders #view, not the sidebar chrome around it).
@@ -1208,6 +1220,7 @@
     RE.state.user = me;
     applyNavForRole(me.role);
     renderWorkspaceSwitcher(me);
+    renderGroupLink(me);
     renderWhoBlock(me);
 
     el('dateline').textContent = new Date().toLocaleDateString('en-NG', {

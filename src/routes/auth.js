@@ -19,6 +19,7 @@ const auth = require('../services/authService');
 const invites = require('../services/inviteService');
 const { uploadUserAvatar } = require('../services/documentStorage');
 const { ROLE_LABELS, actionsFor, normalizeRole } = require('../services/permissions');
+const { getGroupsOwnedBy } = require('../services/groupService');
 
 const router = express.Router();
 
@@ -175,6 +176,11 @@ router.get('/me', authenticate, async (req, res, next) => {
       }));
     }
 
+    // The sidebar's group link needs to know only whether one exists, not
+    // its contents — GET /group/dashboard is the real read. Fetched here so
+    // it costs no extra round trip, same reasoning as `workspaces` above.
+    const groups = await getGroupsOwnedBy(req.user.id);
+
     res.json({
       ...data,
       // The org scope the token resolves to, so the UI can label a team
@@ -188,6 +194,8 @@ router.get('/me', authenticate, async (req, res, next) => {
       // rules maintained by hand in screens.js.
       permissions: actionsFor(role),
       workspaces,
+      is_group_owner: groups.length > 0,
+      groups,
       // Informational only — nothing in the app gates on this any more.
       email_verified: Boolean(req.user.email_verified_at),
       // A password-less account signed up with Google and has nothing to

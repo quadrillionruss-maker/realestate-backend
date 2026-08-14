@@ -472,6 +472,31 @@
                     'The figures are correct; only the wording is plainer.' +
                   '</div>'
                 : '') +
+
+              // SECTION 11 — Market Intelligence Agent folds its weekly
+              // report into the SAME brief row (marketIntelAgent.js's own
+              // comment on why), so this only ever appears on the Monday it
+              // was generated and every day after until the next Monday
+              // refreshes it — never a second, competing brief section.
+              (brief && brief.payload && brief.payload.market_intelligence && brief.payload.market_intelligence.summary
+                ? '<div class="notice mt-1 mb-0">' +
+                    '<b>Market Intelligence</b><br>' + esc(brief.payload.market_intelligence.summary) +
+                    (brief.payload.market_intelligence.signals || []).map(function (s) {
+                      return '<div class="page-sub mt-1">' + esc(s.detail) + '</div>';
+                    }).join('') +
+                  '</div>'
+                : '') +
+
+              // SECTION 11 — Document Agent flags anything unsigned 21+ days.
+              (brief && brief.payload && (brief.payload.high_priority_documents || []).length
+                ? '<div class="notice warn mt-1 mb-0">' +
+                    '<b>Unsigned documents</b><br>' +
+                    brief.payload.high_priority_documents.map(function (d) {
+                      return esc(d.customer_name) + ' — ' + esc(String(d.doc_type).replace(/_/g, ' ')) + ', ' + d.days_unsigned + ' days unsigned';
+                    }).join('<br>') +
+                  '</div>'
+                : '') +
+
               (risks.length
                 ? '<div class="risk-row">' + risks.slice(0, 6).map(function (r) {
                     return '<div class="risk-chip ' + esc(r.severity) + '"><b>' + esc(r.customer_name) + '</b><span>' + esc(r.reason) + '</span></div>';
@@ -888,11 +913,15 @@
       // model (same file's own words), so it's gated here, not just server-side.
       var canWrite = R.can('inventory.write');
 
+      // SECTION 2 — milestone management is owner + sales_director only,
+      // matching construction.manage in permissions.js.
+      var canManageConstruction = R.can('construction.manage');
+
       view.innerHTML =
         head('Projects', 'Each development you are selling.',
           canWrite ? '<button class="btn primary" id="btn-new-project">New project</button>' : '') +
         (projects.length
-          ? '<div class="grid cols-3">' + projects.map(projectCard).join('') + '</div>'
+          ? '<div class="grid cols-3">' + projects.map(function (p) { return projectCard(p, canManageConstruction); }).join('') + '</div>'
           : card(null, R.emptyState(
               'No projects yet',
               'A project is one development — "Lekki Gardens Phase 2". Units, buyers and payments all hang off it.',
@@ -904,15 +933,20 @@
       });
 
       R.qsa('[data-project-open]', view).forEach(function (node) {
-        node.addEventListener('click', function () {
+        node.addEventListener('click', function (event) {
+          if (event.target.closest('[data-stop]')) return;
           projectFilter = node.dataset.projectOpen;
           R.go('#/units?project=' + node.dataset.projectOpen);
         });
       });
+
+      R.onClick(view, '[data-project-progress]', function (button) {
+        openMilestonesModal(button.dataset.projectProgress, button.dataset.projectName);
+      });
     },
   };
 
-  function projectCard(p) {
+  function projectCard(p, canManageConstruction) {
     var total = p.units_total || 0;
     var taken = (p.units_sold || 0) + (p.units_reserved || 0);
     var pct = total ? Math.round((taken / total) * 100) : 0;
@@ -931,6 +965,9 @@
             '<span>' + (p.units_available || 0) + ' available</span>' +
           '</div>' +
         '</div>' +
+        (canManageConstruction
+          ? '<button class="btn-quiet mt-2" data-stop data-project-progress="' + esc(p.id) + '" data-project-name="' + esc(p.name) + '">Construction progress</button>'
+          : '') +
       '</div>' +
     '</div>';
   }
@@ -961,6 +998,137 @@
         toast('Project created. Add its units next.', 'ok');
         R.reload();
       },
+    });
+  }
+
+  // SECTION 2 — construction milestone management. Fetched before the modal
+  // opens (rather than into a loading skeleton inside it) because there is
+  // no natural single "submit" here — five milestones, each with its own
+  // Save and its own photo upload — so the modal is built once with real
+  // data, the same reason allocateOverpaymentModal() fetches first too.
+  async function openMilestonesModal(projectId, projectName) {
+    var milestones = await api('/projects/' + projectId + '/milestones');
+
+    var panel = R.modal({
+      title: esc(projectName) + ' — Construction progress',
+      wide: true,
+      body: milestones.map(milestoneEditor).join(''),
+      // No submitLabel — five independent Save buttons, not one shared
+      // submit (see openAccountModal()'s own comment on this exact
+      // pattern). The no-op onSubmit stops Enter in a date/number field
+      // from silently closing the dialog.
+      onSubmit: function () {},
+    });
+
+    wireMilestoneEditors(panel, projectId, projectName);
+  }
+
+  function milestoneEditor(m) {
+    var photos = Array.isArray(m.photos) ? m.photos : [];
+    return '<div class="milestone-editor mb-3" data-milestone-row="' + esc(m.id) + '">' +
+      '<div class="flex-row justify-between align-start">' +
+        '<div class="cell-primary">' + esc(m.name) + '</div>' +
+        badge(m.status) +
+      '</div>' +
+      '<div class="field-row mt-1">' +
+        '<div class="field"><label>Target date</label>' +
+          '<input class="input" type="date" data-field="target_date" value="' + esc(m.target_date || '') + '"></div>' +
+        '<div class="field"><label>Completion %</label>' +
+          '<input class="input" type="number" min="0" max="100" data-field="completion_percentage" value="' + esc(m.completion_percentage) + '"></div>' +
+      '</div>' +
+      (photos.length
+        ? '<div class="milestone-photos mt-1">' + photos.map(function (p) {
+            return '<img class="milestone-thumb" src="' + esc(p.url) + '" alt="' + esc(m.name) + ' photo">';
+          }).join('') + '</div>'
+        : '') +
+      '<div class="flex-row gap-8 mt-1">' +
+        '<button class="btn-quiet" type="button" data-save-milestone="' + esc(m.id) + '">Save</button>' +
+        (photos.length < 10
+          ? '<button class="btn-quiet" type="button" data-pick-photo="' + esc(m.id) + '">Add photo</button>' +
+            '<input type="file" class="hidden" data-photo-file="' + esc(m.id) + '" accept="image/jpeg,image/png,image/webp" multiple>'
+          : '<span class="page-sub">10 photos — the most this milestone can hold</span>') +
+      '</div>' +
+    '</div>';
+  }
+
+  // The modal lives in its own overlay outside #view (see realestate.js's
+  // modal()), so R.reload() — which only re-renders the Projects screen
+  // behind it — would leave the open dialog showing stale data after a
+  // save or an upload. Closing and reopening with a fresh fetch is the
+  // straightforward way to keep the two in sync; the Projects list behind
+  // it also gets a reload so its own state (nothing today, but future
+  // fields might) is not left stale either.
+  function wireMilestoneEditors(panel, projectId, projectName) {
+    var root = panel.root;
+
+    R.qsa('[data-save-milestone]', root).forEach(function (button) {
+      button.addEventListener('click', async function () {
+        var row = button.closest('[data-milestone-row]');
+        var milestoneId = button.dataset.saveMilestone;
+        var payload = {
+          target_date: R.qs('[data-field="target_date"]', row).value || null,
+          completion_percentage: Number(R.qs('[data-field="completion_percentage"]', row).value || 0),
+        };
+        button.disabled = true;
+        try {
+          await api.patch('/projects/' + projectId + '/milestones/' + milestoneId, payload);
+          toast(
+            payload.completion_percentage === 100
+              // A milestone reaching 100% notifies every buyer in the
+              // project — worth a clear beat rather than folding into a
+              // generic "saved" toast.
+              ? 'Milestone saved — buyers in this project are being notified.'
+              : 'Milestone saved.',
+            'ok'
+          );
+          panel.close();
+          openMilestonesModal(projectId, projectName);
+        } catch (err) {
+          toast(err.message, 'err');
+          button.disabled = false;
+        }
+      });
+    });
+
+    R.qsa('[data-pick-photo]', root).forEach(function (button) {
+      button.addEventListener('click', function () {
+        R.qs('[data-photo-file="' + button.dataset.pickPhoto + '"]', root).click();
+      });
+    });
+
+    R.qsa('[data-photo-file]', root).forEach(function (input) {
+      input.addEventListener('change', async function () {
+        var files = Array.prototype.slice.call(input.files || []);
+        if (!files.length) return;
+        var milestoneId = input.dataset.photoFile;
+
+        var photos = [];
+        for (var i = 0; i < files.length; i++) {
+          var file = files[i];
+          if (file.size > 6 * 1024 * 1024) {
+            toast(file.name + ' is larger than 6MB — skipped.', 'err');
+            continue;
+          }
+          var base64 = await new Promise(function (resolve, reject) {
+            var reader = new FileReader();
+            reader.onload = function () { resolve(String(reader.result).split(',')[1]); };
+            reader.onerror = function () { reject(new Error('could not be read')); };
+            reader.readAsDataURL(file);
+          });
+          photos.push({ content: base64, content_type: file.type });
+        }
+        input.value = '';
+        if (!photos.length) return;
+
+        try {
+          await api.post('/projects/' + projectId + '/milestones/' + milestoneId + '/photos', { photos: photos });
+          toast('Photo' + (photos.length > 1 ? 's' : '') + ' added.', 'ok');
+          panel.close();
+          openMilestonesModal(projectId, projectName);
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
     });
   }
 
@@ -1431,6 +1599,24 @@
   /* ══ BUYERS ═════════════════════════════════════════════════════════════ */
   var CUSTOMERS_PER_PAGE = 50;
 
+  // SECTION 3 — mirrors src/services/creditScoreService.js's tier() exactly
+  // (80/60/40 breakpoints, same reasoning there for reusing moss on both
+  // of the top two tiers rather than inventing a fourth colour this
+  // product's palette does not otherwise have).
+  function creditTier(score) {
+    if (score == null) return null;
+    if (score >= 80) return { key: 'excellent', label: 'Excellent' };
+    if (score >= 60) return { key: 'good', label: 'Good' };
+    if (score >= 40) return { key: 'fair', label: 'Fair' };
+    return { key: 'at_risk', label: 'At risk' };
+  }
+
+  function creditBadge(score) {
+    var t = creditTier(score);
+    if (!t) return '<span class="page-sub">—</span>';
+    return '<span class="badge credit-' + t.key + '">' + score + ' · ' + esc(t.label) + '</span>';
+  }
+
   R.screens.customers = {
     render: async function (view, params, query) {
       // #/customers/<id> opens the buyer straight from a search result.
@@ -1441,21 +1627,42 @@
 
       var search = query.q || '';
       var customers = await api('/customers' + (search ? '?search=' + encodeURIComponent(search) : ''));
+      // null for Documentation (server-side stripped, same as any amount) —
+      // the filter row only draws once there is a real score to filter by.
+      var scoresVisible = customers.some(function (c) { return c.credit_score != null; });
+      var creditFilter = query.credit || '';
       var page = 1;
 
       function renderPage() {
-        var p = paginate(customers, CUSTOMERS_PER_PAGE, page);
+        var filtered = creditFilter
+          ? customers.filter(function (c) {
+              var t = creditTier(c.credit_score);
+              return t && t.key === creditFilter;
+            })
+          : customers;
+
+        var p = paginate(filtered, CUSTOMERS_PER_PAGE, page);
         page = p.page;
 
         view.innerHTML =
-          head('Buyers', R.plural(customers.length, 'buyer') + (search ? ' matching “' + search + '”' : ''),
+          head('Buyers', R.plural(filtered.length, 'buyer') + (search ? ' matching “' + search + '”' : ''),
             '<button class="btn" id="btn-export-buyers">Export CSV</button>' +
             '<button class="btn" id="btn-import-buyers">Import CSV</button>' +
             '<button class="btn primary" id="btn-new-buyer">Add buyer</button>') +
 
+          (scoresVisible
+            ? '<div class="filter-row">' +
+                [['', 'All'], ['excellent', 'Excellent'], ['good', 'Good'], ['fair', 'Fair'], ['at_risk', 'At risk']]
+                  .map(function (t) {
+                    return '<button class="pill' + (creditFilter === t[0] ? ' is-on' : '') + '" data-credit-filter="' + t[0] + '">' + t[1] + '</button>';
+                  }).join('') +
+              '</div>'
+            : '') +
+
           card(null, table(
             [{ label: 'Name' }, { label: 'Phone' }, { label: 'Email', hideMobile: true },
-              { label: 'Source', hideMobile: true }, { label: 'Added', hideMobile: true }, { label: '' }],
+              { label: 'Source', hideMobile: true }, { label: 'Added', hideMobile: true },
+              { label: 'Credit score', hideMobile: true }, { label: '' }],
             p.slice,
             function (c) {
               return '<tr class="is-clickable" data-open="' + esc(c.id) + '">' +
@@ -1464,6 +1671,7 @@
                 '<td class="muted hide-mobile">' + esc(c.email || '—') + '</td>' +
                 '<td class="muted hide-mobile">' + esc(c.source || '—') + '</td>' +
                 '<td class="muted hide-mobile">' + esc(fmtDate(c.created_at)) + '</td>' +
+                '<td class="hide-mobile">' + creditBadge(c.credit_score) + '</td>' +
                 // data-stop keeps the row's own click handler from firing and
                 // opening the drawer behind the confirmation.
                 '<td class="right">' + (R.can('recycle.delete')
@@ -1473,7 +1681,7 @@
               '</tr>';
             },
             {
-              emptyTitle: search ? 'Nobody matched that' : 'No buyers yet',
+              emptyTitle: search ? 'Nobody matched that' : creditFilter ? 'Nobody in this tier' : 'No buyers yet',
               emptyHint: search ? 'Try a phone number or part of a surname.' : 'Add them one at a time, or import the list you already have.',
             }
           ), { flush: true }) +
@@ -1488,6 +1696,14 @@
 
         R.onClick(view, '[data-delete-customer]', async function (button) {
           await deleteModal('customers', button.dataset.deleteCustomer, button.dataset.label);
+        });
+
+        R.qsa('[data-credit-filter]', view).forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            creditFilter = btn.dataset.creditFilter;
+            page = 1;
+            renderPage();
+          });
         });
 
         R.qs('#btn-new-buyer', view).addEventListener('click', customerModal);
@@ -1527,11 +1743,21 @@
             '<option value="">Not recorded</option>' +
             ['referral', 'walk-in', 'instagram', 'facebook', 'whatsapp', 'billboard', 'agent', 'website', 'other']
               .map(function (s) { return '<option value="' + s + '">' + s.charAt(0).toUpperCase() + s.slice(1) + '</option>'; }).join('') +
-          '</select></div>',
+          '</select></div>' +
+        // SECTION 5 — a DIFFERENT thing from the "How did they find you?"
+        // dropdown above: this is another buyer's actual referral_code,
+        // which links referred_by_customer_id and opens the referral
+        // reward workflow. Optional and separate on purpose — "referral"
+        // as a source is just a label; a code is a specific person who
+        // gets credit.
+        '<div class="field"><label for="c-referral">Referred by (code, optional)</label>' +
+          '<input class="input" id="c-referral" name="referral_code" placeholder="e.g. 7K2QX9LM" ' +
+            'style="text-transform:uppercase"></div>',
       submitLabel: 'Add buyer',
       onSubmit: async function (form, close) {
         var v = R.values(form);
         if (!v.full_name) throw new Error('A name is required.');
+        if (!v.referral_code) delete v.referral_code;
         await api.post('/customers', v);
         close();
         toast('Buyer added.', 'ok');
@@ -1698,6 +1924,12 @@
       var credit = c.unallocated_credit;
 
       panel.body.innerHTML =
+        // SECTION 3 — null for Documentation (server-side stripped, same as
+        // any amount on this drawer) rather than a fourth "no data" state.
+        (c.credit_score != null
+          ? '<div class="mb-2">' + creditBadge(c.credit_score) + '</div>'
+          : '') +
+
         // A credit from an overpayment that nobody has allocated yet stays
         // visible every time this drawer is opened, not just in the moment it
         // happened — otherwise it is forgotten the instant the drawer closes.
@@ -2136,6 +2368,12 @@
   // (including "no available units" / "add a buyer first" below) toasted
   // automatically instead of each site needing its own .catch().
   async function reservationModal(preset) {
+    // SECTION 7 — the id of the last recommendation shown (if any) and
+    // whether the rep clicked "Use this" on it, so onSubmit below can log
+    // the outcome once it knows whether a reservation actually resulted.
+    var currentRecommendation = null;
+    var recommendationAccepted = false;
+
     var results = await Promise.all([
       api('/units?status=available'),
       api('/customers'),
@@ -2212,6 +2450,13 @@
               '<input class="input" id="r-start" name="start_date" type="date" value="' + R.todayISO() + '"></div>' +
           '</div>' +
           '<p class="field-hint" id="r-preview"></p>' +
+
+          // SECTION 7 — needs both a buyer and a unit picked (the
+          // recommendation is built from THIS unit's price and THIS buyer's
+          // credit score), so it stays disabled until both selects have a
+          // value — see wirePlanRecommendation().
+          '<button class="btn-quiet mb-2" type="button" id="r-ai-recommend" disabled>AI Recommendation</button>' +
+          '<div class="hidden" id="r-ai-suggestion"></div>' +
         '</div>' +
 
         // Rental: always has a rent schedule — "Monthly rent amount" and
@@ -2268,7 +2513,20 @@
           };
         }
 
-        await api.post('/reservations', payload);
+        var created = await api.post('/reservations', payload);
+
+        // SECTION 7 — logs the outcome regardless of which way it went:
+        // accepted (this reservation is the one it produced) or shown and
+        // not used. Never blocks the reservation itself on this call.
+        if (currentRecommendation) {
+          try {
+            await api.patch('/reservations/plan-recommendations/' + currentRecommendation.id, {
+              accepted: recommendationAccepted,
+              reservation_id: recommendationAccepted ? created.reservation.id : null,
+            });
+          } catch (err) { /* logging the decision must not block a reservation that already exists */ }
+        }
+
         close();
         toast(v.property_type === 'rental' ? 'Tenancy created.' : 'Reservation created.', 'ok');
         R.reload();
@@ -2327,6 +2585,63 @@
       R.el('r-has-plan-row').classList.toggle('hidden', rental);
       R.el('r-plan').classList.toggle('hidden', rental || !R.el('r-has-plan').checked);
       if (rental) updateRentalPreview();
+    });
+
+    // SECTION 7 — needs a real unit AND a real buyer picked first (the
+    // recommendation is built from this unit's price and this buyer's own
+    // credit score), so the button stays disabled until both selects have a
+    // value, same reasoning "New reservation" itself requires both.
+    var aiButton = R.el('r-ai-recommend');
+    var suggestionBox = R.el('r-ai-suggestion');
+    var customerSelect = R.el('r-customer');
+    var updateAiButtonState = function () {
+      aiButton.disabled = !unitSelect.value || !customerSelect.value;
+    };
+    unitSelect.addEventListener('change', updateAiButtonState);
+    customerSelect.addEventListener('change', updateAiButtonState);
+    updateAiButtonState();
+
+    aiButton.addEventListener('click', async function () {
+      aiButton.disabled = true;
+      aiButton.classList.add('is-working');
+      try {
+        var rec = await api.post('/reservations/plan-recommendation', {
+          customer_id: customerSelect.value, unit_id: unitSelect.value,
+        });
+        currentRecommendation = rec;
+        recommendationAccepted = false;
+        suggestionBox.classList.remove('hidden');
+        suggestionBox.innerHTML =
+          '<div class="notice info mt-1">' +
+            '<div class="flex-row justify-between align-start gap-10">' +
+              '<div>' +
+                '<b>' + rec.recommended_installments + ' ' + esc(rec.recommended_frequency) + ' installments, ' +
+                  rec.recommended_deposit_percent + '% deposit</b>' +
+                '<div class="page-sub mt-1">' + esc(rec.reasoning) + '</div>' +
+                (rec.generated_by === 'fallback' ? '<div class="page-sub mt-1">Rule-based suggestion — AI is not configured for this workspace.</div>' : '') +
+              '</div>' +
+              '<button class="icon-btn" type="button" id="r-ai-dismiss" aria-label="Dismiss">×</button>' +
+            '</div>' +
+            '<div class="btn-row mt-1"><button class="btn-quiet" type="button" id="r-ai-use">Use this</button></div>' +
+          '</div>';
+
+        R.qs('#r-ai-dismiss', suggestionBox).addEventListener('click', function () {
+          suggestionBox.classList.add('hidden');
+          suggestionBox.innerHTML = '';
+        });
+        R.qs('#r-ai-use', suggestionBox).addEventListener('click', function () {
+          R.el('r-count').value = rec.recommended_installments;
+          R.el('r-freq').value = rec.recommended_frequency;
+          recommendationAccepted = true;
+          updatePreview();
+          toast('Plan fields updated. Deposit suggestion (' + rec.recommended_deposit_percent + '%) is not auto-recorded — collect it as a separate payment if the buyer pays it upfront.', 'ok');
+        });
+      } catch (err) {
+        toast(err.message, 'err');
+      } finally {
+        aiButton.disabled = false;
+        aiButton.classList.remove('is-working');
+      }
     });
 
     R.el('r-has-plan').addEventListener('change', function (e) {
@@ -3009,8 +3324,8 @@
       var documents = results[0], reservations = results[1];
 
       view.innerHTML =
-        head('Documents', 'Allocation letters and receipts, stored privately and served through short-lived links.',
-          '<button class="btn primary" id="btn-new-doc">New allocation letter</button>') +
+        head('Documents', 'Allocation letters, legal documents and receipts, stored privately and served through short-lived links.',
+          '<button class="btn primary" id="btn-new-doc">New document</button>') +
 
         card(null, table(
           // Type and Buyer used to be two separate columns — on a phone,
@@ -3026,15 +3341,24 @@
           function (d) {
             var reservation = d.re_reservations || {};
             var unit = reservation.re_units || {};
+            // SECTION 8 — a generated-but-not-yet-signed legal document can
+            // have its signing link resent (re-runs /generate, which always
+            // re-issues and re-sends one — documentService.generateDocument).
+            var signable = ['deed_of_assignment', 'subscriber_agreement', 'power_of_attorney'].indexOf(d.doc_type) !== -1;
             return '<tr>' +
               '<td class="cell-primary">' + esc(String(d.doc_type).replace(/_/g, ' ')) +
                 '<div class="cell-meta">' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</div></td>' +
               '<td class="muted hide-mobile">' + esc(unit.unit_number || '—') + '</td>' +
               '<td>' + badge(d.status) + '</td>' +
               '<td class="muted hide-mobile">' + esc(d.generated_at ? fmtDate(d.generated_at) : '—') + '</td>' +
-              '<td class="right nowrap">' + (d.status === 'generated'
-                ? '<button class="btn-quiet" data-download="' + esc(d.id) + '">Download</button>'
-                : '<button class="btn-quiet" data-generate="' + esc(d.id) + '">Generate</button>') + '</td>' +
+              '<td class="right nowrap">' +
+                (d.status === 'generated' || d.status === 'signed'
+                  ? '<button class="btn-quiet" data-download="' + esc(d.id) + '">Download</button>'
+                  : '<button class="btn-quiet" data-generate="' + esc(d.id) + '">Generate</button>') +
+                (signable && d.status === 'generated'
+                  ? ' <button class="btn-quiet" data-generate="' + esc(d.id) + '">Resend link</button>'
+                  : '') +
+              '</td>' +
             '</tr>';
           },
           { emptyTitle: 'No documents yet', emptyHint: 'Allocation letters are generated per reservation; receipts appear automatically when a payment is recorded.' }
@@ -3043,7 +3367,7 @@
       R.onClick(view, '[data-generate]', async function (button) {
         var result = await api.post('/documents/' + button.dataset.generate + '/generate');
         R.openFile(result.download_url);
-        toast('Document generated.', 'ok');
+        toast(result.signing_url ? 'Signing link sent to the buyer.' : 'Document generated.', 'ok');
         R.reload();
       });
 
@@ -3064,9 +3388,26 @@
           };
         });
 
+        // SECTION 8 — deed_of_assignment, subscriber_agreement and
+        // power_of_attorney join allocation_letter as choices here.
+        // lease_agreement/other are left off this list on purpose: real,
+        // creatable doc_types with no template yet (routes/documents.js's
+        // own comment) — offering them here would just walk a rep into the
+        // "no template for this yet" error on generate.
+        var DOC_TYPE_OPTIONS = [
+          ['allocation_letter', 'Allocation letter'],
+          ['deed_of_assignment', 'Deed of assignment'],
+          ['subscriber_agreement', "Subscriber's agreement"],
+          ['power_of_attorney', 'Power of attorney'],
+        ];
+
         var panel = R.modal({
-          title: 'New allocation letter',
+          title: 'New document',
           body:
+            '<div class="field"><label for="doc-type">Document type</label>' +
+              '<select class="select" id="doc-type" name="doc_type">' +
+                DOC_TYPE_OPTIONS.map(function (t) { return '<option value="' + t[0] + '">' + t[1] + '</option>'; }).join('') +
+              '</select></div>' +
             // Focused first (modal() focuses the first real input), so typing
             // to narrow the list is possible the instant the dialog opens —
             // useful the moment a project has more than a handful of buyers.
@@ -3074,19 +3415,25 @@
               '<input class="input" id="doc-search" type="text" placeholder="Type a name to filter…" autocomplete="off"></div>' +
             '<div class="field"><label for="doc-res">Reservation</label>' +
               '<select class="select" id="doc-res" name="reservation_id">' + options(list, 'id', 'label') + '</select></div>' +
-            '<p class="field-hint">The letter uses the letterhead from Settings. Set your company name and logo there first if you have not.</p>',
+            '<p class="field-hint" id="doc-type-hint">The letter uses the letterhead from Settings. Set your company name and logo there first if you have not.</p>',
           submitLabel: 'Create and generate',
           onSubmit: async function (form, close) {
+            var v = R.values(form);
             var created = await api.post('/documents', {
-              reservation_id: R.values(form).reservation_id,
-              doc_type: 'allocation_letter',
+              reservation_id: v.reservation_id,
+              doc_type: v.doc_type,
             });
             close();
-            toast('Generating the letter…');
+            toast('Generating…');
             try {
               var result = await api.post('/documents/' + created.id + '/generate');
               R.openFile(result.download_url);
-              toast('Allocation letter ready.', 'ok');
+              toast(
+                result.signing_url
+                  ? 'Document ready — a signing link has been sent to the buyer.'
+                  : 'Document ready.',
+                'ok'
+              );
             } catch (err) {
               // Puppeteer is absent on some runtimes. The document row still
               // exists, so say what happened rather than pretending it worked.
@@ -3094,6 +3441,13 @@
             }
             R.reload();
           },
+        });
+
+        R.qs('#doc-type', panel.root).addEventListener('change', function (e) {
+          var signable = e.target.value !== 'allocation_letter';
+          R.el('doc-type-hint').textContent = signable
+            ? 'The buyer will automatically be sent a link by email/WhatsApp to review and sign this document.'
+            : 'The letter uses the letterhead from Settings. Set your company name and logo there first if you have not.';
         });
 
         // Client-side only — the list is already loaded in full above, so
@@ -3117,6 +3471,120 @@
             if (firstVisible) firstVisible.selected = true;
           }
         });
+      });
+    },
+  };
+
+  /* ══ GROUP DASHBOARD (SECTION 1 — multi-branch / multi-company) ═════════
+     Only reachable via the sidebar's Group link, itself only shown when
+     GET /auth/me reported is_group_owner. The route still works if typed
+     directly by someone who is not a group owner — the API answers
+     is_group_owner:false rather than 403ing, and this screen renders the
+     "create a group" empty state instead, same as any other owner-only
+     screen degrades gracefully rather than assuming the nav already
+     gatekept it. */
+  R.screens.group = {
+    render: async function (view) {
+      var data = await api('/group/dashboard');
+
+      if (!data.is_group_owner) {
+        view.innerHTML = head('Group dashboard', 'A consolidated view across every branch workspace you own.') +
+          card(null, R.emptyState(
+            'You do not own a group yet',
+            'A group rolls up collections, buyers, overdue and GDV across several branch workspaces you own — Mshel Abuja, Mshel Lagos, Mshel Kano under one Mshel Homes Group, for example.',
+            '<button class="btn primary" id="btn-create-group">Create a group</button>'
+          ));
+
+        R.qs('#btn-create-group', view).addEventListener('click', function () {
+          R.modal({
+            title: 'Create a group',
+            body: '<div class="field"><label for="grp-name">Group name</label>' +
+              '<input class="input" id="grp-name" name="name" required placeholder="Mshel Homes Group"></div>',
+            submitLabel: 'Create',
+            onSubmit: async function (form, close) {
+              await api.post('/group', { name: R.values(form).name });
+              close();
+              toast('Group created.', 'ok');
+              R.reload();
+            },
+          });
+        });
+        return;
+      }
+
+      var totals = data.totals;
+      var branches = data.branches;
+      var branchIds = branches.map(function (b) { return b.branch_id; });
+      // Candidates for "Add branch": workspaces this person owns outright
+      // that are not already rolled into this group. me.workspaces (from
+      // GET /auth/me, already loaded into RE.state.user) is the same list
+      // the workspace switcher itself draws from — no second fetch needed.
+      var ownedElsewhere = (R.state.user.workspaces || []).filter(function (w) {
+        return w.role === 'owner' && branchIds.indexOf(w.team_id) === -1;
+      });
+
+      view.innerHTML = head('Group dashboard', 'Consolidated across ' + branches.length +
+          (branches.length === 1 ? ' branch.' : ' branches.'),
+          '<button class="btn-quiet" id="btn-add-branch">Add branch</button>') +
+
+        '<div class="grid cols-4 mb-2">' +
+          stat('Total buyers', String(totals.total_buyers)) +
+          stat('Total collections', naira(totals.collected_total), { tone: 'moss' }) +
+          stat('Total overdue', naira(totals.receivables_overdue), { tone: totals.receivables_overdue ? 'clay' : null }) +
+          stat('Total GDV', naira(totals.gross_development_value)) +
+        '</div>' +
+
+        card('By branch', table(
+          [{ label: 'Branch' }, { label: 'Buyers', num: true, hideMobile: true },
+            { label: 'Collected', num: true }, { label: 'Overdue', num: true },
+            { label: 'GDV', num: true, hideMobile: true }, { label: '' }],
+          branches,
+          function (b) {
+            return '<tr>' +
+              '<td class="cell-primary">' + esc(b.name) + '</td>' +
+              '<td class="num hide-mobile">' + b.total_buyers + '</td>' +
+              '<td class="num moss">' + naira(b.collected_total) + '</td>' +
+              '<td class="num ' + (b.receivables_overdue ? 'clay' : 'muted') + '">' + naira(b.receivables_overdue) + '</td>' +
+              '<td class="num hide-mobile">' + naira(b.gross_development_value) + '</td>' +
+              '<td class="right"><button class="btn-quiet" data-remove-branch="' + esc(b.branch_id) + '" data-name="' + esc(b.name) + '">Remove</button></td>' +
+            '</tr>';
+          },
+          { emptyTitle: 'No branches yet', emptyHint: 'Add a workspace you own to start rolling up its numbers here.' }
+        ), { flush: true });
+
+      R.qs('#btn-add-branch', view).addEventListener('click', function () {
+        if (!ownedElsewhere.length) {
+          return toast('Every workspace you own is already a branch of this group.', 'err');
+        }
+        R.modal({
+          title: 'Add branch',
+          body: '<div class="field"><label for="grp-branch">Workspace</label>' +
+            '<select class="select" id="grp-branch" name="team_id">' +
+              ownedElsewhere.map(function (w) {
+                return '<option value="' + esc(w.team_id) + '">' + esc(w.name) + '</option>';
+              }).join('') +
+            '</select></div>' +
+            '<p class="field-hint">The branch keeps its own buyers, payments and documents — only its totals join this dashboard.</p>',
+          submitLabel: 'Add',
+          onSubmit: async function (form, close) {
+            await api.post('/group/branches', { group_id: data.groups[0].id, team_id: R.values(form).team_id });
+            close();
+            toast('Branch added.', 'ok');
+            R.reload();
+          },
+        });
+      });
+
+      R.onClick(view, '[data-remove-branch]', async function (button) {
+        var ok = await R.confirm({
+          title: 'Remove ' + button.dataset.name + '?',
+          message: 'This branch keeps every buyer, payment and document exactly as they are — it just stops being counted in this group’s totals.',
+          confirmLabel: 'Remove',
+        });
+        if (!ok) return;
+        await api('/group/branches/' + button.dataset.removeBranch, { method: 'DELETE' });
+        toast('Branch removed from the group.', 'ok');
+        R.reload();
       });
     },
   };
@@ -3307,13 +3775,17 @@
       var canCollections = R.can('reports.collections');
       var canRental = R.can('reports.rental');
       var canExport = R.can('reports.export');
+      var canReferrals = R.can('reports.referrals');
+      var canForecast = R.can('reports.forecast');
 
       var results = await Promise.all([
         canInvestor ? api('/reports/investor' + scope) : Promise.resolve(null),
         canCollections ? api('/reports/collections?months=12') : Promise.resolve(null),
         canRental ? api('/reports/rental') : Promise.resolve(null),
+        canReferrals ? api('/reports/referrals') : Promise.resolve(null),
+        canForecast ? api('/reports/forecast') : Promise.resolve(null),
       ]);
-      var report = results[0], collections = results[1], rental = results[2];
+      var report = results[0], collections = results[1], rental = results[2], referralStats = results[3], forecast = results[4];
       var t = report && report.totals;
       // Only a developer who actually runs a rental portfolio sees this
       // section — nothing to report on is nothing to show.
@@ -3340,6 +3812,49 @@
               '<button class="btn" data-export="payments">Export payments</button>' +
               '<button class="btn primary" id="btn-print">Print / PDF</button>'
             : '') +
+
+        // SECTION 6 — owner-only, same tier as the investor view it sits
+        // above. forecast is null on the very first load of a workspace with
+        // no OPENAI_API_KEY AND no cached row yet — getOrGenerateForecast
+        // always returns SOMETHING (a rule-based projection at minimum), so
+        // null here only means the fetch itself hasn't resolved.
+        (canForecast && forecast
+          ? card('AI sales forecast',
+              '<div class="flex-row justify-between align-start gap-10 mb-2">' +
+                '<p class="page-sub">' + (forecast.generated_by === 'fallback' ? 'Rule-based projection' : 'AI-generated') +
+                  ' · ' + esc(fmtDate(forecast.generated_at)) + (forecast.cached ? ' · cached' : '') + '</p>' +
+                '<button class="btn-quiet" id="btn-regenerate-forecast">Regenerate</button>' +
+              '</div>' +
+              '<div class="grid cols-3 mb-2">' +
+                stat('Next month', nairaShort(forecast.payload.projected_collections_3mo.month_1), { tone: 'gold' }) +
+                stat('Month 2', nairaShort(forecast.payload.projected_collections_3mo.month_2)) +
+                stat('Month 3', nairaShort(forecast.payload.projected_collections_3mo.month_3)) +
+              '</div>' +
+              '<p class="page-sub mb-2">' + esc(forecast.payload.projected_collections_3mo.reasoning) + '</p>' +
+
+              (forecast.payload.project_completions.length
+                ? '<div class="page-sub label-caps mb-1">Projected completion, at current collection rate</div>' +
+                  forecast.payload.project_completions.map(function (p) {
+                    return '<div class="flex-row justify-between gap-10 mb-1">' +
+                      '<span>' + esc(p.project_name) + '</span>' +
+                      '<span class="mono">' + (p.projected_completion_date ? esc(fmtDate(p.projected_completion_date)) : 'Not enough data') + '</span>' +
+                    '</div>';
+                  }).join('')
+                : '') +
+
+              (forecast.payload.default_risks.length
+                ? '<div class="page-sub label-caps mt-2 mb-1">Buyers most likely to default within 60 days</div>' +
+                  forecast.payload.default_risks.map(function (r) {
+                    return '<div class="mb-1"><b>' + esc(r.customer_name) + '</b><div class="page-sub">' + esc(r.risk_reason) + '</div></div>';
+                  }).join('')
+                : '<p class="page-sub mt-2">No buyers currently flagged as at risk.</p>') +
+
+              (forecast.payload.recommended_actions.length
+                ? '<div class="page-sub label-caps mt-2 mb-1">Recommended actions</div>' +
+                  '<ul class="mb-0">' + forecast.payload.recommended_actions.map(function (a) { return '<li>' + esc(a) + '</li>'; }).join('') + '</ul>'
+                : ''),
+              { flush: false })
+          : '') +
 
         (canInvestor
           ? '<div class="grid cols-4 mb-2">' +
@@ -3397,6 +3912,22 @@
             ), { flush: true })
           : '') +
 
+        // SECTION 5 — cash-bonus totals are deliberately absent (see
+        // routes/reports.js's own comment): cash leaves this product's
+        // bookkeeping the moment it's handed over, so only what "credit"
+        // actually moved is summed here.
+        (canReferrals
+          ? card('Referral network',
+              '<div class="grid cols-3">' +
+                stat('Total referrals', String(referralStats.total_referrals)) +
+                stat('Conversion rate', referralStats.conversion_rate + '%', {
+                  sub: referralStats.completed_referrals + ' converted',
+                  tone: referralStats.conversion_rate >= 30 ? 'moss' : null,
+                }) +
+                stat('Credits given', nairaShort(referralStats.total_credits_given), { tone: 'gold' }) +
+              '</div>', { flush: false })
+          : '') +
+
         // "How full is the building" and "how much sold" are different
         // questions with different answers — folding rental units into the
         // sales occupancy numbers above would answer neither correctly.
@@ -3450,6 +3981,12 @@
         await renewTenancyModal(button.dataset.renew, button.dataset.buyerName);
       });
 
+      R.onClick(view, '#btn-regenerate-forecast', async function () {
+        await api('/reports/forecast?regenerate=true');
+        toast('Forecast regenerated.', 'ok');
+        R.reload();
+      });
+
       // Your data, in a file you keep. Also the only backup a developer
       // controls without a Supabase login.
       R.onClick(view, '[data-export]', async function (button) {
@@ -3466,17 +4003,81 @@
       var tab = query.tab || 'workspace';
 
       var tabs = '<div class="filter-row">' +
-        [['workspace', 'Workspace'], ['team', 'Team & reps'],
+        [['workspace', 'Workspace'], ['team', 'Team & reps'], ['templates', 'Document templates'],
           ['activity', 'Activity log'], ['bin', 'Bin']].map(function (t) {
           return '<a class="pill' + (tab === t[0] ? ' is-on' : '') + '" href="#/settings?tab=' + t[0] + '">' + t[1] + '</a>';
         }).join('') + '</div>';
 
       if (tab === 'activity') return activityTab(view, tabs);
       if (tab === 'team') return teamTab(view, tabs);
+      if (tab === 'templates') return templatesTab(view, tabs);
       if (tab === 'bin') return binTab(view, tabs, query.of || 'customers');
       return workspaceTab(view, tabs);
     },
   };
+
+  // SECTION 8 — document template editor. Owner-only content behind a tab
+  // anyone who can open Settings can click through to (same as every other
+  // owner-gated card on the Workspace tab) — the API itself (settings.write)
+  // is the real gate; this just avoids a confusing empty screen for someone
+  // who taps the tab without the permission to save anything here.
+  async function templatesTab(view, tabs) {
+    view.innerHTML = head('Settings', 'The default Nigerian-law template for each legal document type, customizable per workspace.') + tabs +
+      (R.can('settings.write')
+        ? '<div class="card"><div class="card-body">' +
+            '<div class="field"><label for="tpl-select">Document type</label>' +
+              '<select class="select" id="tpl-select"></select></div>' +
+            '<div class="field"><label for="tpl-html">Template HTML</label>' +
+              '<textarea class="textarea mono-input" id="tpl-html" rows="18"></textarea>' +
+              '<p class="field-hint">Placeholders: <code>{{buyer_name}}</code>, <code>{{unit_number}}</code>, ' +
+                '<code>{{unit_type}}</code>, <code>{{project_name}}</code>, <code>{{project_location}}</code>, ' +
+                '<code>{{total_amount}}</code>, <code>{{date}}</code>, <code>{{company_name}}</code>, ' +
+                '<code>{{reference_number}}</code>, and <code>{{signature_block}}</code> — the buyer\'s actual ' +
+                'signature, which must appear somewhere in the template or saving is refused.</p>' +
+            '</div>' +
+            '<div class="btn-row"><button class="btn primary" id="tpl-save">Save</button>' +
+              '<button class="btn" id="tpl-reset">Reset to default</button></div>' +
+            '<p class="page-sub mt-1" id="tpl-status"></p>' +
+          '</div></div>'
+        : '<div class="card"><div class="card-body"><p class="muted">Only the workspace owner can customize document templates.</p></div></div>');
+
+    if (!R.can('settings.write')) return;
+
+    var templates = await api('/documents/templates');
+    var select = R.el('tpl-select');
+    select.innerHTML = templates.map(function (t) {
+      return '<option value="' + t.doc_type + '">' +
+        t.doc_type.replace(/_/g, ' ') + (t.is_custom ? ' (customized)' : ' (default)') + '</option>';
+    }).join('');
+
+    function renderCurrent() {
+      var t = templates.filter(function (x) { return x.doc_type === select.value; })[0];
+      R.el('tpl-html').value = t.template_html;
+      R.el('tpl-status').textContent = t.is_custom
+        ? 'This workspace has customized this template.'
+        : 'Using the shipped default template.';
+    }
+    renderCurrent();
+    select.addEventListener('change', renderCurrent);
+
+    R.onClick(view, '#tpl-save', async function () {
+      var updated = await api.put('/documents/templates/' + select.value, { template_html: R.el('tpl-html').value });
+      var idx = templates.findIndex(function (x) { return x.doc_type === select.value; });
+      templates[idx] = updated;
+      select.options[select.selectedIndex].text = select.value.replace(/_/g, ' ') + ' (customized)';
+      R.el('tpl-status').textContent = 'This workspace has customized this template.';
+      toast('Template saved.', 'ok');
+    });
+
+    R.onClick(view, '#tpl-reset', async function () {
+      var updated = await api.put('/documents/templates/' + select.value, { template_html: '' });
+      var idx = templates.findIndex(function (x) { return x.doc_type === select.value; });
+      templates[idx] = updated;
+      select.options[select.selectedIndex].text = select.value.replace(/_/g, ' ') + ' (default)';
+      renderCurrent();
+      toast('Reset to the default template.', 'ok');
+    });
+  }
 
   async function workspaceTab(view, tabs) {
     var settings = await api('/settings');
@@ -3521,6 +4122,24 @@
                   ? 'Configured, ending in ' + esc(settings.paystack_secret_key_last4) + '.'
                   : 'Not configured — card payments use the platform default account.') +
                 ' Only the workspace owner can change this.</p>')) +
+
+          // SECTION 5 — off (reward type 'none') until a developer opts in, so
+          // a workspace that never opens this card is never on the hook for a
+          // reward nobody configured — see migrations/024's default.
+          card('Referral rewards', '<p class="field-hint mb-2">Every buyer gets their own code automatically. ' +
+            'Choose what happens when someone they referred makes their first payment.</p>' +
+            '<form id="form-referrals">' +
+              '<div class="field"><label for="s-ref-type">Reward</label>' +
+                '<select class="select" id="s-ref-type" name="referral_reward_type">' +
+                  ['none', 'credit', 'cash'].map(function (t) {
+                    var labels = { none: 'No reward — track referrals only', credit: 'Balance credit (applied automatically)', cash: 'Cash bonus (paid manually — files a task for the owner)' };
+                    return '<option value="' + t + '"' + (settings.referral_reward_type === t ? ' selected' : '') + '>' + labels[t] + '</option>';
+                  }).join('') +
+                '</select></div>' +
+              '<div class="field"><label for="s-ref-amount">Reward amount (₦)</label>' +
+                '<input class="input" id="s-ref-amount" name="referral_reward_amount" type="number" min="0" step="0.01" value="' + esc(settings.referral_reward_amount || 0) + '"></div>' +
+              '<button class="btn primary mt-1" type="submit">Save reward</button>' +
+            '</form>') +
         '</div>' +
 
         '<div>' +
@@ -3591,6 +4210,32 @@
                   ? 'Configured, sender ID ' + esc(settings.termii_sender_id || '—') + '.'
                   : 'Not configured — texts send from Archta\'s default sender ID.') +
                 ' Only the workspace owner can change this.</p>')) +
+
+          // SECTION 5/9 — no platform-wide fallback the way Email/SMS have
+          // one (see notificationService.resolveWhatsAppCredentials) — a
+          // workspace without its own Meta Business account simply has no
+          // WhatsApp send capability yet, which is why there is no "Not
+          // configured, sends from the default" wording here.
+          card('WhatsApp',
+            (R.can('settings.write')
+              ? '<p class="field-hint mb-2">From a Meta Business app with WhatsApp Cloud API enabled. Powers referral notifications and the WhatsApp mini app — a buyer messaging this number can check their balance, see their next payment, pay online or get their receipt automatically.</p>' +
+                '<p class="field-hint mb-2">Webhook URL for the Meta App dashboard: <code>' + esc((window.__API_BASE__ || '') + '/webhooks/whatsapp') + '</code></p>' +
+                '<form id="form-whatsapp">' +
+                  '<div class="field"><label for="s-wa-phone">Phone number ID</label>' +
+                    '<input class="input" id="s-wa-phone" name="whatsapp_phone_number_id" value="' + esc(settings.whatsapp_phone_number_id || '') + '"></div>' +
+                  '<div class="field"><label for="s-wa-business">Business account ID</label>' +
+                    '<input class="input" id="s-wa-business" name="whatsapp_business_account_id" value="' + esc(settings.whatsapp_business_account_id || '') + '"></div>' +
+                  '<div class="field"><label for="s-wa-token">Access token</label>' +
+                    '<input class="input" id="s-wa-token" name="whatsapp_token" type="password" autocomplete="off" placeholder="' +
+                      (settings.whatsapp_configured ? 'Configured, ending in ' + esc(settings.whatsapp_token_last4) + ' — leave blank to keep' : 'EAAG…') + '">' +
+                    '<p class="field-hint">Never shown again once saved. Leave blank to keep the current token.</p></div>' +
+                  '<button class="btn primary mt-1" type="submit">Save</button>' +
+                '</form>'
+              : '<p class="muted">' +
+                (settings.whatsapp_configured
+                  ? 'Configured.'
+                  : 'Not configured — referral notifications will not reach buyers over WhatsApp.') +
+                ' Only the workspace owner can change this.</p>')) +
         '</div>' +
       '</div>';
 
@@ -3619,6 +4264,11 @@
         R.reload();
       });
     }
+
+    guardedSubmit(R.qs('#form-referrals', view), async function (form) {
+      await api.put('/settings', R.values(form));
+      toast('Referral reward saved.', 'ok');
+    });
 
     R.onClick(view, '#btn-test-paystack', async function () {
       var secretKey = R.qs('#s-pk-secret', view).value.trim();
@@ -3668,6 +4318,21 @@
       var result = await api.post('/settings/termii/test', { termii_api_key: apiKey, termii_sender_id: senderId, to: to });
       toast(result.valid ? 'Test text sent — check your phone.' : (result.reason || 'Could not send the test text.'), result.valid ? 'ok' : 'err');
     });
+
+    var whatsappForm = R.qs('#form-whatsapp', view);
+    if (whatsappForm) {
+      guardedSubmit(whatsappForm, async function (form) {
+        var v = R.values(form);
+        var payload = {
+          whatsapp_phone_number_id: v.whatsapp_phone_number_id || null,
+          whatsapp_business_account_id: v.whatsapp_business_account_id || null,
+        };
+        if (v.whatsapp_token) payload.whatsapp_token = v.whatsapp_token;
+        await api.put('/settings/whatsapp', payload);
+        toast('WhatsApp settings saved.', 'ok');
+        R.reload();
+      });
+    }
   }
 
   // Same disable-and-spin protection R.onClick already gives every button —

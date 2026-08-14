@@ -22,6 +22,7 @@ const { supabaseAdmin } = require('./src/middleware/orgContext');
 const reRoutes = require('./src/routes');
 const authRoutes = require('./src/routes/auth');
 const portalRoutes = require('./src/routes/portal');
+const signRoutes = require('./src/routes/sign');
 const webhookRoutes = require('./src/routes/webhooks');
 
 const app = express();
@@ -180,6 +181,12 @@ app.use('/api/auth', authRoutes);
 // token, and the two are not interchangeable in either direction (the portal
 // token carries aud:'re-portal', which the staff middleware never accepts).
 app.use('/api/portal', portalRoutes);
+
+// ── Document e-signature (SECTION 8) ────────────────────────────────────────
+// Also outside `authenticate` — same shape as the portal above, a buyer
+// holds a signed, document-scoped link (documentService.issueSigningUrl),
+// not a staff token.
+app.use('/api/sign', signRoutes);
 
 // ── API ────────────────────────────────────────────────────────────────────
 // authenticate populates req.user; orgContext (inside reRoutes) turns that

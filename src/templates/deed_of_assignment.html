@@ -1,0 +1,100 @@
+<!-- Deed of assignment — SECTION 8's default template, rendered by
+     src/services/documentService.js. An organization may replace this whole
+     file's HTML with its own via re_document_templates (Settings → Document
+     templates) — see PUT /documents/templates/:docType.
+
+     Placeholders are lowercase tokens in double braces (a DIFFERENT
+     convention from allocation_letter.html's UPPERCASE_BLOCK tokens,
+     deliberately: this file is meant to be read and edited by a business
+     owner in a Settings textarea, not only assembled by the service, so the
+     placeholder names match the plain-English vocabulary the product spec
+     itself uses — buyer_name, unit_number, total_amount).
+
+     {{signature_block}} is the one placeholder the service ALWAYS fills
+     itself regardless of which template (default or org override) is in
+     use — see fillPlaceholders()'s reserved-token handling — so an owner
+     editing this file cannot accidentally remove the buyer's actual
+     signature from the document that gets stored as evidence.
+
+     Every interpolated value is escaped before substitution. -->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 25mm 20mm; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; font-size: 11.5pt; line-height: 1.75; }
+  .letterhead { display: flex; justify-content: space-between; align-items: center; border-bottom: 3px double #1a1a1a; padding-bottom: 12px; margin-bottom: 32px; }
+  .letterhead .company { font-size: 15pt; font-weight: bold; letter-spacing: 0.5px; }
+  h1 { font-size: 13pt; text-align: center; text-decoration: underline; text-transform: uppercase; letter-spacing: 1px; margin: 28px 0 6px; }
+  .subtitle { text-align: center; font-size: 10.5pt; margin-bottom: 28px; }
+  .recital { margin: 10px 0; }
+  table.schedule { width: 100%; border-collapse: collapse; margin: 20px 0; }
+  table.schedule td { padding: 8px 12px; border: 1px solid #999; }
+  table.schedule td:first-child { font-weight: bold; width: 35%; background: #f5f5f0; }
+  .clause-title { font-weight: bold; margin-top: 22px; }
+  .execution { margin-top: 50px; }
+  .signature-block { margin-top: 40px; }
+  .signature-line { border-top: 1px solid #1a1a1a; width: 260px; padding-top: 6px; font-size: 10.5pt; margin-top: 46px; }
+  .witness-block { margin-top: 40px; font-size: 10.5pt; }
+  .fineprint { margin-top: 28px; font-size: 9.5pt; color: #555; }
+</style>
+</head>
+<body>
+  <div class="letterhead"><div class="company">{{company_name}}</div></div>
+
+  <h1>Deed of Assignment</h1>
+  <div class="subtitle">Ref: {{reference_number}} &nbsp;·&nbsp; {{date}}</div>
+
+  <p class="recital">THIS DEED OF ASSIGNMENT is made this {{date}} BETWEEN <strong>{{company_name}}</strong>
+  (hereinafter referred to as "the Assignor", which expression shall where the context so admits include its
+  successors-in-title and assigns) of the one part AND <strong>{{buyer_name}}</strong> (hereinafter referred to as
+  "the Assignee", which expression shall where the context so admits include his/her heirs, successors-in-title
+  and assigns) of the other part.</p>
+
+  <p class="clause-title">RECITALS</p>
+  <p class="recital">1. The Assignor is the developer and beneficial owner of the property known as
+  {{project_name}}, {{project_location}}.</p>
+  <p class="recital">2. The Assignee, at the Assignee's request, agreed to purchase and the Assignor agreed to
+  sell to the Assignee ALL THAT unit described in the Schedule below, at the consideration stated therein, which
+  the Assignor hereby acknowledges having received in full.</p>
+
+  <p class="clause-title">NOW THIS DEED WITNESSETH</p>
+  <p class="recital">In consideration of the sum stated in the Schedule below, the receipt of which the Assignor
+  hereby acknowledges, the Assignor as beneficial owner HEREBY ASSIGNS unto the Assignee ALL THAT the unit
+  particularly described in the Schedule below, TO HOLD the same unto the Assignee absolutely, subject to the
+  terms of the underlying Contract of Sale and to any encumbrance disclosed to the Assignee prior to execution.</p>
+
+  <table class="schedule">
+    <tr><td>Property / Development</td><td>{{project_line}}</td></tr>
+    <tr><td>Unit Number</td><td>{{unit_number}}</td></tr>
+    <tr><td>Unit Type</td><td>{{unit_type}}</td></tr>
+    <tr><td>Consideration</td><td>{{total_amount}}</td></tr>
+  </table>
+
+  <p class="recital">The Assignor covenants that it has good right and full power to assign the property in the
+  manner aforesaid, and that the Assignee shall peaceably hold and enjoy the property without any lawful
+  interruption by the Assignor or any person claiming through it, subject always to the completion of any
+  outstanding regulatory perfection of title.</p>
+
+  <div class="execution">
+    <p>IN WITNESS WHEREOF the parties have executed this Deed the day and year first above written.</p>
+
+    <div class="signature-line">Assignor — Authorised Signatory<br>{{company_name}}</div>
+
+    <div class="signature-block">
+      <div>Assignee — {{buyer_name}}</div>
+      {{signature_block}}
+    </div>
+
+    <div class="witness-block">
+      Witness Name: ____________________________<br>
+      Witness Signature: ____________________________<br>
+      Witness Address: ____________________________
+    </div>
+  </div>
+
+  <div class="fineprint">This deed is generated from Archta and reflects the terms on file as of {{date}}. It
+  does not constitute registered title until any applicable regulatory consent or registration is perfected.</div>
+</body>
+</html>

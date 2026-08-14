@@ -16,6 +16,9 @@ const { requirePermission } = require('../middleware/rbac');
 const { lagosToday } = require('../services/overdueService');
 const { toCsv } = require('../utils/csv');
 const { audit } = require('../services/auditService');
+const referrals = require('../services/referralService');
+const forecast = require('../services/forecastService');
+const { getInvestorReport } = require('../services/investorReportService');
 const router = express.Router();
 
 // A compromised low-privilege account (see CLAUDE.md's RBAC notes) could
@@ -38,6 +41,15 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Investor / partner summary. Optionally scoped to one project, because an
 // investor almost always backed ONE development and has no business seeing
 // the developer's whole book.
+// Investor / partner summary. Optionally scoped to one project, because an
+// investor almost always backed ONE development and has no business seeing
+// the developer's whole book.
+//
+// SECTION 11 — the data-gathering itself now lives in
+// investorReportService.getInvestorReport, extracted so financeAgent.js's
+// monthly PDF reuses the EXACT same figures this route has always returned,
+// rather than a second computation that could quietly drift from it. This
+// route's own behaviour (validation, 404, response shape) is unchanged.
 router.get('/investor', requirePermission('reports.investor'), async (req, res, next) => {
   try {
     const projectId = req.query.project_id || null;
@@ -47,144 +59,35 @@ router.get('/investor', requirePermission('reports.investor'), async (req, res, 
     if (projectId && !UUID_RE.test(projectId)) {
       return res.status(400).json({ error: 'project_id must be a valid id.' });
     }
-    const today = lagosToday();
 
-    let projectQuery = supabaseAdmin
-      .from('re_projects')
-      .select('id, name, location, status, total_units, created_at')
-      .eq('organization_id', req.orgId);
-    if (projectId) projectQuery = projectQuery.eq('id', projectId);
+    const report = await getInvestorReport(req.orgId, projectId);
+    if (report.notFound) return res.status(404).json({ error: 'Project not found' });
+    res.json(report);
+  } catch (e) { next(e); }
+});
 
-    const { data: projects, error: projectErr } = await projectQuery;
-    if (projectErr) throw projectErr;
-    if (projectId && !projects?.length) return res.status(404).json({ error: 'Project not found' });
+// SECTION 5 — referral network totals: how many referrals were ever opened,
+// what share converted (the referred buyer made a first payment), and how
+// much of the "credit" reward type has actually been given out. Cash-bonus
+// totals are deliberately not summed here — cash is paid manually outside
+// this product (the task referralService.fileCashBonusTask files is the
+// only record of it), so a total would double as a claim about real money
+// this system never actually watched move.
+router.get('/referrals', requirePermission('reports.referrals'), async (req, res, next) => {
+  try {
+    res.json(await referrals.getStats(req.orgId));
+  } catch (e) { next(e); }
+});
 
-    const projectIds = (projects || []).map((p) => p.id);
-    if (!projectIds.length) {
-      return res.json({ generated_at: new Date().toISOString(), scope: 'all', projects: [], totals: emptyTotals() });
-    }
-
-    const { data: units, error: unitErr } = await supabaseAdmin
-      .from('re_units')
-      .select('id, project_id, status, list_price')
-      .eq('organization_id', req.orgId)
-      .in('project_id', projectIds);
-    if (unitErr) throw unitErr;
-
-    // Reservation → plan → schedule → payments, in one read. Everything the
-    // report needs about money hangs off the schedule row.
-    const { data: reservations, error: resErr } = await supabaseAdmin
-      .from('re_reservations')
-      .select(`
-        id, status, unit_id, created_at,
-        re_units!inner(project_id, list_price),
-        re_installment_plans(
-          total_amount,
-          re_installment_schedule(amount_due, due_date, status)
-        )`)
-      .eq('organization_id', req.orgId)
-      .in('re_units.project_id', projectIds);
-    if (resErr) throw resErr;
-
-    // Filtered by project_id at the DB level, not just in the JS grouping
-    // below — an investor report scoped to one development (the common case:
-    // "an investor almost always backed ONE development") used to still pull
-    // every payment the whole organization has ever recorded, then discard
-    // everything outside the requested project after the fact.
-    const { data: payments, error: payErr } = await supabaseAdmin
-      .from('re_payments')
-      .select('amount, paid_at, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(re_units!inner(project_id))))')
-      .eq('organization_id', req.orgId)
-      .in('re_installment_schedule.re_installment_plans.re_reservations.re_units.project_id', projectIds)
-      .is('voided_at', null);
-    if (payErr) throw payErr;
-
-    const paymentsByProject = new Map();
-    for (const payment of payments || []) {
-      const pid = payment.re_installment_schedule?.re_installment_plans
-        ?.re_reservations?.re_units?.project_id;
-      if (!pid || !projectIds.includes(pid)) continue;
-      const list = paymentsByProject.get(pid) || [];
-      list.push(payment);
-      paymentsByProject.set(pid, list);
-    }
-
-    const monthStart = today.slice(0, 8) + '01';
-
-    const rows = (projects || []).map((project) => {
-      const projectUnits = (units || []).filter((u) => u.project_id === project.id);
-      const projectReservations = (reservations || [])
-        .filter((r) => r.re_units?.project_id === project.id);
-      const projectPayments = paymentsByProject.get(project.id) || [];
-
-      const contracted = projectReservations
-        .filter((r) => r.status !== 'cancelled')
-        .reduce((total, r) => {
-          const plan = firstPlan(r);
-          return total + Number(plan?.total_amount || r.re_units?.list_price || 0);
-        }, 0);
-
-      let overdueAmount = 0;
-      let scheduledRemaining = 0;
-      for (const reservation of projectReservations) {
-        if (reservation.status === 'cancelled') continue;
-        for (const row of firstPlan(reservation)?.re_installment_schedule || []) {
-          if (row.status === 'overdue') overdueAmount += Number(row.amount_due || 0);
-          if (row.status === 'pending' || row.status === 'overdue') {
-            scheduledRemaining += Number(row.amount_due || 0);
-          }
-        }
-      }
-
-      const collected = sum(projectPayments, 'amount');
-      const inventoryValue = sum(projectUnits, 'list_price');
-
-      return {
-        project_id: project.id,
-        name: project.name,
-        location: project.location,
-        status: project.status,
-        units: {
-          total: projectUnits.length || project.total_units || 0,
-          sold: projectUnits.filter((u) => u.status === 'sold').length,
-          reserved: projectUnits.filter((u) => u.status === 'reserved').length,
-          available: projectUnits.filter((u) => u.status === 'available').length,
-        },
-        gross_development_value: round2(inventoryValue),
-        contracted_value: round2(contracted),
-        collected_total: round2(collected),
-        collected_this_month: round2(
-          sum(projectPayments.filter((p) => (p.paid_at || '').slice(0, 10) >= monthStart), 'amount')
-        ),
-        receivables_outstanding: round2(scheduledRemaining),
-        receivables_overdue: round2(overdueAmount),
-        // Against what has actually been contracted, not against the whole
-        // development — a project that is 20% sold is not 80% behind.
-        collection_rate: contracted > 0 ? Math.round((collected / contracted) * 100) : 0,
-        sell_through_rate: projectUnits.length
-          ? Math.round(((projectUnits.length - projectUnits.filter((u) => u.status === 'available').length) / projectUnits.length) * 100)
-          : 0,
-      };
-    });
-
-    res.json({
-      generated_at: new Date().toISOString(),
-      period_end: today,
-      scope: projectId ? 'project' : 'all',
-      projects: rows,
-      totals: rows.reduce((totals, row) => ({
-        units_total: totals.units_total + row.units.total,
-        units_sold: totals.units_sold + row.units.sold,
-        units_reserved: totals.units_reserved + row.units.reserved,
-        units_available: totals.units_available + row.units.available,
-        gross_development_value: round2(totals.gross_development_value + row.gross_development_value),
-        contracted_value: round2(totals.contracted_value + row.contracted_value),
-        collected_total: round2(totals.collected_total + row.collected_total),
-        collected_this_month: round2(totals.collected_this_month + row.collected_this_month),
-        receivables_outstanding: round2(totals.receivables_outstanding + row.receivables_outstanding),
-        receivables_overdue: round2(totals.receivables_overdue + row.receivables_overdue),
-      }), emptyTotals()),
-    });
+// SECTION 6 — AI sales forecast: projected 3-month collections, a projected
+// completion date per active project, up to 5 buyers most likely to default
+// in the next 60 days, and recommended actions. Cached 24h
+// (forecastService.getOrGenerateForecast) — ?regenerate=true (the Reports
+// screen's Regenerate button) forces a fresh model call regardless of age.
+router.get('/forecast', requirePermission('reports.forecast'), async (req, res, next) => {
+  try {
+    const result = await forecast.getOrGenerateForecast(req.orgId, { force: req.query.regenerate === 'true' });
+    res.json(result);
   } catch (e) { next(e); }
 });
 
@@ -353,7 +256,7 @@ const EXPORTS = {
     async load(orgId) {
       const { data, error } = await supabaseAdmin
         .from('re_customers')
-        .select('full_name, phone, email, source, created_at')
+        .select('full_name, phone, email, source, created_at, credit_score')
         .eq('organization_id', orgId)
         .order('full_name');
       if (error) throw error;
@@ -365,6 +268,9 @@ const EXPORTS = {
       ['Email', 'email'],
       ['Source', 'source'],
       ['Added', (r) => String(r.created_at || '').slice(0, 10)],
+      // SECTION 3 — 0-100, built entirely from data this export's own
+      // sibling files (payments, promises) already contain.
+      ['Credit score', (r) => r.credit_score ?? ''],
     ],
   },
 
@@ -472,17 +378,6 @@ router.get('/export/:kind', exportLimiter, requirePermission('reports.export'), 
       .attachment(`archta-${spec.filename}-${stamp}.csv`)
       .send(toCsv(spec.columns, rows));
   } catch (e) { next(e); }
-});
-
-const firstPlan = (reservation) =>
-  Array.isArray(reservation.re_installment_plans)
-    ? reservation.re_installment_plans[0]
-    : reservation.re_installment_plans;
-
-const emptyTotals = () => ({
-  units_total: 0, units_sold: 0, units_reserved: 0, units_available: 0,
-  gross_development_value: 0, contracted_value: 0, collected_total: 0,
-  collected_this_month: 0, receivables_outstanding: 0, receivables_overdue: 0,
 });
 
 module.exports = router;

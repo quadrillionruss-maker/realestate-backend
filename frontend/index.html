@@ -216,6 +216,15 @@
     <div class="workspace-switcher hidden" id="workspace-switcher"></div>
 
     <nav class="nav" id="nav">
+      <!-- Only shown when /auth/me reports is_group_owner — most owners are
+           not part of a group, so this is hidden by default rather than a
+           permanently-visible dead link. See realestate.js's
+           renderGroupLink(). -->
+      <div class="nav-group" id="nav-group-group">
+        <div class="nav-label">Group</div>
+        <a class="nav-item" href="#/group" data-nav="group"><span class="ico">◆</span> Group dashboard</a>
+      </div>
+
       <div class="nav-group">
         <div class="nav-label">Operations</div>
         <a class="nav-item" href="#/dashboard" data-nav="dashboard"><span class="ico">◈</span> Command Center</a>

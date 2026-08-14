@@ -6,6 +6,7 @@ const { createPlanWithSchedule } = require('../services/installmentService');
 const { assess, preview, restructure } = require('../services/restructureService');
 const { assessTenancy, renewTenancy } = require('../services/rentalService');
 const { audit } = require('../services/auditService');
+const planRecommendations = require('../services/planRecommendationService');
 const router = express.Router();
 
 // Documentation has reservations.read (permissions.js) — "which unit, which
@@ -88,6 +89,28 @@ router.get('/', requirePermission('reservations.read'), async (req, res, next) =
 // frequency = 'monthly'. The frontend does that multiplication before it
 // calls here (screens.js), so this handler never needs to know "rent" as a
 // concept distinct from "plan".
+// SECTION 7 — smart payment plan AI. Gated the same as creating the
+// reservation itself: whoever may build a plan may ask for a suggested one.
+// Every call is logged (re_plan_recommendations), whether or not the rep
+// goes on to use it — see planRecommendationService.recommendPlan.
+router.post('/plan-recommendation', requirePermission('reservations.create'), async (req, res, next) => {
+  try {
+    res.status(201).json(await planRecommendations.recommendPlan(req));
+  } catch (e) { next(e); }
+});
+
+// Records whether the suggestion was actually used. `reservation_id` is only
+// meaningful (and only stored) when accepted:true — see recordDecision.
+router.patch('/plan-recommendations/:id', requirePermission('reservations.create'), async (req, res, next) => {
+  try {
+    const { accepted, reservation_id: reservationId } = req.body || {};
+    if (typeof accepted !== 'boolean') return res.status(400).json({ error: 'accepted (true/false) is required.' });
+    const updated = await planRecommendations.recordDecision(req.orgId, req.params.id, accepted, reservationId || null);
+    if (!updated) return res.status(404).json({ error: 'Recommendation not found.' });
+    res.json(updated);
+  } catch (e) { next(e); }
+});
+
 router.post('/', requirePermission('reservations.create'), async (req, res, next) => {
   try {
     const { unit_id, customer_id, plan } = req.body || {};

@@ -33,6 +33,7 @@ const {
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { onPaymentRecorded } = require('../services/paymentEvents');
 const { auditSystem } = require('../services/auditService');
+const { handleInboundMessage } = require('../services/whatsappBotService');
 
 const router = express.Router();
 
@@ -229,6 +230,68 @@ router.post('/paystack', async (req, res) => {
     // in a table whose value is that every row can be traced to a workspace.
     console.error('[webhook] failed processing charge.success side effects:', err.message);
     if (env.isDev) console.error(err.stack);
+  }
+});
+
+// ── WhatsApp (SECTION 9) ─────────────────────────────────────────────────
+// Meta's one-time verification handshake, run when the webhook URL is first
+// entered into the Meta App dashboard (and whenever it's re-verified) — a
+// GET carrying hub.mode/hub.verify_token/hub.challenge as QUERY PARAMS, so
+// this needs no body parsing at all, raw or otherwise. Echoing back
+// hub.challenge is what tells Meta "yes, I am the owner of this URL";
+// anything else (a wrong or missing token) is refused.
+router.get('/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && env.whatsapp.verifyToken && token === env.whatsapp.verifyToken) {
+    return res.status(200).send(challenge);
+  }
+  return res.status(403).json({ error: 'Verification failed.' });
+});
+
+// Meta requires a fast 2xx ack regardless of what the message turns out to
+// need — same shape as the Paystack handler above: acknowledge once the
+// event is durably understood, then do the actual work (looking up the
+// buyer, classifying intent, replying) as best-effort afterward, so a slow
+// OpenAI call or a WhatsApp send failure never turns into Meta re-delivering
+// the same inbound message.
+//
+// UNAUTHENTICATED, same reasoning as /paystack: Meta does not hold a bearer
+// token. Unlike Paystack there is no HMAC signature verified here yet — this
+// mirrors the shipped default (Meta's X-Hub-Signature-256 is opt-in per App
+// and requires the App Secret, a fourth credential this product does not
+// yet collect); resolveOrgByPhoneNumberId still means an attacker can only
+// ever address ONE workspace's phone_number_id per forged request, not
+// reach arbitrary org data.
+router.post('/whatsapp', async (req, res) => {
+  let body;
+  try {
+    body = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf8') : JSON.stringify(req.body || {}));
+  } catch {
+    return res.status(400).json({ error: 'Body is not valid JSON.' });
+  }
+
+  res.status(200).json({ received: true });
+
+  try {
+    for (const entry of body.entry || []) {
+      for (const change of entry.changes || []) {
+        const value = change.value || {};
+        const phoneNumberId = value.metadata?.phone_number_id;
+        for (const message of value.messages || []) {
+          // Only plain text is handled — a buyer sending a voice note or an
+          // image gets no reply rather than a crash on a field that isn't
+          // there; message.text is absent for every other message type.
+          const text = message.text?.body;
+          if (!phoneNumberId || !message.from || !text) continue;
+          await handleInboundMessage({ phoneNumberId, from: message.from, text });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[webhook] failed processing inbound WhatsApp message:', err.message);
   }
 });
 

@@ -22,7 +22,9 @@ const SETTINGS_COLUMNS = `organization_id, company_name, logo_url, address, phon
   notify_payment_reminders, reply_to_email, updated_at,
   paystack_public_key, paystack_secret_key_last4,
   resend_from_email, resend_api_key_last4,
-  termii_sender_id, termii_api_key_last4`;
+  termii_sender_id, termii_api_key_last4,
+  referral_reward_type, referral_reward_amount,
+  whatsapp_phone_number_id, whatsapp_business_account_id, whatsapp_token_last4`;
 
 // A logo is a handful of uploads a year, not traffic — this just keeps one
 // account from hammering Storage.
@@ -75,6 +77,11 @@ router.get('/', requirePermission('settings.read'), async (req, res, next) => {
       resend_api_key_last4: null,
       termii_sender_id: null,
       termii_api_key_last4: null,
+      referral_reward_type: 'none',
+      referral_reward_amount: 0,
+      whatsapp_phone_number_id: null,
+      whatsapp_business_account_id: null,
+      whatsapp_token_last4: null,
     };
 
     // A team's logo upload (POST /logo below) writes to teams.logo_url, not
@@ -97,6 +104,7 @@ router.get('/', requirePermission('settings.read'), async (req, res, next) => {
     settings.paystack_configured = !!settings.paystack_secret_key_last4;
     settings.resend_configured = !!settings.resend_api_key_last4;
     settings.termii_configured = !!settings.termii_api_key_last4;
+    settings.whatsapp_configured = !!settings.whatsapp_token_last4;
 
     res.json(settings);
   } catch (e) { next(e); }
@@ -124,6 +132,24 @@ router.put('/', requirePermission('settings.write'), async (req, res, next) => {
         return res.status(400).json({ error: 'default_commission_rate must be between 0 and 100' });
       }
       updates.default_commission_rate = rate;
+    }
+
+    // SECTION 5 — the referral reward the developer has chosen to pay. 'none'
+    // (the default, migrations/024) means referrals are still tracked but
+    // nothing is paid out — read at completion time by
+    // referralService.handleFirstPayment, never assumed anywhere else.
+    if (body.referral_reward_type !== undefined) {
+      if (!['none', 'cash', 'credit'].includes(body.referral_reward_type)) {
+        return res.status(400).json({ error: 'referral_reward_type must be none, cash or credit' });
+      }
+      updates.referral_reward_type = body.referral_reward_type;
+    }
+    if (body.referral_reward_amount !== undefined) {
+      const amount = Number(body.referral_reward_amount);
+      if (!Number.isFinite(amount) || amount < 0) {
+        return res.status(400).json({ error: 'referral_reward_amount must be a non-negative number' });
+      }
+      updates.referral_reward_amount = amount;
     }
 
     // A logo is embedded in a Puppeteer-rendered PDF. file: and data: URLs
@@ -442,6 +468,66 @@ router.post('/termii/test', requirePermission('settings.write'), async (req, res
     const senderId = String(req.body?.termii_sender_id || '').trim();
     const to = String(req.body?.to || '').trim();
     res.json(await sendTestSms({ apiKey, senderId, to }));
+  } catch (e) { next(e); }
+});
+
+// ── Per-workspace WhatsApp (Meta Cloud API) ─────────────────────────────
+// Same shape and the same owner-only gate as Paystack/Email/SMS above — see
+// notificationService.resolveWhatsAppCredentials for why there is no
+// platform-wide fallback the way Resend and Termii have one. Sending an
+// empty whatsapp_token clears it; omitting the field leaves whatever is
+// already saved untouched.
+router.put('/whatsapp', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const updates = { organization_id: req.orgId };
+
+    if (body.whatsapp_phone_number_id !== undefined) {
+      updates.whatsapp_phone_number_id = body.whatsapp_phone_number_id || null;
+    }
+    if (body.whatsapp_business_account_id !== undefined) {
+      updates.whatsapp_business_account_id = body.whatsapp_business_account_id || null;
+    }
+
+    if (body.whatsapp_token !== undefined) {
+      const token = String(body.whatsapp_token || '').trim();
+      if (token) {
+        updates.whatsapp_token_encrypted = encrypt(token);
+        updates.whatsapp_token_last4 = last4(token);
+      } else {
+        updates.whatsapp_token_encrypted = null;
+        updates.whatsapp_token_last4 = null;
+      }
+    }
+
+    if (Object.keys(updates).length === 1) {
+      return res.status(400).json({ error: 'No updatable fields provided' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('re_org_settings')
+      .upsert(updates, { onConflict: 'organization_id' })
+      .select('whatsapp_phone_number_id, whatsapp_business_account_id, whatsapp_token_last4')
+      .single();
+    if (error) throw error;
+
+    audit(req, {
+      action: 'settings.whatsapp_updated',
+      entityType: 're_org_settings',
+      summary: body.whatsapp_token !== undefined
+        ? (data.whatsapp_token_last4
+          ? 'Workspace WhatsApp token updated'
+          : 'Workspace WhatsApp token cleared')
+        : 'Workspace WhatsApp phone/business account id updated',
+      metadata: { whatsapp_configured: !!data.whatsapp_token_last4 },
+    });
+
+    res.json({
+      whatsapp_phone_number_id: data.whatsapp_phone_number_id,
+      whatsapp_business_account_id: data.whatsapp_business_account_id,
+      whatsapp_token_last4: data.whatsapp_token_last4,
+      whatsapp_configured: !!data.whatsapp_token_last4,
+    });
   } catch (e) { next(e); }
 });
 

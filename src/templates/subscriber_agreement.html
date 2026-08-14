@@ -1,0 +1,77 @@
+<!-- Subscriber's agreement — SECTION 8's default template. Same placeholder
+     convention as deed_of_assignment.html — lowercase {{tokens}}, editable
+     by an owner in Settings → Document templates, with {{signature_block}}
+     always filled by the service regardless of override. -->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 25mm 20mm; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; font-size: 11.5pt; line-height: 1.75; }
+  .letterhead { display: flex; justify-content: space-between; align-items: center; border-bottom: 3px double #1a1a1a; padding-bottom: 12px; margin-bottom: 32px; }
+  .letterhead .company { font-size: 15pt; font-weight: bold; letter-spacing: 0.5px; }
+  h1 { font-size: 13pt; text-align: center; text-decoration: underline; text-transform: uppercase; letter-spacing: 1px; margin: 28px 0 6px; }
+  .subtitle { text-align: center; font-size: 10.5pt; margin-bottom: 28px; }
+  .recital { margin: 10px 0; }
+  table.schedule { width: 100%; border-collapse: collapse; margin: 20px 0; }
+  table.schedule td { padding: 8px 12px; border: 1px solid #999; }
+  table.schedule td:first-child { font-weight: bold; width: 35%; background: #f5f5f0; }
+  .clause-title { font-weight: bold; margin-top: 22px; }
+  ol.clauses { padding-left: 20px; }
+  ol.clauses li { margin-bottom: 10px; }
+  .execution { margin-top: 50px; }
+  .signature-block { margin-top: 40px; }
+  .signature-line { border-top: 1px solid #1a1a1a; width: 260px; padding-top: 6px; font-size: 10.5pt; margin-top: 46px; }
+  .fineprint { margin-top: 28px; font-size: 9.5pt; color: #555; }
+</style>
+</head>
+<body>
+  <div class="letterhead"><div class="company">{{company_name}}</div></div>
+
+  <h1>Subscriber's Agreement</h1>
+  <div class="subtitle">Ref: {{reference_number}} &nbsp;·&nbsp; {{date}}</div>
+
+  <p class="recital">THIS AGREEMENT is made this {{date}} BETWEEN <strong>{{company_name}}</strong> (hereinafter
+  "the Company") of the one part AND <strong>{{buyer_name}}</strong> (hereinafter "the Subscriber") of the other
+  part, whereby the Subscriber applies to subscribe for and acquire an interest in the unit described below,
+  on the terms set out in this Agreement.</p>
+
+  <table class="schedule">
+    <tr><td>Development</td><td>{{project_line}}</td></tr>
+    <tr><td>Unit Number</td><td>{{unit_number}}</td></tr>
+    <tr><td>Unit Type</td><td>{{unit_type}}</td></tr>
+    <tr><td>Subscription Sum</td><td>{{total_amount}}</td></tr>
+  </table>
+
+  <p class="clause-title">TERMS</p>
+  <ol class="clauses">
+    <li>The Subscriber applies to subscribe for the unit described above at the Subscription Sum stated, payable
+    in accordance with the payment plan agreed with the Company and recorded in the Company's records.</li>
+    <li>The Company shall hold the unit for the exclusive benefit of the Subscriber upon acceptance of this
+    Agreement, and shall not offer, allocate or sell the unit to any other party while this Agreement subsists
+    and the Subscriber is not in material default of the agreed payment plan.</li>
+    <li>Upon payment of the full Subscription Sum, the Company shall execute a Deed of Assignment (or such other
+    instrument of title as the nature of the development requires) in favour of the Subscriber.</li>
+    <li>Where the Subscriber defaults in payment of any sum due under the agreed payment plan and such default is
+    not remedied within the period stated in the Company's arrears procedure, the Company reserves the right to
+    treat this Agreement as at an end and to deal with the unit accordingly, subject to any refund the Company's
+    policies or applicable law provide for.</li>
+    <li>Time shall be of the essence in respect of every payment due under this Agreement.</li>
+    <li>This Agreement is governed by the laws of the Federal Republic of Nigeria.</li>
+  </ol>
+
+  <div class="execution">
+    <p>IN WITNESS WHEREOF the parties have executed this Agreement the day and year first above written.</p>
+
+    <div class="signature-line">For the Company — Authorised Signatory<br>{{company_name}}</div>
+
+    <div class="signature-block">
+      <div>Subscriber — {{buyer_name}}</div>
+      {{signature_block}}
+    </div>
+  </div>
+
+  <div class="fineprint">This agreement is generated from Archta and reflects the terms on file as of {{date}}.</div>
+</body>
+</html>

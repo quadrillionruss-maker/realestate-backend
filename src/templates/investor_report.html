@@ -1,0 +1,50 @@
+<!-- Monthly investor report — SECTION 11's Finance Agent, rendered by
+     src/services/financeAgent.js. Same placeholder convention as
+     allocation_letter.html: uppercase tokens, {{ROWS_BLOCK}} pre-built by
+     the service since this file has no conditional syntax of its own.
+     Every interpolated value is escaped in the service. -->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 20mm 18mm; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; font-size: 10.5pt; line-height: 1.6; }
+  .letterhead { display: flex; justify-content: space-between; align-items: center; border-bottom: 3px double #1a1a1a; padding-bottom: 12px; margin-bottom: 24px; }
+  .letterhead .company { font-size: 15pt; font-weight: bold; letter-spacing: 0.5px; }
+  h1 { font-size: 13pt; text-transform: uppercase; letter-spacing: 1px; margin: 0 0 4px; }
+  .period { font-size: 10pt; color: #555; margin-bottom: 20px; }
+  .totals { display: flex; gap: 18px; margin: 18px 0 24px; }
+  .totals .tile { flex: 1; border: 1px solid #999; padding: 10px 12px; }
+  .totals .tile .label { font-size: 8.5pt; text-transform: uppercase; letter-spacing: 0.5px; color: #555; }
+  .totals .tile .value { font-size: 13pt; font-weight: bold; margin-top: 4px; }
+  table.projects { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  table.projects th, table.projects td { padding: 7px 9px; border: 1px solid #999; text-align: left; font-size: 9.5pt; }
+  table.projects th { background: #f5f5f0; }
+  table.projects td.num { text-align: right; }
+  .fineprint { margin-top: 24px; font-size: 9pt; color: #555; }
+</style>
+</head>
+<body>
+  <div class="letterhead"><div class="company">{{COMPANY_NAME}}</div></div>
+
+  <h1>Monthly Investor Report</h1>
+  <div class="period">Period ending {{PERIOD}}</div>
+
+  <div class="totals">
+    <div class="tile"><div class="label">Gross development value</div><div class="value">{{TOTAL_GDV}}</div></div>
+    <div class="tile"><div class="label">Contracted</div><div class="value">{{TOTAL_CONTRACTED}}</div></div>
+    <div class="tile"><div class="label">Collected to date</div><div class="value">{{TOTAL_COLLECTED}}</div></div>
+    <div class="tile"><div class="label">Receivables overdue</div><div class="value">{{TOTAL_OVERDUE}}</div></div>
+  </div>
+
+  <table class="projects">
+    <thead>
+      <tr><th>Project</th><th>Units</th><th>Sold</th><th class="num">Contracted</th><th class="num">Collected</th><th class="num">Overdue</th></tr>
+    </thead>
+    <tbody>{{ROWS_BLOCK}}</tbody>
+  </table>
+
+  <div class="fineprint">Generated automatically by Archta on {{GENERATED_AT}}. Figures are drawn directly from the developer's own records.</div>
+</body>
+</html>

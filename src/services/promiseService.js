@@ -21,11 +21,12 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { overdueThroughDate } = require('./overdueService');
 const { auditSystem } = require('./auditService');
 const { mapWithConcurrency } = require('../utils/concurrency');
+const creditScore = require('./creditScoreService');
 
 const AUDIT_CONCURRENCY = 8;
 
 const SELECT = `
-  id, promised_date, promised_amount, spoke_to, notes, status, resolved_at, created_at,
+  id, customer_id, promised_date, promised_amount, spoke_to, notes, status, resolved_at, created_at,
   re_installment_schedule(
     id, installment_number, due_date, amount_due, status,
     re_installment_plans(
@@ -112,6 +113,14 @@ async function resolvePromise(orgId, promiseId, status) {
     .select(SELECT)
     .maybeSingle();
   if (error) throw error;
+
+  // SECTION 3 — a manually resolved promise (kept or broken; 'cancelled' is
+  // neither, so left alone) is exactly the "promise resolution" the credit
+  // score's promise-reliability dimension is meant to catch.
+  if (data?.customer_id && (status === 'kept' || status === 'broken')) {
+    await creditScore.recompute(orgId, data.customer_id);
+  }
+
   return data;
 }
 
@@ -174,6 +183,17 @@ async function sweepBrokenPromises(orgId = null) {
       metadata: { schedule_id: row.schedule_id, promised_date: row.promised_date },
     }));
   }
+
+  // SECTION 3 — every promise this sweep just resolved (kept or broken)
+  // changed that buyer's promise-reliability dimension. One recompute per
+  // buyer, not per promise: a buyer with two promises resolved in the same
+  // sweep only needs their score settled once, on the final state.
+  const affected = new Map();
+  for (const row of [...kept, ...broken]) {
+    if (row.customer_id) affected.set(row.customer_id, row.organization_id);
+  }
+  await mapWithConcurrency([...affected.entries()], AUDIT_CONCURRENCY,
+    ([customerId, orgId]) => creditScore.recompute(orgId, customerId));
 
   return { broken: broken.length, kept: kept.length };
 }

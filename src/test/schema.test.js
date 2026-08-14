@@ -31,7 +31,10 @@ function check(name, cond, detail) {
   // ── Apply migrations, twice, to prove idempotency ───────────────────────
   for (const pass of ['first', 'second']) {
     for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql',
-      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql']) {
+      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
+      '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
+      '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -63,7 +66,10 @@ function check(name, cond, detail) {
   `);
 
   for (const file of ['001_phase1_schema.sql', '002_ai_briefs.sql', '003_operations.sql', '004_hardening.sql', '005_soft_delete_and_lifecycle.sql', '006_rentals.sql', '007_payment_reallocation.sql', '008_payment_void.sql', '009_account_lockout.sql', '010_daily_job_scale.sql', '011_payer_name.sql', '012_invite_dedup.sql', '013_ai_task_dedup.sql', '014_performance_indexes.sql', '015_team_logo.sql', '016_rbac.sql',
-      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql']) {
+      '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
+      '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
+      '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -76,7 +82,9 @@ function check(name, cond, detail) {
 
   const granted = ['users', 'teams', 'team_members', 're_projects', 're_installment_schedule',
     're_payments', 're_documents', 're_tasks', 're_ai_briefs',
-    're_org_settings', 're_commissions', 're_payment_promises', 're_audit_log', 're_notifications'];
+    're_org_settings', 're_commissions', 're_payment_promises', 're_audit_log', 're_notifications',
+    'parent_organizations', 're_construction_milestones', 're_customer_referrals', 're_forecasts', 're_plan_recommendations', 're_document_templates',
+    're_agent_actions', 're_market_intel_reports'];
 
   for (const t of granted) {
     const [{ ok }] = await q(
@@ -109,6 +117,8 @@ function check(name, cond, detail) {
     're_installment_plans', 're_installment_schedule', 're_payments', 're_documents',
     're_tasks', 're_ai_briefs',
     're_org_settings', 're_commissions', 're_payment_promises', 're_audit_log', 're_notifications',
+    'parent_organizations', 're_construction_milestones', 're_customer_referrals', 're_forecasts', 're_plan_recommendations', 're_document_templates',
+    're_agent_actions', 're_market_intel_reports',
   ];
   for (const t of expected) {
     check(`table ${t} exists`, tables.includes(t), `have: ${tables.join(', ')}`);
@@ -1335,6 +1345,359 @@ function check(name, cond, detail) {
 
   const newSchedGone = await q(`select id from re_installment_schedule where id=$1`, [rbNewSched]);
   check('the new plan\'s schedule rows are gone too', newSchedGone.length === 0);
+
+  // ── 021: parent organization layer (SECTION 1 — multi-branch) ───────────
+
+  const teamCols021 = await colsOf('teams');
+  check('teams has parent_organization_id', teamCols021.includes('parent_organization_id'), teamCols021.join(', '));
+
+  const parentOrgCols = await colsOf('parent_organizations');
+  check('parent_organizations has name and owner_id',
+    ['name', 'owner_id'].every((c) => parentOrgCols.includes(c)), parentOrgCols.join(', '));
+
+  const [{ id: groupOwnerId }] = await q(
+    `insert into users (email, full_name) values ('group-owner@example.com','Group Owner') returning id`);
+  const [{ id: groupId }] = await q(
+    `insert into parent_organizations (name, owner_id) values ('Mshel Homes Group', $1) returning id`, [groupOwnerId]);
+  const [{ id: branchTeamId }] = await q(
+    `insert into teams (name, owner_id, parent_organization_id) values ('Mshel Abuja', $1, $2) returning id`,
+    [groupOwnerId, groupId]);
+
+  const branchLookup = await q(
+    `select t.id, t.name, po.name as group_name from teams t
+     join parent_organizations po on po.id = t.parent_organization_id
+     where po.owner_id = $1`, [groupOwnerId]);
+  check('a branch resolves back to its group and the group\'s owner, in one join',
+    branchLookup.length === 1 && branchLookup[0].id === branchTeamId && branchLookup[0].group_name === 'Mshel Homes Group');
+
+  // Deleting the group must not take the branch's own data down with it — a
+  // branch is a real, independent workspace with its own buyers and
+  // payments, not a row that only exists because the group does. Only the
+  // roll-up link should clear.
+  await q(`delete from parent_organizations where id=$1`, [groupId]);
+  const [{ parent_organization_id: branchParentAfterGroupDelete }] = await q(
+    `select parent_organization_id from teams where id=$1`, [branchTeamId]);
+  check('deleting a group sets the branch\'s parent_organization_id to null rather than deleting the branch',
+    branchParentAfterGroupDelete === null);
+  const branchStillExists = await q(`select id from teams where id=$1`, [branchTeamId]);
+  check('the branch workspace itself survives its group being deleted', branchStillExists.length === 1);
+
+  // ── 022: construction milestones (SECTION 2) ─────────────────────────────
+
+  const milestoneCols = await colsOf('re_construction_milestones');
+  check('re_construction_milestones has the columns the app selects',
+    ['project_id', 'name', 'target_date', 'completed_date', 'completion_percentage', 'photos', 'status', 'notified_at']
+      .every((c) => milestoneCols.includes(c)),
+    milestoneCols.join(', '));
+
+  const [{ id: cmProject }] = await q(
+    `insert into re_projects (organization_id, name) values ($1,'Milestone Test Estate') returning id`, [userId]);
+
+  let unknownNameRefused = false;
+  try {
+    await q(`insert into re_construction_milestones (organization_id, project_id, name) values ($1,$2,'Landscaping')`,
+      [userId, cmProject]);
+  } catch (err) { unknownNameRefused = /check/i.test(err.message); }
+  check('a milestone name outside the fixed five is refused', unknownNameRefused);
+
+  const [{ id: cmMilestone }] = await q(
+    `insert into re_construction_milestones (organization_id, project_id, name) values ($1,$2,'Foundation') returning id`,
+    [userId, cmProject]);
+
+  let duplicateMilestoneRefused = false;
+  try {
+    await q(`insert into re_construction_milestones (organization_id, project_id, name) values ($1,$2,'Foundation')`,
+      [userId, cmProject]);
+  } catch (err) { duplicateMilestoneRefused = /unique|duplicate/i.test(err.message); }
+  check('a project cannot have two rows for the same milestone name', duplicateMilestoneRefused);
+
+  // Eleven photos, one over the cap the product spec sets.
+  const elevenPhotos = JSON.stringify(Array.from({ length: 11 }, (_, i) => ({ path: `p${i}`, url: `https://x/${i}` })));
+  let elevenPhotosRefused = false;
+  try {
+    await q(`update re_construction_milestones set photos = $2::jsonb where id = $1`, [cmMilestone, elevenPhotos]);
+  } catch (err) { elevenPhotosRefused = /check/i.test(err.message); }
+  check('a milestone cannot hold more than 10 photos', elevenPhotosRefused);
+
+  const tenPhotos = JSON.stringify(Array.from({ length: 10 }, (_, i) => ({ path: `p${i}`, url: `https://x/${i}` })));
+  let tenPhotosAllowed = true;
+  try {
+    await q(`update re_construction_milestones set photos = $2::jsonb where id = $1`, [cmMilestone, tenPhotos]);
+  } catch (err) { tenPhotosAllowed = false; console.log(`       ${err.message}`); }
+  check('exactly 10 photos is still allowed', tenPhotosAllowed);
+
+  let percentOutOfRangeRefused = false;
+  try {
+    await q(`update re_construction_milestones set completion_percentage = 150 where id = $1`, [cmMilestone]);
+  } catch (err) { percentOutOfRangeRefused = /check/i.test(err.message); }
+  check('completion_percentage over 100 is refused', percentOutOfRangeRefused);
+
+  // ── 023: buyer credit scoring (SECTION 3) ────────────────────────────────
+
+  const customerCols023 = await colsOf('re_customers');
+  check('re_customers has credit_score', customerCols023.includes('credit_score'), customerCols023.join(', '));
+
+  const [{ id: csCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Credit Score Buyer') returning id`, [userId]);
+  const [{ credit_score: defaultScore }] = await q(
+    `select credit_score from re_customers where id=$1`, [csCustomer]);
+  check('credit_score defaults to 100 for a freshly created buyer', defaultScore === 100);
+
+  let creditScoreOutOfRangeRefused = false;
+  try {
+    await q(`update re_customers set credit_score = 101 where id=$1`, [csCustomer]);
+  } catch (err) { creditScoreOutOfRangeRefused = /check/i.test(err.message); }
+  check('credit_score over 100 is refused', creditScoreOutOfRangeRefused);
+
+  let creditScoreNegativeRefused = false;
+  try {
+    await q(`update re_customers set credit_score = -1 where id=$1`, [csCustomer]);
+  } catch (err) { creditScoreNegativeRefused = /check/i.test(err.message); }
+  check('credit_score below 0 is refused', creditScoreNegativeRefused);
+
+  const [{ ok: creditScoreIndexExists }] = await q(
+    `select exists (select 1 from pg_indexes where indexname='idx_re_customers_credit_score') as ok`);
+  check('idx_re_customers_credit_score exists', creditScoreIndexExists);
+
+  // ── 024: buyer referral network (SECTION 5) ──────────────────────────────
+
+  const referralCustomerCols = await colsOf('re_customers');
+  check('re_customers has referral_code, referred_by_customer_id, referral_credit_balance',
+    ['referral_code', 'referred_by_customer_id', 'referral_credit_balance'].every((c) => referralCustomerCols.includes(c)),
+    referralCustomerCols.join(', '));
+
+  const [{ id: refBuyerA }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Referral Buyer A') returning id`, [userId]);
+  const [{ referral_code: refCodeA, referral_credit_balance: refBalanceA }] = await q(
+    `select referral_code, referral_credit_balance from re_customers where id=$1`, [refBuyerA]);
+  check('a new buyer gets an 8-character referral_code automatically', /^[A-Z0-9]{8}$/.test(refCodeA || ''), refCodeA);
+  check('referral_credit_balance defaults to 0', Number(refBalanceA) === 0);
+
+  let duplicateReferralCodeRefused = false;
+  try {
+    await q(`insert into re_customers (organization_id, full_name, referral_code) values ($1,'Dup Code Buyer',$2)`,
+      [userId, refCodeA]);
+  } catch (err) { duplicateReferralCodeRefused = /unique|duplicate/i.test(err.message); }
+  check('referral_code is unique', duplicateReferralCodeRefused);
+
+  const referralsTableCols = await colsOf('re_customer_referrals');
+  check('re_customer_referrals has the columns the app selects',
+    ['organization_id', 'referring_customer_id', 'referred_customer_id', 'status', 'reward_type', 'reward_amount', 'completed_at']
+      .every((c) => referralsTableCols.includes(c)), referralsTableCols.join(', '));
+
+  const [{ id: refBuyerB }] = await q(
+    `insert into re_customers (organization_id, full_name, referred_by_customer_id) values ($1,'Referral Buyer B',$2) returning id`,
+    [userId, refBuyerA]);
+  const [{ id: referralRowId }] = await q(
+    `insert into re_customer_referrals (organization_id, referring_customer_id, referred_customer_id) values ($1,$2,$3) returning id`,
+    [userId, refBuyerA, refBuyerB]);
+
+  let duplicateReferralRowRefused = false;
+  try {
+    await q(`insert into re_customer_referrals (organization_id, referring_customer_id, referred_customer_id) values ($1,$2,$3)`,
+      [userId, refBuyerA, refBuyerB]);
+  } catch (err) { duplicateReferralRowRefused = /unique|duplicate/i.test(err.message); }
+  check('a referred buyer can only have one referral row (referred_customer_id is unique)', duplicateReferralRowRefused);
+
+  let badReferralStatusRefused = false;
+  try {
+    await q(`update re_customer_referrals set status='bogus' where id=$1`, [referralRowId]);
+  } catch (err) { badReferralStatusRefused = /check/i.test(err.message); }
+  check('re_customer_referrals.status is constrained to pending|completed', badReferralStatusRefused);
+
+  let badRewardTypeRefused = false;
+  try {
+    await q(`update re_customer_referrals set reward_type='bogus' where id=$1`, [referralRowId]);
+  } catch (err) { badRewardTypeRefused = /check/i.test(err.message); }
+  check('re_customer_referrals.reward_type is constrained to cash|credit', badRewardTypeRefused);
+
+  const orgSettingsColsForReferrals = await colsOf('re_org_settings');
+  check('re_org_settings has the WhatsApp credential columns',
+    ['whatsapp_token_encrypted', 'whatsapp_token_last4', 'whatsapp_phone_number_id', 'whatsapp_business_account_id']
+      .every((c) => orgSettingsColsForReferrals.includes(c)), orgSettingsColsForReferrals.join(', '));
+
+  const [{ id: refSettingsOrgUser }] = await q(
+    `insert into users (email, full_name) values ('ref-settings@example.com','Ref Settings User') returning id`);
+  await q(`insert into re_org_settings (organization_id) values ($1)`, [refSettingsOrgUser]);
+  const [{ referral_reward_type: defaultRewardType, referral_reward_amount: defaultRewardAmount }] = await q(
+    `select referral_reward_type, referral_reward_amount from re_org_settings where organization_id=$1`, [refSettingsOrgUser]);
+  check('referral_reward_type defaults to none', defaultRewardType === 'none');
+  check('referral_reward_amount defaults to 0', Number(defaultRewardAmount) === 0);
+
+  let badOrgRewardTypeRefused = false;
+  try {
+    await q(`update re_org_settings set referral_reward_type='bogus' where organization_id=$1`, [refSettingsOrgUser]);
+  } catch (err) { badOrgRewardTypeRefused = /check/i.test(err.message); }
+  check('re_org_settings.referral_reward_type is constrained to none|cash|credit', badOrgRewardTypeRefused);
+
+  // ── 025: AI sales forecasting (SECTION 6) ────────────────────────────────
+
+  const forecastCols = await colsOf('re_forecasts');
+  check('re_forecasts has the columns the app selects',
+    ['organization_id', 'generated_at', 'generated_by', 'payload'].every((c) => forecastCols.includes(c)),
+    forecastCols.join(', '));
+
+  const [{ id: forecastId }] = await q(
+    `insert into re_forecasts (organization_id, generated_by, payload) values ($1,'fallback','{}'::jsonb) returning id`,
+    [userId]);
+  const [{ generated_by: storedGeneratedBy }] = await q(
+    `select generated_by from re_forecasts where id=$1`, [forecastId]);
+  check('a forecast row round-trips with its generated_by', storedGeneratedBy === 'fallback');
+
+  let badForecastGeneratedByRefused = false;
+  try {
+    await q(`update re_forecasts set generated_by='bogus' where id=$1`, [forecastId]);
+  } catch (err) { badForecastGeneratedByRefused = /check/i.test(err.message); }
+  check('re_forecasts.generated_by is constrained to ai|fallback', badForecastGeneratedByRefused);
+
+  const [{ ok: forecastIndexExists }] = await q(
+    `select exists (select 1 from pg_indexes where indexname='idx_re_forecasts_org_generated') as ok`);
+  check('idx_re_forecasts_org_generated exists', forecastIndexExists);
+
+  // ── 026: smart payment plan AI (SECTION 7) ───────────────────────────────
+
+  const planRecCols = await colsOf('re_plan_recommendations');
+  check('re_plan_recommendations has the columns the app selects',
+    ['customer_id', 'unit_id', 'requested_by_user_id', 'recommended_installments', 'recommended_deposit_percent',
+      'recommended_frequency', 'reasoning', 'generated_by', 'accepted', 'reservation_id']
+      .every((c) => planRecCols.includes(c)), planRecCols.join(', '));
+
+  const [{ id: planRecCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Plan Rec Buyer') returning id`, [userId]);
+  const [{ id: planRecId }] = await q(
+    `insert into re_plan_recommendations
+       (organization_id, customer_id, recommended_installments, recommended_deposit_percent, recommended_frequency, generated_by)
+     values ($1,$2,12,15.5,'monthly','fallback') returning id`,
+    [userId, planRecCustomer]);
+  const [{ accepted: planRecAcceptedDefault }] = await q(
+    `select accepted from re_plan_recommendations where id=$1`, [planRecId]);
+  check('accepted starts out null (not yet decided)', planRecAcceptedDefault === null);
+
+  let badPlanRecFrequencyRefused = false;
+  try {
+    await q(`update re_plan_recommendations set recommended_frequency='fortnightly' where id=$1`, [planRecId]);
+  } catch (err) { badPlanRecFrequencyRefused = /check/i.test(err.message); }
+  check('re_plan_recommendations.recommended_frequency is constrained to monthly|quarterly', badPlanRecFrequencyRefused);
+
+  let badPlanRecGeneratedByRefused = false;
+  try {
+    await q(`update re_plan_recommendations set generated_by='bogus' where id=$1`, [planRecId]);
+  } catch (err) { badPlanRecGeneratedByRefused = /check/i.test(err.message); }
+  check('re_plan_recommendations.generated_by is constrained to ai|fallback', badPlanRecGeneratedByRefused);
+
+  // ── 027: legal document automation + e-signature (SECTION 8) ────────────
+
+  const docCols027 = await colsOf('re_documents');
+  check('re_documents has the e-signature columns',
+    ['signed_at', 'signed_ip', 'signature_data', 'signature_type', 'signed_storage_path'].every((c) => docCols027.includes(c)),
+    docCols027.join(', '));
+
+  const [{ id: legalDocUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price) values ($1,$2,'LEGAL-1',7000000) returning id`,
+    [userId, cmProject]);
+  const [{ id: legalDocCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Legal Doc Buyer') returning id`, [userId]);
+  const [{ id: legalDocReservation }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, legalDocUnit, legalDocCustomer]);
+
+  let subscriberAgreementAccepted = true;
+  try {
+    await q(`insert into re_documents (organization_id, reservation_id, doc_type) values ($1,$2,'subscriber_agreement')`,
+      [userId, legalDocReservation]);
+  } catch (err) { subscriberAgreementAccepted = false; console.log(`       ${err.message}`); }
+  check('subscriber_agreement is now an accepted doc_type', subscriberAgreementAccepted);
+
+  const [{ id: poaDocId }] = await q(
+    `insert into re_documents (organization_id, reservation_id, doc_type) values ($1,$2,'power_of_attorney') returning id`,
+    [userId, legalDocReservation]);
+  check('power_of_attorney is now an accepted doc_type', !!poaDocId);
+
+  let unknownDocTypeStillRefused027 = false;
+  try {
+    await q(`insert into re_documents (organization_id, reservation_id, doc_type) values ($1,$2,'not_a_real_type')`,
+      [userId, legalDocReservation]);
+  } catch (err) { unknownDocTypeStillRefused027 = /check/i.test(err.message); }
+  check('an unknown doc_type is still refused after the constraint was rebuilt', unknownDocTypeStillRefused027);
+
+  let badSignatureTypeRefused = false;
+  try {
+    await q(`update re_documents set signature_type='scribbled' where id=$1`, [poaDocId]);
+  } catch (err) { badSignatureTypeRefused = /check/i.test(err.message); }
+  check('re_documents.signature_type is constrained to drawn|typed (or null)', badSignatureTypeRefused);
+
+  let nullSignatureTypeStillAllowed = true;
+  try {
+    await q(`update re_documents set signature_type=null where id=$1`, [poaDocId]);
+  } catch (err) { nullSignatureTypeStillAllowed = false; console.log(`       ${err.message}`); }
+  check('signature_type can still be null (not yet signed)', nullSignatureTypeStillAllowed);
+
+  const templateCols = await colsOf('re_document_templates');
+  check('re_document_templates has the columns the app selects',
+    ['organization_id', 'doc_type', 'template_html', 'updated_at'].every((c) => templateCols.includes(c)),
+    templateCols.join(', '));
+
+  const [{ id: templateId }] = await q(
+    `insert into re_document_templates (organization_id, doc_type, template_html) values ($1,'deed_of_assignment','<p>custom</p>') returning id`,
+    [userId]);
+  check('a template override round-trips', !!templateId);
+
+  let duplicateTemplateRefused = false;
+  try {
+    await q(`insert into re_document_templates (organization_id, doc_type, template_html) values ($1,'deed_of_assignment','<p>again</p>')`,
+      [userId]);
+  } catch (err) { duplicateTemplateRefused = /unique|duplicate/i.test(err.message); }
+  check('only one template override per (organization_id, doc_type)', duplicateTemplateRefused);
+
+  let badTemplateDocTypeRefused = false;
+  try {
+    await q(`insert into re_document_templates (organization_id, doc_type, template_html) values ($1,'receipt','<p>x</p>')`,
+      [userId]);
+  } catch (err) { badTemplateDocTypeRefused = /check/i.test(err.message); }
+  check('re_document_templates.doc_type is limited to the three signable types', badTemplateDocTypeRefused);
+
+  // ── 028: v2 AI agents + Deal Manager (SECTION 11) ────────────────────────
+
+  const customerCols028 = await colsOf('re_customers');
+  check('re_customers has whatsapp_opt_out', customerCols028.includes('whatsapp_opt_out'), customerCols028.join(', '));
+
+  const reservationCols028 = await colsOf('re_reservations');
+  check('re_reservations has last_agent_contact_at', reservationCols028.includes('last_agent_contact_at'), reservationCols028.join(', '));
+
+  const orgSettingsCols028 = await colsOf('re_org_settings');
+  check('re_org_settings has investor_emails', orgSettingsCols028.includes('investor_emails'), orgSettingsCols028.join(', '));
+
+  const [{ id: agentActionCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Agent Action Buyer') returning id`, [userId]);
+  const [{ whatsapp_opt_out: optOutDefault }] = await q(
+    `select whatsapp_opt_out from re_customers where id=$1`, [agentActionCustomer]);
+  check('whatsapp_opt_out defaults to false', optOutDefault === false);
+
+  const agentActionCols = await colsOf('re_agent_actions');
+  check('re_agent_actions has the columns the app selects',
+    ['organization_id', 'agent_name', 'customer_id', 'action_type', 'outcome', 'created_at'].every((c) => agentActionCols.includes(c)),
+    agentActionCols.join(', '));
+
+  const [{ id: agentActionId }] = await q(
+    `insert into re_agent_actions (organization_id, agent_name, customer_id, action_type, outcome)
+     values ($1,'collections_agent',$2,'collections_followup','sent') returning id`,
+    [userId, agentActionCustomer]);
+  check('an agent action round-trips', !!agentActionId);
+
+  let badAgentNameRefused = false;
+  try {
+    await q(`update re_agent_actions set agent_name='not_a_real_agent' where id=$1`, [agentActionId]);
+  } catch (err) { badAgentNameRefused = /check/i.test(err.message); }
+  check('re_agent_actions.agent_name is limited to the six known agents', badAgentNameRefused);
+
+  const marketIntelCols = await colsOf('re_market_intel_reports');
+  check('re_market_intel_reports has the columns the app selects',
+    ['organization_id', 'generated_at', 'payload'].every((c) => marketIntelCols.includes(c)), marketIntelCols.join(', '));
+
+  const [{ id: marketIntelId }] = await q(
+    `insert into re_market_intel_reports (organization_id, payload) values ($1,'{"summary":"x","signals":[]}'::jsonb) returning id`,
+    [userId]);
+  check('a market intel report round-trips', !!marketIntelId);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

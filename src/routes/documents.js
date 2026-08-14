@@ -1,7 +1,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
-const { generateDocument, getDownloadUrl } = require('../services/documentService');
+const { generateDocument, getDownloadUrl, SIGNABLE_DOC_TYPES, getLegalTemplateHtml } = require('../services/documentService');
 const { audit } = require('../services/auditService');
 const router = express.Router();
 
@@ -9,8 +9,11 @@ const router = express.Router();
 // held since v1: a real, creatable doc_type with no template yet.
 // documentService.generateDocument returns { unsupported: true } for either
 // today, same as it always has — this is not new behaviour, just a wider set
-// of rows the "not yet" answer applies to.
-const DOC_TYPES = ['allocation_letter', 'deed_of_assignment', 'lease_agreement', 'receipt', 'other'];
+// of rows the "not yet" answer applies to. deed_of_assignment,
+// subscriber_agreement and power_of_attorney (SECTION 8) DO now render —
+// SIGNABLE_DOC_TYPES is documentService's own list of exactly those three.
+const DOC_TYPES = ['allocation_letter', 'deed_of_assignment', 'lease_agreement',
+  'subscriber_agreement', 'power_of_attorney', 'receipt', 'other'];
 const DOC_STATUSES = ['pending', 'generated', 'sent', 'signed'];
 
 // A Sales Executive's own reservation ids — documents are scoped to them
@@ -113,7 +116,8 @@ router.post('/:id/generate', requirePermission('documents.generate'), async (req
     if (result.notFound) return res.status(404).json({ error: 'Document not found' });
     if (result.unsupported) {
       return res.status(400).json({
-        error: `No template for "${result.docType}" yet. Allocation letters and receipts are the two that render.`,
+        error: `No template for "${result.docType}" yet. Allocation letters, receipts, deeds of assignment, `
+          + `subscriber's agreements and powers of attorney are the ones that render.`,
       });
     }
 
@@ -121,7 +125,11 @@ router.post('/:id/generate', requirePermission('documents.generate'), async (req
       action: result.was_regeneration ? 'document.regenerated' : 'document.generated',
       entityType: 're_documents',
       entityId: req.params.id,
-      summary: `${result.document.doc_type.replace(/_/g, ' ')} ${result.was_regeneration ? 'regenerated' : 'generated'}`,
+      summary: `${result.document.doc_type.replace(/_/g, ' ')} ${result.was_regeneration ? 'regenerated' : 'generated'}`
+        // SECTION 8 — a signing link only exists for the three signable
+        // types (documentService.notifySigningLink), so this only appends
+        // for those.
+        + (result.signing_url ? ' — signing link sent to the buyer' : ''),
       metadata: {
         reservation_id: result.document.reservation_id,
         doc_type: result.document.doc_type,
@@ -129,7 +137,11 @@ router.post('/:id/generate', requirePermission('documents.generate'), async (req
       },
     });
 
-    res.json({ ...result.document, download_url: result.download_url });
+    // signing_url is included so staff can also copy/share it directly
+    // (WhatsApp Web, say) — the automatic email/WhatsApp send is
+    // best-effort and a buyer with neither on file would otherwise have no
+    // way to get this document at all.
+    res.json({ ...result.document, download_url: result.download_url, signing_url: result.signing_url || null });
   } catch (e) { next(e); }
 });
 
@@ -180,6 +192,85 @@ router.patch('/:id/status', requirePermission('documents.updateStatus'), async (
     });
 
     res.json(data);
+  } catch (e) { next(e); }
+});
+
+// ── SECTION 8 — document template editor ────────────────────────────────────
+// Owner only (settings.write) — same tier as every other piece of workspace
+// configuration in routes/settings.js. Kept here rather than there because
+// this is squarely about documents, not about the workspace's own identity
+// or provider keys.
+router.get('/templates', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const { data: overrides, error } = await supabaseAdmin
+      .from('re_document_templates')
+      .select('doc_type, template_html, updated_at')
+      .eq('organization_id', req.orgId);
+    if (error) throw error;
+
+    const byType = new Map((overrides || []).map((o) => [o.doc_type, o]));
+    const templates = await Promise.all(SIGNABLE_DOC_TYPES.map(async (docType) => {
+      const override = byType.get(docType);
+      return {
+        doc_type: docType,
+        is_custom: Boolean(override),
+        updated_at: override?.updated_at || null,
+        template_html: override?.template_html || await getLegalTemplateHtml(req.orgId, docType),
+      };
+    }));
+
+    res.json(templates);
+  } catch (e) { next(e); }
+});
+
+// An empty/omitted template_html resets to the shipped default (deletes the
+// override row) — same "blank clears it" convention routes/settings.js uses
+// for a workspace's own provider keys.
+router.put('/templates/:docType', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const docType = req.params.docType;
+    if (!SIGNABLE_DOC_TYPES.includes(docType)) {
+      return res.status(400).json({ error: `docType must be one of: ${SIGNABLE_DOC_TYPES.join(', ')}` });
+    }
+
+    const html = String(req.body?.template_html || '').trim();
+
+    if (!html) {
+      await supabaseAdmin.from('re_document_templates')
+        .delete().eq('organization_id', req.orgId).eq('doc_type', docType);
+      audit(req, {
+        action: 'document_template.reset',
+        entityType: 're_document_templates',
+        summary: `${docType.replace(/_/g, ' ')} template reset to the default`,
+      });
+      return res.json({ doc_type: docType, is_custom: false, template_html: await getLegalTemplateHtml(req.orgId, docType) });
+    }
+
+    // Missing the reserved {{signature_block}} token would silently strip
+    // the buyer's actual signature out of the document that gets stored as
+    // evidence — see documentService.buildLegalDocumentHtml. Caught here,
+    // at save time, rather than discovered the day a buyer's signed PDF
+    // turns out to have never carried one.
+    if (!/{{\s*signature_block\s*}}/.test(html)) {
+      return res.status(400).json({ error: 'The template must include a {{signature_block}} placeholder for the buyer\'s signature.' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('re_document_templates')
+      .upsert({ organization_id: req.orgId, doc_type: docType, template_html: html, updated_at: new Date().toISOString() },
+        { onConflict: 'organization_id,doc_type' })
+      .select()
+      .single();
+    if (error) throw error;
+
+    audit(req, {
+      action: 'document_template.updated',
+      entityType: 're_document_templates',
+      entityId: data.id,
+      summary: `${docType.replace(/_/g, ' ')} template customized`,
+    });
+
+    res.json({ doc_type: docType, is_custom: true, template_html: data.template_html, updated_at: data.updated_at });
   } catch (e) { next(e); }
 });
 

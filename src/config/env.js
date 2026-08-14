@@ -78,6 +78,24 @@ const env = {
     senderId: process.env.TERMII_SENDER_ID || 'Archta',
   },
 
+  // WhatsApp Business (Meta Cloud API) — the platform's own business
+  // account, if this deployment runs one. Most workspaces configure their
+  // own instead (Settings → Notifications → WhatsApp, re_org_settings'
+  // whatsapp_* columns, migrations/024) the same way they can bring their
+  // own Paystack/Resend/Termii — see notificationService.resolveWhatsAppCredentials.
+  whatsapp: {
+    token: process.env.WHATSAPP_TOKEN || '',
+    phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+    businessAccountId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || '',
+    // SECTION 9 — the shared secret Meta's webhook verification handshake
+    // (GET /api/webhooks/whatsapp?hub.verify_token=...) is checked against.
+    // One value for the whole deployment, not per workspace, because a
+    // Meta webhook subscription is configured once at the App level —
+    // WHICH workspace an inbound message belongs to is resolved from the
+    // message's own phone_number_id against re_org_settings, not from this.
+    verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || '',
+  },
+
   cors: {
     allowedOrigins: (process.env.ALLOWED_ORIGINS || '')
       .split(',')

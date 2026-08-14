@@ -24,6 +24,11 @@ const { sweepEscalations } = require('../services/escalationService');
 const { notifyOverdue, remindUpcoming } = require('../services/overdueAlerts');
 const { checkTenancyRenewals } = require('../services/rentalService');
 const { mapWithConcurrency } = require('../utils/concurrency');
+const collectionsAgent = require('../services/collectionsAgent');
+const documentAgent = require('../services/documentAgent');
+const salesAgent = require('../services/salesAgent');
+const financeAgent = require('../services/financeAgent');
+const marketIntelAgent = require('../services/marketIntelAgent');
 
 const SCHEDULE = env.cron.schedule;
 
@@ -34,6 +39,17 @@ const SCHEDULE = env.cron.schedule;
 // bounding concurrency within ONE run is enough — nothing here needs the
 // coordination a real job queue would add.
 const ORG_CONCURRENCY = 8;
+
+// SECTION 11 — one agent, one org, never lets a failure propagate past its
+// own log line. Named consistently ("[re-daily] agent X failed for org Y")
+// so a bad morning is greppable by agent, not just by "something broke".
+async function runAgent(orgId, name, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`[re-daily] ${name} agent failed for org ${orgId}:`, err.message);
+  }
+}
 
 // ORDER MATTERS, and each step depends on the one above it:
 //
@@ -129,6 +145,20 @@ async function runDailyJob() {
       // One org's failure must not cost every other org their morning brief.
       console.error(`[re-daily] brief failed for org ${orgId}:`, err.message);
     }
+
+    // SECTION 11 — the five v2 agents, each one AFTER the brief above (some
+    // read that day's re_ai_briefs row directly — collectionsAgent reuses
+    // its drafted follow_ups verbatim, documentAgent/marketIntelAgent fold
+    // their own findings back into the same row). Every outbound message any
+    // of these five sends is gated by dealManager.clearance() inside the
+    // agent itself — see dealManager.js's own comment on why that check
+    // lives per-action rather than as one up-front pass. One agent's failure
+    // must not cost the others theirs, same reasoning as every step above.
+    await runAgent(orgId, 'collections', () => collectionsAgent.run(orgId));
+    await runAgent(orgId, 'document', () => documentAgent.run(orgId));
+    await runAgent(orgId, 'sales', () => salesAgent.run(orgId));
+    await runAgent(orgId, 'finance', () => financeAgent.runIfDue(orgId));
+    await runAgent(orgId, 'market-intel', () => marketIntelAgent.runIfDue(orgId));
   });
 
   console.log(`[re-daily] briefed ${succeeded}/${orgIds.length} org(s), ${alerted} alert(s), ${reminded} reminder(s), `

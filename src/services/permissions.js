@@ -112,12 +112,22 @@ const PERMISSIONS = {
   'settings.write': OWNER,
   'settings.transferOwner': OWNER,
   'reports.investor': OWNER,
+  // SECTION 6 — a collections/default-risk forecast is strategic, same
+  // owner-only tier as the investor report it sits beside on the Reports
+  // screen.
+  'reports.forecast': OWNER,
   'commissions.markPaid': OWNER,
   // There is no delete-workspace route in this product, and there must not be
   // one built casually: CLAUDE.md's "nothing is ever deleted" is the whole
   // data-integrity story. The permission is reserved so that if such a route
   // is ever built it is owner-only from its first line.
   'workspace.delete': OWNER,
+  // Creating a group and folding a workspace into/out of one — gated on
+  // whichever workspace is currently selected in the browser (req.orgRole),
+  // same as every other permission here. Group OWNERSHIP itself is a
+  // separate, orthogonal fact checked in src/services/groupService.js by
+  // parent_organizations.owner_id, not by this matrix — see routes/group.js.
+  'group.manage': OWNER,
 
   // ── Owner + Sales Director ───────────────────────────────────────────────
   'reservations.restructure': DIRECTORS,
@@ -126,6 +136,10 @@ const PERMISSIONS = {
   'reports.export': DIRECTORS,
   'reports.collections': DIRECTORS,
   'reports.rental': DIRECTORS,
+  // SECTION 5 — referral totals and credits given are business performance
+  // numbers, same tier as collections/rental, not the owner-only investor
+  // P&L view.
+  'reports.referrals': DIRECTORS,
   'commissions.approve': DIRECTORS,
   'commissions.readAll': DIRECTORS,
   'brief.read': DIRECTORS,
@@ -143,6 +157,11 @@ const PERMISSIONS = {
   // and a writable route with a read-only screen in front of it is not a
   // permission model.
   'inventory.write': DIRECTORS,
+  // SECTION 2 — construction milestone tracking: setting dates,
+  // percentages and photos is inventory-adjacent (same tier as
+  // inventory.write) rather than a sale-facing action, so a sales_rep
+  // reads progress (inventory.read is ALL) but does not edit it.
+  'construction.manage': DIRECTORS,
   // Restoring from the bin is the counterpart to deleting. Deleting is
   // owner-only; putting something back is not destructive, so a sales
   // director may — but a rep, a collections officer and a documentation

@@ -316,6 +316,31 @@
               }).join('') +
             '</div>' +
           '</div>'
+        : '') +
+
+      // SECTION 5 — every buyer has a code (migrations/024's DB default), so
+      // this always renders, not just for someone who has already referred
+      // anyone. The share link is a plain wa.me text-intent, not a page of
+      // its own — this product has no public buyer self-registration, so a
+      // referred friend hands the code to the developer's rep in person or
+      // over the phone, the same way "How did they find you? → Referral" has
+      // always worked; the code just lets that get formally credited.
+      (account.customer.referral_code
+        ? '<div class="card mt-2"><div class="card-body">' +
+            '<div class="stat-label">Your referral code</div>' +
+            '<div class="mono fs-21 mt-1">' + esc(account.customer.referral_code) + '</div>' +
+            (account.customer.referral_credit_balance > 0
+              ? '<div class="page-sub mt-1">' + esc(naira(account.customer.referral_credit_balance)) +
+                  ' referral credit on your account, to be applied to a future payment.</div>'
+              : '') +
+            '<div class="btn-row mt-2">' +
+              '<button class="btn-quiet" id="btn-copy-referral">Copy code</button>' +
+              '<a class="btn-quiet" target="_blank" rel="noopener" href="https://wa.me/?text=' +
+                encodeURIComponent('Use my referral code ' + account.customer.referral_code + ' when you buy with '
+                  + (developer.company_name || 'us') + '!') +
+                '">Share on WhatsApp</a>' +
+            '</div>' +
+          '</div></div>'
         : '');
 
     applyDynamicStyles(el('portal-view'));
@@ -399,6 +424,23 @@
           esc([project.name, project.location].filter(Boolean).join(', ')) +
           (unit.unit_type ? ' · ' + esc(unit.unit_type) : '') +
         '</div>' +
+        (r.construction
+          ? '<div class="page-sub mt-2 label-caps">Construction progress</div>' +
+            '<div class="flex-row justify-between gap-14 align-end mt-1">' +
+              '<div><div class="mono fs-21">' + esc(r.construction.name) + '</div>' +
+                '<div class="page-sub">' + r.construction.completion_percentage + '% complete' +
+                  (r.construction.status === 'completed' && r.construction.completed_date
+                    ? ' · reached <span class="nowrap">' + esc(fmtDate(r.construction.completed_date)) + '</span>'
+                    : r.construction.target_date
+                      ? ' · targeting <span class="nowrap">' + esc(fmtDate(r.construction.target_date)) + '</span>'
+                      : '') +
+                '</div></div>' +
+              '<span class="badge ' + esc(r.construction.status) + '">' + esc(r.construction.status.replace(/_/g, ' ')) + '</span>' +
+            '</div>' +
+            (r.construction.latest_photo_url
+              ? '<img class="construction-photo mt-2" src="' + esc(r.construction.latest_photo_url) + '" alt="Latest construction photo — ' + esc(r.construction.name) + '">'
+              : '')
+          : '') +
         (schedule.length
           ? '<div class="page-sub mt-2 label-caps">' +
               (rental ? 'Monthly rent' : 'Payment plan') +
@@ -506,6 +548,20 @@
         }
       });
     });
+
+    var copyReferral = el('btn-copy-referral');
+    if (copyReferral) {
+      copyReferral.addEventListener('click', async function () {
+        var code = copyReferral.closest('.card').querySelector('.mono').textContent;
+        try {
+          await navigator.clipboard.writeText(code);
+          copyReferral.textContent = 'Copied ✓';
+          setTimeout(function () { copyReferral.textContent = 'Copy code'; }, 1700);
+        } catch (err) {
+          toast('Could not copy — select and copy the code manually.', 'err');
+        }
+      });
+    }
   }
 
   document.addEventListener('DOMContentLoaded', load);

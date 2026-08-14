@@ -26,6 +26,7 @@ const { decrypt } = require('../utils/credentials');
 
 const RESEND_URL = 'https://api.resend.com/emails';
 const TERMII_URL = 'https://api.ng.termii.com/api/sms/send';
+const WHATSAPP_API_BASE = 'https://graph.facebook.com/v20.0';
 const SEND_TIMEOUT_MS = 15_000;
 
 // ── Per-workspace credentials ────────────────────────────────────────────
@@ -82,6 +83,42 @@ async function resolveTermiiCredentials(orgId) {
     }
   }
   return { apiKey: env.termii.apiKey || null, senderId: env.termii.senderId || null, error: null };
+}
+
+// Same shape a third time for WhatsApp (Meta Cloud API) — built in SECTION 5
+// to support referral-completion notifications, reused unmodified by SECTION
+// 9's agents for their own outbound sends. Unlike Resend/Termii there is no
+// platform-wide fallback account: a WhatsApp Business number is tied to one
+// registered business by Meta, so a workspace with nothing configured here
+// simply has no WhatsApp send capability yet (env.whatsapp.* below covers
+// only the platform's OWN business account, for a deployment run by the same
+// company for a single workspace — the common case for most tenants is still
+// "configure your own"). Same non-throwing decrypt-failure handling as the
+// other two, for the same reason.
+async function resolveWhatsAppCredentials(orgId) {
+  const { data } = await supabaseAdmin
+    .from('re_org_settings')
+    .select('whatsapp_token_encrypted, whatsapp_phone_number_id, whatsapp_business_account_id')
+    .eq('organization_id', orgId)
+    .maybeSingle();
+
+  if (data?.whatsapp_token_encrypted) {
+    try {
+      return {
+        token: decrypt(data.whatsapp_token_encrypted),
+        phoneNumberId: data.whatsapp_phone_number_id || env.whatsapp.phoneNumberId,
+        error: null,
+      };
+    } catch (err) {
+      console.error('[notify] could not decrypt org WhatsApp token:', err.message);
+      return { token: null, phoneNumberId: null, error: "This workspace's WhatsApp token could not be read." };
+    }
+  }
+  return {
+    token: env.whatsapp.token || null,
+    phoneNumberId: env.whatsapp.phoneNumberId || null,
+    error: null,
+  };
 }
 
 // ── Phone numbers ──────────────────────────────────────────────────────────
@@ -366,6 +403,138 @@ async function sendTestSms({ apiKey, senderId, to }) {
   return { valid: true };
 }
 
+// ── WhatsApp (Meta Cloud API) ────────────────────────────────────────────
+// Free-form text only — WhatsApp's 24-hour customer-service window rule
+// applies the same way it would to any business sending outside an approved
+// template, which this product does not attempt to route around. Every
+// call site here only ever fires in response to the buyer's own recent
+// activity (a referral they generated, a reply they sent — SECTION 9), which
+// is exactly the case that window is meant to allow.
+async function sendWhatsApp({ orgId, to, body, template = null, relatedType = null, relatedId = null }) {
+  const recipient = normalizeNigerianPhone(to);
+  const base = {
+    organization_id: orgId,
+    channel: 'whatsapp',
+    recipient: recipient || String(to || ''),
+    body: String(body || ''),
+    template,
+    related_type: relatedType,
+    related_id: relatedId,
+    provider: 'whatsapp_cloud_api',
+  };
+
+  if (!recipient) return { status: 'skipped', reason: 'no recipient' };
+
+  const { token, phoneNumberId, error } = await resolveWhatsAppCredentials(orgId);
+
+  if (error) {
+    await record({ ...base, status: 'failed', error });
+    return { status: 'failed', reason: error };
+  }
+
+  if (!token || !phoneNumberId) {
+    await record({ ...base, status: 'skipped', error: 'WhatsApp is not configured for this workspace' });
+    return { status: 'skipped', reason: 'whatsapp not configured' };
+  }
+
+  try {
+    const response = await fetchWithTimeout(
+      `${WHATSAPP_API_BASE}/${phoneNumberId}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to: recipient,
+          type: 'text',
+          text: { body: String(body || '') },
+        }),
+      },
+      SEND_TIMEOUT_MS,
+      'WhatsApp'
+    );
+
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = json?.error?.message || `WhatsApp returned ${response.status}`;
+      await record({ ...base, status: 'failed', error: message });
+      return { status: 'failed', reason: message };
+    }
+
+    await record({ ...base, status: 'sent', provider_id: json?.messages?.[0]?.id || null });
+    return { status: 'sent', id: json?.messages?.[0]?.id || null };
+  } catch (err) {
+    await record({ ...base, status: 'failed', error: err.message });
+    return { status: 'failed', reason: err.message };
+  }
+}
+
+// A document message (Meta Cloud API's own message type) rather than a text
+// message with a link in it — WhatsApp renders it as an attached file the
+// buyer can open in-app, the same as a document shared from any other
+// contact. `mediaUrl` has to be fetchable by Meta's servers at send time,
+// which a short-lived Supabase Storage signed URL already is — no separate
+// media-upload step needed for something sent once.
+async function sendWhatsAppDocument({ orgId, to, mediaUrl, filename, caption = null, template = null, relatedType = null, relatedId = null }) {
+  const recipient = normalizeNigerianPhone(to);
+  const base = {
+    organization_id: orgId,
+    channel: 'whatsapp',
+    recipient: recipient || String(to || ''),
+    body: caption || filename || 'document',
+    template,
+    related_type: relatedType,
+    related_id: relatedId,
+    provider: 'whatsapp_cloud_api',
+  };
+
+  if (!recipient) return { status: 'skipped', reason: 'no recipient' };
+
+  const { token, phoneNumberId, error } = await resolveWhatsAppCredentials(orgId);
+  if (error) {
+    await record({ ...base, status: 'failed', error });
+    return { status: 'failed', reason: error };
+  }
+  if (!token || !phoneNumberId) {
+    await record({ ...base, status: 'skipped', error: 'WhatsApp is not configured for this workspace' });
+    return { status: 'skipped', reason: 'whatsapp not configured' };
+  }
+
+  try {
+    const response = await fetchWithTimeout(
+      `${WHATSAPP_API_BASE}/${phoneNumberId}/messages`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to: recipient,
+          type: 'document',
+          document: { link: mediaUrl, filename: filename || 'document.pdf', caption: caption || undefined },
+        }),
+      },
+      SEND_TIMEOUT_MS,
+      'WhatsApp'
+    );
+
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = json?.error?.message || `WhatsApp returned ${response.status}`;
+      await record({ ...base, status: 'failed', error: message });
+      return { status: 'failed', reason: message };
+    }
+
+    await record({ ...base, status: 'sent', provider_id: json?.messages?.[0]?.id || null });
+    return { status: 'sent', id: json?.messages?.[0]?.id || null };
+  } catch (err) {
+    await record({ ...base, status: 'failed', error: err.message });
+    return { status: 'failed', reason: err.message };
+  }
+}
+
 // ── Presentation ───────────────────────────────────────────────────────────
 const stripTags = (html) => String(html).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -419,10 +588,13 @@ function emailShell({ heading, intro, rows = [], body = '', ctaLabel, ctaUrl, fo
 module.exports = {
   sendEmail,
   sendSms,
+  sendWhatsApp,
+  sendWhatsAppDocument,
   sendTestEmail,
   sendTestSms,
   resolveResendCredentials,
   resolveTermiiCredentials,
+  resolveWhatsAppCredentials,
   emailShell,
   normalizeNigerianPhone,
   naira,

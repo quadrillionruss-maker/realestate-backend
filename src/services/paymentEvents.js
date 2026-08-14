@@ -28,6 +28,8 @@ const receipts = require('./receiptService');
 const notify = require('./notificationService');
 const { auditSystem } = require('./auditService');
 const { escapeHtml } = require('../utils/escapeHtml');
+const creditScore = require('./creditScoreService');
+const referrals = require('./referralService');
 
 const naira = (amount) => {
   const n = Number(amount || 0);
@@ -152,6 +154,19 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
     // good standing and should stop receiving formal-notice wording.
     await maybeDeescalate(orgId, reservation.id);
   }
+
+  // ── Credit score (SECTION 3) ─────────────────────────────────────────────
+  // Every payment can move either the consistency or default-history
+  // dimension, so it is recomputed after every one — never throws, per this
+  // file's own rule.
+  await creditScore.recompute(orgId, customer.id);
+
+  // ── Referral completion (SECTION 5) ──────────────────────────────────────
+  // A no-op unless this customer was referred AND this is their first ever
+  // payment — see referralService.handleFirstPayment's own comment for how
+  // that is detected without counting payments. Never throws, per this
+  // file's own rule.
+  await referrals.handleFirstPayment(orgId, customer.id);
 
   // ── History ──────────────────────────────────────────────────────────────
   await auditSystem({
