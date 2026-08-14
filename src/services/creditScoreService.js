@@ -28,6 +28,13 @@ const { STAGES, describeStage } = require('./escalationService');
 
 const WEIGHTS = { consistency: 40, promises: 20, response: 20, defaults: 20 };
 
+// FEATURE — payment pause / hardship mode. Not one of the four weighted
+// dimensions above: those all measure behaviour that happened on its own,
+// while this is a flat penalty for a specific event (an APPROVED hardship
+// request — migrations/030), applied once per approval and stacking if a
+// buyer has used it on more than one reservation.
+const HARDSHIP_PENALTY = 15;
+
 // Ceiling for "as bad as the default-history dimension can read". Five is
 // not arbitrary — escalationService's own thresholds put five overdue
 // installments at 'final_notice', so five default EVENTS (which include
@@ -38,7 +45,7 @@ const DEFAULT_EVENTS_FLOOR = 5;
 const asArray = (value) => (Array.isArray(value) ? value : value ? [value] : []);
 
 async function loadCustomerHistory(orgId, customerId) {
-  const [{ data: reservations, error: resErr }, { data: promises, error: promErr }] = await Promise.all([
+  const [{ data: reservations, error: resErr }, { data: promises, error: promErr }, { data: hardship, error: hardshipErr }] = await Promise.all([
     supabaseAdmin
       .from('re_reservations')
       .select(`
@@ -53,13 +60,20 @@ async function loadCustomerHistory(orgId, customerId) {
       .select('status')
       .eq('organization_id', orgId)
       .eq('customer_id', customerId),
+    supabaseAdmin
+      .from('re_hardship_requests')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('customer_id', customerId)
+      .eq('status', 'approved'),
   ]);
   if (resErr) throw resErr;
   if (promErr) throw promErr;
-  return { reservations: reservations || [], promises: promises || [] };
+  if (hardshipErr) throw hardshipErr;
+  return { reservations: reservations || [], promises: promises || [], hardshipCount: hardship?.length || 0 };
 }
 
-function computeFromHistory({ reservations, promises }) {
+function computeFromHistory({ reservations, promises, hardshipCount = 0 }) {
   let dueCount = 0;
   let onTimeCount = 0;
   let defaultEvents = 0;
@@ -105,7 +119,9 @@ function computeFromHistory({ reservations, promises }) {
   const defaultRatio = Math.max(0, 1 - defaultEvents / DEFAULT_EVENTS_FLOOR);
   const defaultPoints = Math.round(WEIGHTS.defaults * defaultRatio);
 
-  const score = Math.max(0, Math.min(100, consistencyPoints + promisePoints + responsePoints + defaultPoints));
+  const hardshipPoints = -(HARDSHIP_PENALTY * Math.max(0, hardshipCount));
+  const score = Math.max(0, Math.min(100,
+    consistencyPoints + promisePoints + responsePoints + defaultPoints + hardshipPoints));
 
   return {
     score,
@@ -125,6 +141,9 @@ function computeFromHistory({ reservations, promises }) {
       default_history: {
         points: defaultPoints, of: WEIGHTS.defaults,
         default_events: defaultEvents,
+      },
+      hardship_penalty: {
+        points: hardshipPoints, per_use: -HARDSHIP_PENALTY, uses: Math.max(0, hardshipCount),
       },
     },
   };
@@ -171,4 +190,4 @@ function tier(score) {
   return { key: 'at_risk', label: 'At risk' };
 }
 
-module.exports = { WEIGHTS, computeFromHistory, computeBreakdown, recompute, tier };
+module.exports = { WEIGHTS, HARDSHIP_PENALTY, computeFromHistory, computeBreakdown, recompute, tier };

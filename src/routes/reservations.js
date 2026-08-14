@@ -7,6 +7,7 @@ const { assess, preview, restructure } = require('../services/restructureService
 const { assessTenancy, renewTenancy } = require('../services/rentalService');
 const { audit } = require('../services/auditService');
 const planRecommendations = require('../services/planRecommendationService');
+const handover = require('../services/handoverService');
 const router = express.Router();
 
 // Documentation has reservations.read (permissions.js) — "which unit, which
@@ -366,6 +367,72 @@ router.patch('/:id/status', requirePermission('reservations.updateStatus'), asyn
   } catch (e) { next(e); }
 });
 
+// FEATURE — the "Change rep" control in the buyer drawer. Owner and Sales
+// Director only (reservations.reassign, permissions.js): a Sales Executive
+// may see whose deal this is but not move it to somebody else, since that
+// changes who earns commission on every payment from here on.
+//
+// sales_rep_id may be null (unassign — "the MD will handle this one"), the
+// same choice the team-removal reassignment flow (routes/settings.js) already
+// offers. Past re_commissions rows are untouched: commissionService reads the
+// reservation's CURRENT sales_rep_id at the moment each payment lands, so
+// this takes effect on the next payment onward without rewriting history.
+router.patch('/:id/sales-rep', requirePermission('reservations.reassign'), async (req, res, next) => {
+  try {
+    const { sales_rep_id: targetRepId = null } = req.body || {};
+
+    const { data: existing } = await supabaseAdmin
+      .from('re_reservations')
+      .select('id, sales_rep_id, re_sales_reps(id, users(full_name, email))')
+      .eq('id', req.params.id)
+      .eq('organization_id', req.orgId)
+      .maybeSingle();
+    if (!existing) return res.status(404).json({ error: 'Reservation not found' });
+
+    let targetRep = null;
+    if (targetRepId) {
+      const { data } = await supabaseAdmin
+        .from('re_sales_reps')
+        .select('id, active, users(full_name, email)')
+        .eq('id', targetRepId)
+        .eq('organization_id', req.orgId)
+        .maybeSingle();
+      if (!data || !data.active) {
+        return res.status(400).json({ error: 'Reassign to an active sales rep in this workspace.' });
+      }
+      targetRep = data;
+    }
+
+    const { data: reservation, error } = await supabaseAdmin
+      .from('re_reservations')
+      .update({ sales_rep_id: targetRepId })
+      .eq('id', req.params.id)
+      .eq('organization_id', req.orgId)
+      .select()
+      .single();
+    if (error) throw error;
+
+    const fromName = existing.re_sales_reps?.users?.full_name || existing.re_sales_reps?.users?.email || null;
+    const toName = targetRep?.users?.full_name || targetRep?.users?.email || null;
+
+    audit(req, {
+      action: 'reservation.rep_changed',
+      entityType: 're_reservations',
+      entityId: reservation.id,
+      summary: fromName && toName
+        ? `Reassigned from ${fromName} to ${toName}`
+        : toName
+          ? `Assigned to ${toName}`
+          : fromName
+            ? `Unassigned from ${fromName}`
+            : 'Sales rep assignment cleared',
+      metadata: { from_sales_rep_id: existing.sales_rep_id, to_sales_rep_id: targetRepId, from_name: fromName, to_name: toName },
+    });
+
+    res.json(reservation);
+  } catch (e) { next(e); }
+});
+
 // ── Plan restructuring ─────────────────────────────────────────────────────
 // The alternative to cancelling. A buyer three installments down renegotiates
 // terms; before this the only route was to cancel the reservation and re-enter
@@ -471,6 +538,32 @@ router.post('/:id/renew-tenancy', requirePermission('reservations.renewTenancy')
       reason: reason || null,
     });
 
+    if (result.notFound) return res.status(404).json({ error: 'Reservation not found' });
+    res.status(201).json(result);
+  } catch (e) { next(e); }
+});
+
+// ── Handover checklist ──────────────────────────────────────────────────
+// SECTION 11. Owner/sales_director only (handover.manage) — the frontend
+// prompts this after a reservation is marked 'completed' (PATCH
+// /:id/status above), but nothing on THAT route creates one automatically.
+router.get('/:id/handover', requirePermission('handover.manage'), async (req, res, next) => {
+  try {
+    const data = await handover.getChecklist(req.orgId, req.params.id);
+    if (!data) return res.status(404).json({ error: 'No handover checklist for this reservation yet.' });
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/handover', requirePermission('handover.manage'), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const result = await handover.createChecklist(req, req.params.id, {
+      handoverDate: body.handover_date,
+      keysHanded: body.keys_handed,
+      meterReadings: body.meter_readings,
+      documentsProvided: body.documents_provided,
+    });
     if (result.notFound) return res.status(404).json({ error: 'Reservation not found' });
     res.status(201).json(result);
   } catch (e) { next(e); }

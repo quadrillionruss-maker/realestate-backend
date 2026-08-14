@@ -40,7 +40,7 @@ const { resolveBranding } = require('../services/brandingService');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { amountInWords } = require('../utils/amountInWords');
 const { parseCsvToObjects, parseAmount, parseDate, toCsv } = require('../utils/csv');
-const { stageForOverdueCount, describeStage } = require('../services/escalationService');
+const { stageForOverdueCount, describeStage, isAtRisk } = require('../services/escalationService');
 const { normalizeNigerianPhone } = require('../services/notificationService');
 const auth = require('../services/authService');
 const portal = require('../services/portalService');
@@ -72,6 +72,10 @@ const { INTENTS, keywordIntent } = require('../services/whatsappBotService');
 const {
   extractPromisedDate, WILL_PAY_RE, ALREADY_PAID_RE, CANNOT_PAY_RE,
 } = require('../services/collectionsAgent');
+const { requestPause } = require('../services/hardshipService');
+const { scale: projectHealthScale, WARNING_THRESHOLD, CRITICAL_THRESHOLD } = require('../services/projectHealthService');
+const { isEligible: isFinancingEligible } = require('../services/financingService');
+const exchangeRateService = require('../services/exchangeRateService');
 const { bucketFor, MAX_MESSAGES_PER_LEAD } = require('../services/salesAgent');
 const { isDue: financeIsDue, collectRecipientEmails } = require('../services/financeAgent');
 const { isDue: marketIntelIsDue } = require('../services/marketIntelAgent');
@@ -114,6 +118,15 @@ try {
   if (!/document is not defined/.test(err.message)) throw err;
 }
 const { naturalSort, matchImportColumn, remapCsv } = global.window.RE;
+
+// SECTION 14 — offline-queue.js loads after realestate.js (needs
+// window.RE) and never touches `document` at its own top level (only
+// inside functions called at boot/use time, none of which run here), so
+// unlike the two files above it does not even need the try/catch — see
+// this file's own header comment on why the service worker it pairs with
+// has no such seam and is therefore NOT tested here.
+require('../../frontend/offline-queue.js');
+const { buildEntry, sortByQueuedAt, summarize } = global.window.RE.offlineQueue;
 
 let passed = 0;
 const failures = [];
@@ -536,6 +549,24 @@ test('reports an all-clear day without inventing work', () => {
   assert.strictEqual(brief.recommendations.length, 0);
 });
 
+// SECTION 2 — yesterday's call/visit notes feed the summary.
+test('the summary mentions a buyer called yesterday, and their promise', () => {
+  const brief = buildFallbackBrief({
+    today: '2026-07-26',
+    overdue: [],
+    upcomingWeek: [],
+    pendingDocuments: [],
+    recentActivities: [{
+      customer_ref: 'BUYER_1',
+      customer_name: 'Mrs Adeyemi',
+      activity_type: 'call',
+      outcome: 'promised_payment',
+      notes: 'Will pay Monday',
+    }],
+  });
+  assert.match(brief.summary, /Mrs Adeyemi was called yesterday and promised payment — "Will pay Monday"/);
+});
+
 // ── Dates ────────────────────────────────────────────────────────────────
 section('Lagos date handling');
 
@@ -625,6 +656,17 @@ test('escalates by how many installments have been missed, not by feel', () => {
 test('an unknown stage reads as "none" rather than throwing', () => {
   assert.strictEqual(describeStage('nonsense').key, 'none');
   assert.strictEqual(describeStage(null).key, 'none');
+});
+
+// FEATURE — the at-risk list's threshold. routes/dashboard.js's GET
+// /at-risk filters with this exact function, so asserting isAtRisk(1) is
+// true is equivalent to asserting a buyer with exactly one overdue
+// installment appears on the at-risk list — the same reasoning the RBAC
+// matrix tests above rely on for canAccess().
+test('a buyer with exactly 1 overdue installment is at risk (was 2+ before this change)', () => {
+  assert.strictEqual(isAtRisk(0), false);
+  assert.ok(isAtRisk(1));
+  assert.ok(isAtRisk(2));
 });
 
 const promiseState = {
@@ -1007,6 +1049,7 @@ async function runPortalBalanceTests() {
         re_documents: { data: [] },
         re_payments: { data: payments },
         re_customers: { data: null, error: null }, // portal_last_seen_at bump
+        re_hardship_requests: { data: [] }, // SECTION 4 — per-reservation eligibility read
       },
       () => portal.loadPortalAccount({ id: 'cust-1', organization_id: 'org-1', full_name: 'Buyer One', email: 'b@example.com', phone: '08030000000' }),
     );
@@ -1741,6 +1784,24 @@ test('computeFromHistory: default history is floored at 5 events, never scores n
   assert.ok(score >= 0);
 });
 
+// SECTION 4 — an approved hardship request costs 15 points, applied by
+// RECOMPUTING (creditScoreService.recompute calls computeBreakdown, which
+// calls this) rather than by mutating the stored number directly — the only
+// way the penalty survives the next payment event recomputing the score
+// from scratch.
+test('computeFromHistory: an approved hardship request costs 15 points off an otherwise perfect score', () => {
+  const clean = computeFromHistory({ reservations: [], promises: [] });
+  assert.strictEqual(clean.score, 100);
+
+  const withHardship = computeFromHistory({ reservations: [], promises: [], hardshipCount: 1 });
+  assert.strictEqual(withHardship.score, 85);
+  assert.strictEqual(withHardship.breakdown.hardship_penalty.points, -15);
+
+  // Stacks per use, but the final score never goes negative.
+  const usedFiveTimes = computeFromHistory({ reservations: [], promises: [], hardshipCount: 10 });
+  assert.strictEqual(usedFiveTimes.score, 0);
+});
+
 test('tier() matches the product spec\'s four bands exactly at their boundaries', () => {
   assert.strictEqual(tier(100).key, 'excellent');
   assert.strictEqual(tier(80).key, 'excellent');
@@ -2104,6 +2165,141 @@ test('sales_director CAN restructure plans, renew tenancies, approve commissions
   assert.ok(canAccess('sales_director', 'brief.read'));
 });
 
+// FEATURE — "Change rep" on a reservation, and "Reassign all reservations"
+// from a rep's profile, both change whose commission accrues going forward.
+// Same DIRECTORS-only tier as restructuring a plan.
+test('reservations.reassign is owner/sales_director only', () => {
+  assert.ok(canAccess('owner', 'reservations.reassign'));
+  assert.ok(canAccess('sales_director', 'reservations.reassign'));
+  assert.strictEqual(canAccess('sales_rep', 'reservations.reassign'), false);
+  assert.strictEqual(canAccess('collections', 'reservations.reassign'), false);
+  assert.strictEqual(canAccess('documentation', 'reservations.reassign'), false);
+});
+
+// SECTION 2 — every operational role except Documentation may log a call or
+// visit note; routes/customers.js narrows sales_rep further to their own
+// buyers only (a row-level check, not part of this matrix).
+// FEATURE — hardship review is owner/sales_director only, never automatic
+// and never a collections/rep decision (CLAUDE.md's spec for this feature).
+// SECTION 9 — "Apply for bank financing" only shows once 30% of the
+// buyer's WHOLE account is paid AND their credit score is above 40 — both
+// conditions, not either.
+test('financing eligibility requires 30%+ paid AND credit score above 40', () => {
+  assert.strictEqual(isFinancingEligible({ totalContracted: 10_000_000, totalPaid: 3_000_000, creditScoreValue: 50 }), true);
+  assert.strictEqual(isFinancingEligible({ totalContracted: 10_000_000, totalPaid: 2_999_999, creditScoreValue: 50 }), false);
+  assert.strictEqual(isFinancingEligible({ totalContracted: 10_000_000, totalPaid: 5_000_000, creditScoreValue: 40 }), false); // exactly 40 is not ABOVE 40
+  assert.strictEqual(isFinancingEligible({ totalContracted: 0, totalPaid: 0, creditScoreValue: 100 }), false); // nothing contracted yet
+});
+
+// SECTION 11 — handover checklist and snagging: same DIRECTORS tier as
+// restructuring a plan or renewing a tenancy, another sales-completion task.
+// SECTION 12 — contractors/outflow tracking is owner only, same tier as the
+// investor report it sits beside on the Reports screen.
+// SECTION 13 — community moderation (read every project's threads, pin,
+// remove) is owner/sales_director, same tier as legal.read and other
+// oversight-not-authorship actions.
+// SECTION 15 — the health score and its signal breakdown are owner only,
+// same tier as the investor report.
+test('projectHealth.read is owner-only', () => {
+  assert.ok(canAccess('owner', 'projectHealth.read'));
+  assert.strictEqual(canAccess('sales_director', 'projectHealth.read'), false);
+  assert.strictEqual(canAccess('collections', 'projectHealth.read'), false);
+});
+
+test('community.moderate is owner/sales_director only', () => {
+  assert.ok(canAccess('owner', 'community.moderate'));
+  assert.ok(canAccess('sales_director', 'community.moderate'));
+  assert.strictEqual(canAccess('sales_rep', 'community.moderate'), false);
+  assert.strictEqual(canAccess('collections', 'community.moderate'), false);
+});
+
+// SECTION 15 — the abandoned-project health score's shared scaling
+// function. Every one of the five signals goes through this, so its own
+// correctness (clamped, linear, direction-agnostic) is worth asserting
+// directly rather than only indirectly through five separate signal tests.
+test('projectHealthService.scale: linear between badAt and goodAt, clamped outside it', () => {
+  assert.strictEqual(projectHealthScale(90, 90, 14, 20), 0, 'at or below badAt scores zero');
+  assert.strictEqual(projectHealthScale(200, 90, 14, 20), 0, 'worse than badAt still floors at zero, never negative');
+  assert.strictEqual(projectHealthScale(14, 90, 14, 20), 20, 'at or above goodAt scores full marks');
+  assert.strictEqual(projectHealthScale(0, 90, 14, 20), 20, 'better than goodAt still caps at full marks');
+  assert.strictEqual(projectHealthScale(52, 90, 14, 20), 10, 'halfway between badAt and goodAt scores half marks');
+});
+
+test('projectHealthService.scale: also works with badAt > goodAt (fewer complaints = more points)', () => {
+  assert.strictEqual(projectHealthScale(0, 5, 0, 20), 20, 'zero complaints scores full marks');
+  assert.strictEqual(projectHealthScale(5, 5, 0, 20), 0, 'five complaints (badAt) scores zero');
+  assert.strictEqual(projectHealthScale(10, 5, 0, 20), 0, 'worse than badAt still floors at zero');
+});
+
+test('projectHealth thresholds: warning (60) is stricter than critical (40) — a project cannot be critical without also being a warning', () => {
+  assert.ok(CRITICAL_THRESHOLD < WARNING_THRESHOLD);
+});
+
+test('contractors.manage is owner-only', () => {
+  assert.ok(canAccess('owner', 'contractors.manage'));
+  assert.strictEqual(canAccess('sales_director', 'contractors.manage'), false);
+  assert.strictEqual(canAccess('collections', 'contractors.manage'), false);
+});
+
+test('handover.manage is owner/sales_director only', () => {
+  assert.ok(canAccess('owner', 'handover.manage'));
+  assert.ok(canAccess('sales_director', 'handover.manage'));
+  assert.strictEqual(canAccess('sales_rep', 'handover.manage'), false);
+  assert.strictEqual(canAccess('collections', 'handover.manage'), false);
+  assert.strictEqual(canAccess('documentation', 'handover.manage'), false);
+});
+
+test('financing.manage is owner-only; financing.read is owner/sales_director', () => {
+  assert.ok(canAccess('owner', 'financing.manage'));
+  assert.strictEqual(canAccess('sales_director', 'financing.manage'), false);
+
+  assert.ok(canAccess('owner', 'financing.read'));
+  assert.ok(canAccess('sales_director', 'financing.read'));
+  assert.strictEqual(canAccess('sales_rep', 'financing.read'), false);
+});
+
+// SECTION 8 — opening/editing a legal case is owner-only (same weight as
+// waiving debt); a director may still READ where every case stands.
+test('legal.manage is owner-only; legal.read is owner/sales_director', () => {
+  assert.ok(canAccess('owner', 'legal.manage'));
+  assert.strictEqual(canAccess('sales_director', 'legal.manage'), false);
+  assert.strictEqual(canAccess('collections', 'legal.manage'), false);
+
+  assert.ok(canAccess('owner', 'legal.read'));
+  assert.ok(canAccess('sales_director', 'legal.read'));
+  assert.strictEqual(canAccess('sales_rep', 'legal.read'), false);
+  assert.strictEqual(canAccess('collections', 'legal.read'), false);
+  assert.strictEqual(canAccess('documentation', 'legal.read'), false);
+});
+
+test('hardship.review is owner/sales_director only', () => {
+  assert.ok(canAccess('owner', 'hardship.review'));
+  assert.ok(canAccess('sales_director', 'hardship.review'));
+  assert.strictEqual(canAccess('sales_rep', 'hardship.review'), false);
+  assert.strictEqual(canAccess('collections', 'hardship.review'), false);
+  assert.strictEqual(canAccess('documentation', 'hardship.review'), false);
+});
+
+// SECTION 5 — the buyer message thread is a sales channel, not a
+// collections or paperwork one.
+test('messages.read/write are owner/sales_director/sales_rep, not collections or documentation', () => {
+  for (const action of ['messages.read', 'messages.write']) {
+    assert.ok(canAccess('owner', action));
+    assert.ok(canAccess('sales_director', action));
+    assert.ok(canAccess('sales_rep', action));
+    assert.strictEqual(canAccess('collections', action), false);
+    assert.strictEqual(canAccess('documentation', action), false);
+  }
+});
+
+test('activities.write is everyone except documentation', () => {
+  assert.ok(canAccess('owner', 'activities.write'));
+  assert.ok(canAccess('sales_director', 'activities.write'));
+  assert.ok(canAccess('sales_rep', 'activities.write'));
+  assert.ok(canAccess('collections', 'activities.write'));
+  assert.strictEqual(canAccess('documentation', 'activities.write'), false);
+});
+
 // Sales Rep gets 403 on record payment, generate document, view other rep's
 // buyers. The third is a row-level filter (customers.js), not a permission
 // gate, so it is asserted at the schema-test level against real rows; here we
@@ -2313,6 +2509,73 @@ async function runBrandingTests() {
       users: { 'solo-user-1': { full_name: 'Solo Person', brand_logo_url: 'https://cdn.example.com/solo.png' } },
     }, () => resolveBranding('solo-user-1'));
     assert.strictEqual(branding.logo_url, 'https://cdn.example.com/solo.png');
+  });
+}
+
+// SECTION 4 — hardshipService.requestPause's input validation. Both bad-input
+// cases throw before the function ever touches supabaseAdmin (see the file's
+// own source — the length/range checks run first), so a fake customer object
+// is enough; no database stub required, unlike runBrandingTests above.
+async function runHardshipValidationTests() {
+  section('Hardship mode — request validation');
+
+  const fakeCustomer = { id: 'cust-1', organization_id: 'org-1', full_name: 'Buyer', email: null };
+
+  await testAsync('a reason under 20 characters is refused before any database read', async () => {
+    await assert.rejects(
+      () => requestPause(fakeCustomer, 'res-1', { reason: 'too short', pauseMonths: 1 }),
+      /at least 20 characters/
+    );
+  });
+
+  await testAsync('pause_months outside 1-3 is refused', async () => {
+    await assert.rejects(
+      () => requestPause(fakeCustomer, 'res-1', { reason: 'Lost my job and need time to recover', pauseMonths: 4 }),
+      /between 1 and 3/
+    );
+    await assert.rejects(
+      () => requestPause(fakeCustomer, 'res-1', { reason: 'Lost my job and need time to recover', pauseMonths: 0 }),
+      /between 1 and 3/
+    );
+  });
+}
+
+// SECTION 10 — the exchange-rate cache. Seeding a FRESH cache via
+// _setCacheForTests means getRates() takes its cache-hit path and never
+// calls the real ExchangeRate-API — deterministic and offline, the same
+// reasoning every other suite in this file relies on.
+async function runExchangeRateTests() {
+  section('Exchange rates — display cache (SECTION 10)');
+
+  await testAsync('a fresh cache is served as-is, filtered to the four display currencies, and marked not stale', async () => {
+    exchangeRateService._setCacheForTests({
+      rates: { USD: 0.0006, GBP: 0.00048, EUR: 0.00055, CAD: 0.00082, JPY: 0.09 },
+      fetched_at: Date.now(),
+    });
+    const result = await exchangeRateService.getRates();
+    assert.strictEqual(result.base, 'NGN');
+    assert.deepStrictEqual(Object.keys(result.rates).sort(), ['CAD', 'EUR', 'GBP', 'USD']);
+    assert.strictEqual(result.stale, false);
+  });
+
+  await testAsync('a refresh failure falls back to the stale cache rather than throwing or returning nothing', async () => {
+    exchangeRateService._setCacheForTests({
+      rates: { USD: 0.0006, GBP: 0.00048 },
+      fetched_at: Date.now() - (exchangeRateService.CACHE_TTL_MS + 60_000),
+    });
+    // Swapped for the duration of this one call and restored after, the same
+    // pattern every withFake* helper in this file uses for supabaseAdmin.from
+    // — this suite stays offline even though getRates() would otherwise hit
+    // the real ExchangeRate-API once the cache is stale.
+    const originalFetch = global.fetch;
+    global.fetch = async () => { throw new Error('network unreachable in test'); };
+    try {
+      const result = await exchangeRateService.getRates();
+      assert.ok(result.rates, 'falls back to the stale cache rather than returning nothing');
+      assert.strictEqual(result.rates.USD, 0.0006);
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 }
 
@@ -2612,6 +2875,66 @@ test('the last payment row absorbs the full excess when a buyer pays more than t
   assert.strictEqual(result.overpayment, 75_000);
 });
 
+// SECTION 14 — the offline sync queue's data structure (offline-queue.js).
+// The IndexedDB-backed storage and the service worker's own caching are not
+// testable here (no browser, no ServiceWorkerGlobalScope in Node) — these
+// are the PURE functions that decide queue-entry shape, sync order and the
+// topbar indicator's state, exactly the seam this file's own header points to.
+section('Offline sync queue (SECTION 14)');
+
+test('buildEntry produces a well-shaped, pending queue entry', () => {
+  const entry = buildEntry('new_buyer', '/customers', { full_name: 'Mrs Adeyemi' });
+  assert.strictEqual(entry.type, 'new_buyer');
+  assert.strictEqual(entry.path, '/customers');
+  assert.deepStrictEqual(entry.payload, { full_name: 'Mrs Adeyemi' });
+  assert.strictEqual(entry.status, 'pending');
+  assert.strictEqual(entry.attempts, 0);
+  assert.strictEqual(entry.last_error, null);
+  assert.ok(entry.id, 'has a unique id');
+  assert.ok(!Number.isNaN(Date.parse(entry.queued_at)), 'queued_at is a real timestamp');
+});
+
+test('buildEntry gives two entries built back-to-back different ids', () => {
+  const a = buildEntry('log_activity', '/customers/1/activities', { notes: 'x' });
+  const b = buildEntry('log_activity', '/customers/1/activities', { notes: 'y' });
+  assert.notStrictEqual(a.id, b.id);
+});
+
+test('sortByQueuedAt orders oldest first — "sync all queued submissions in order"', () => {
+  const first = { id: 'a', queued_at: '2026-01-01T09:00:00.000Z' };
+  const second = { id: 'b', queued_at: '2026-01-01T09:05:00.000Z' };
+  const third = { id: 'c', queued_at: '2026-01-01T09:10:00.000Z' };
+  const sorted = sortByQueuedAt([third, first, second]);
+  assert.deepStrictEqual(sorted.map((e) => e.id), ['a', 'b', 'c']);
+});
+
+test('sortByQueuedAt does not mutate the array it was given', () => {
+  const original = [{ id: 'b', queued_at: '2026-01-01T09:05:00.000Z' }, { id: 'a', queued_at: '2026-01-01T09:00:00.000Z' }];
+  const originalOrder = original.map((e) => e.id);
+  sortByQueuedAt(original);
+  assert.deepStrictEqual(original.map((e) => e.id), originalOrder);
+});
+
+test('summarize: an empty queue reads as synced', () => {
+  const summary = summarize([]);
+  assert.strictEqual(summary.isSynced, true);
+  assert.strictEqual(summary.isSyncing, false);
+  assert.strictEqual(summary.pendingCount, 0);
+  assert.strictEqual(summary.failedCount, 0);
+});
+
+test('summarize: a mix of pending/syncing/failed counts each correctly, for the topbar indicator', () => {
+  const summary = summarize([
+    { status: 'pending' }, { status: 'pending' }, { status: 'syncing' }, { status: 'failed' },
+  ]);
+  assert.strictEqual(summary.total, 4);
+  assert.strictEqual(summary.pendingCount, 2);
+  assert.strictEqual(summary.syncingCount, 1);
+  assert.strictEqual(summary.failedCount, 1);
+  assert.strictEqual(summary.isSyncing, true, 'any item mid-sync means the badge reads "Syncing"');
+  assert.strictEqual(summary.isSynced, false, 'a non-empty queue is never "Synced", even if every item already failed once');
+});
+
 (async () => {
   // Each of these swaps supabaseAdmin.from for the duration of its own
   // suite and restores it afterward (see each function's own withFake*
@@ -2622,6 +2945,8 @@ test('the last payment row absorbs the full excess when a buyer pays more than t
   await runAuthServiceTests();
   await runAuthMiddlewareTests();
   await runBrandingTests();
+  await runHardshipValidationTests();
+  await runExchangeRateTests();
 
   // ── Report ─────────────────────────────────────────────────────────────
   console.log(`\n${passed} passed, ${failures.length} failed`);

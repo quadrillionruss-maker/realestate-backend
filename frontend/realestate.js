@@ -1206,6 +1206,60 @@
   // A stored token is a claim, not proof. /auth/me is what turns it into a
   // session: until the server confirms who this is, the app is not shown at
   // all — "looks signed in" and "is signed in" are the same state here.
+  // SECTION 14 — offline-first mode. "Only works for sales_rep role — other
+  // roles see a standard offline message" (the existing renderFailure() in
+  // renderRoute already IS that standard message, for status:0 — nothing
+  // else has to change for them). Called once per sign-in from enterApp();
+  // the online/offline listeners themselves are wired only once even across
+  // a workspace switch that calls enterApp() again, via the guard below.
+  var offlineModeWired = false;
+  function setUpOfflineMode(role) {
+    var banner = el('offline-banner');
+    var syncBadge = el('sync-status');
+    if (!banner || !syncBadge) return;
+
+    var isRep = role === 'sales_rep';
+    banner.classList.toggle('hidden', !isRep || navigator.onLine);
+    if (isRep && RE.offlineQueue) RE.offlineQueue.refreshSyncBadge();
+    else syncBadge.classList.add('hidden');
+
+    if (offlineModeWired) return;
+    offlineModeWired = true;
+
+    window.addEventListener('offline', function () {
+      if (RE.state.user && RE.state.user.role === 'sales_rep') banner.classList.remove('hidden');
+    });
+    // Fires once connectivity actually returns — the browser's own signal,
+    // not a poll. A rep on the road gets exactly one automatic sync attempt
+    // per reconnect, not a timer running down their battery. Wired here
+    // (not inside offline-queue.js) so the toast callbacks that turn a sync
+    // result into user-visible feedback live in one file.
+    window.addEventListener('online', function () {
+      banner.classList.add('hidden');
+      if (RE.state.user && RE.state.user.role === 'sales_rep' && RE.offlineQueue) {
+        RE.offlineQueue.syncQueue(onQueueItemSynced, onQueueItemFailed);
+      }
+    });
+
+    syncBadge.addEventListener('click', function () {
+      if (!RE.offlineQueue) return;
+      RE.offlineQueue.getAll().then(function (all) {
+        var failed = all.filter(function (e) { return e.status === 'failed'; });
+        if (!failed.length) return;
+        toast('Retrying ' + plural(failed.length, 'submission') + '…', 'ok');
+        failed.forEach(function (entry) { RE.offlineQueue.retryEntry(entry.id, onQueueItemSynced, onQueueItemFailed); });
+      });
+    });
+  }
+
+  function onQueueItemSynced(entry) {
+    var label = entry.type === 'new_buyer' ? 'New buyer' : entry.type === 'new_reservation' ? 'New reservation' : 'Activity';
+    toast(label + ' synced.', 'ok');
+  }
+  function onQueueItemFailed(entry, err) {
+    toast('Could not sync a queued submission: ' + err.message, 'err');
+  }
+
   async function enterApp() {
     var me;
     try {
@@ -1222,6 +1276,7 @@
     renderWorkspaceSwitcher(me);
     renderGroupLink(me);
     renderWhoBlock(me);
+    setUpOfflineMode(me.role);
 
     el('dateline').textContent = new Date().toLocaleDateString('en-NG', {
       weekday: 'long', day: 'numeric', month: 'long',

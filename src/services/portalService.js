@@ -34,8 +34,23 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 // restructured."
 const { contractValue } = require('./restructureService');
 const { getMilestonesForProjects, currentMilestoneSummary } = require('./constructionService');
+const { isEligible: isFinancingEligible } = require('./financingService');
+const { portalNoticeFor } = require('./projectHealthService');
 
 const PORTAL_AUDIENCE = 're-portal';
+
+// SECTION 7 — the three document types every reservation's legal timeline
+// shows, in the fixed order the buyer sees them. allocation_letter first
+// (it exists from the moment a reservation is confirmed, before any legal
+// paperwork), then the two SIGNABLE_DOC_TYPES (documentService.js) that
+// actually apply to a sale — power_of_attorney is the third SIGNABLE type
+// but is not part of every sale's own paperwork, so it stays out of this
+// fixed three-step tracker.
+const LEGAL_DOC_TYPES = [
+  { doc_type: 'allocation_letter', label: 'Allocation Letter' },
+  { doc_type: 'deed_of_assignment', label: 'Deed of Assignment' },
+  { doc_type: 'subscriber_agreement', label: 'Subscriber Agreement' },
+];
 
 function issuePortalToken(customer) {
   return jwt.sign(
@@ -80,7 +95,7 @@ async function verifyPortalToken(token) {
 
   const { data: customer, error } = await supabaseAdmin
     .from('re_customers')
-    .select('id, organization_id, full_name, email, phone, portal_token_version, referral_code, referral_credit_balance')
+    .select('id, organization_id, full_name, email, phone, portal_token_version, referral_code, referral_credit_balance, credit_score')
     .eq('id', claims.cid)
     .maybeSingle();
   if (error) throw error;
@@ -106,7 +121,11 @@ async function loadPortalAccount(customer) {
       .from('re_reservations')
       .select(`
         id, status, reserved_at, property_type, tenancy_start_date, tenancy_end_date,
-        re_units(unit_number, unit_type, size_sqm, list_price, re_projects(id, name, location)),
+        re_units(
+          unit_number, unit_type, size_sqm, list_price, metadata,
+          bedrooms, bathrooms, parking_spaces, floor_level, furnishing_status,
+          re_projects(id, name, location)
+        ),
         re_installment_plans(
           id, total_amount, original_total_amount, status, number_of_installments, frequency, start_date,
           re_installment_schedule(id, installment_number, due_date, amount_due, status, paid_at)
@@ -137,6 +156,40 @@ async function loadPortalAccount(customer) {
         .eq('status', 'generated')
         .order('generated_at', { ascending: false })
     : { data: [] };
+
+  // SECTION 7 — the legal-documents status TRACKER, unlike the download list
+  // above, deliberately includes every status ('pending' included) — the
+  // whole point is showing a buyer where their paperwork stands even before
+  // there is anything to download.
+  const { data: legalDocRows } = reservationIds.length
+    ? await supabaseAdmin
+        .from('re_documents')
+        .select('id, doc_type, status, generated_at, reservation_id')
+        .eq('organization_id', customer.organization_id)
+        .in('reservation_id', reservationIds)
+        .in('doc_type', LEGAL_DOC_TYPES.map((t) => t.doc_type))
+    : { data: [] };
+
+  // SECTION 4 — payment pause eligibility, per reservation. "Once per
+  // reservation" (migrations/030) means an approved request blocks the
+  // button forever; a pending one blocks it until reviewed; a denied one
+  // does not block a fresh attempt.
+  const { data: hardshipRows } = reservationIds.length
+    ? await supabaseAdmin
+        .from('re_hardship_requests')
+        .select('reservation_id, status')
+        .eq('organization_id', customer.organization_id)
+        .in('reservation_id', reservationIds)
+    : { data: [] };
+  const hardshipByReservation = new Map();
+  for (const row of hardshipRows || []) {
+    const existing = hardshipByReservation.get(row.reservation_id);
+    // 'approved' beats 'pending' beats 'denied' if a buyer somehow has more
+    // than one row (only possible today via a denied request followed by a
+    // fresh pending one) — the more blocking status is the one that matters.
+    const rank = { approved: 2, pending: 1, denied: 0 };
+    if (!existing || rank[row.status] > rank[existing]) hardshipByReservation.set(row.reservation_id, row.status);
+  }
 
   // Every plan's schedule rows go in here, superseded or not — a superseded
   // plan still has real payments recorded against its (since-waived) rows,
@@ -262,10 +315,77 @@ async function loadPortalAccount(customer) {
     .map((r) => r.re_units?.re_projects?.id)
     .filter(Boolean);
   const milestonesByProject = await getMilestonesForProjects(customer.organization_id, portalProjectIds);
+
+  // SECTION 11 — the Handover tab only ever applies to a completed
+  // reservation (routes/portal.js has no route that would let a buyer log a
+  // snag before then anyway), so this is skipped entirely for everyone
+  // else rather than costing a query on every portal load.
+  const completedReservationIds = (reservations || [])
+    .filter((r) => r.status === 'completed').map((r) => r.id);
+  const checklistsByReservation = new Map();
+  if (completedReservationIds.length) {
+    const { data: checklists } = await supabaseAdmin
+      .from('re_handover_checklists')
+      .select('id, reservation_id, status, handover_date, keys_handed')
+      .eq('organization_id', customer.organization_id)
+      .in('reservation_id', completedReservationIds);
+
+    const checklistIds = (checklists || []).map((c) => c.id);
+    const { data: snagRows } = checklistIds.length
+      ? await supabaseAdmin
+          .from('re_snagging_items')
+          .select('id, checklist_id, description, photo_url, status, developer_response, fix_committed_date, fixed_at, created_at')
+          .in('checklist_id', checklistIds)
+          .order('created_at', { ascending: true })
+      : { data: [] };
+
+    for (const checklist of checklists || []) {
+      checklistsByReservation.set(checklist.reservation_id, {
+        ...checklist,
+        snagging_items: (snagRows || []).filter((s) => s.checklist_id === checklist.id),
+      });
+    }
+  }
+
   for (const reservation of reservations || []) {
     const projectId = reservation.re_units?.re_projects?.id;
     reservation.construction = projectId && milestonesByProject[projectId]
       ? currentMilestoneSummary(milestonesByProject[projectId])
+      : null;
+
+    const status = hardshipByReservation.get(reservation.id) || null;
+    reservation.hardship = { status, can_request: status !== 'pending' && status !== 'approved' };
+
+    // SECTION 7 — a fixed three-step timeline, always in the same order,
+    // whether or not a row exists yet for each step. A document that has
+    // never been generated reads as its own 'pending' entry with no id to
+    // download rather than being absent from the list — the whole point is
+    // that a buyer sees where ALL THREE stand, not just the ones started.
+    const rowsForReservation = (legalDocRows || []).filter((d) => d.reservation_id === reservation.id);
+    reservation.legal_documents = LEGAL_DOC_TYPES.map(({ doc_type, label }) => {
+      const row = rowsForReservation.find((d) => d.doc_type === doc_type);
+      return {
+        doc_type,
+        label,
+        status: row?.status || 'pending',
+        id: row?.id || null,
+        generated_at: row?.generated_at || null,
+      };
+    });
+
+    // SECTION 11 — null for anyone but a completed reservation, or a
+    // completed one with no checklist created yet; portal.js only shows
+    // the Handover tab when this is present.
+    reservation.handover = checklistsByReservation.get(reservation.id) || null;
+
+    // SECTION 15 — "if a project health score drops below 40 and has been
+    // there for 14+ consecutive days, show a subtle notice to buyers in
+    // that project." Deliberately worded generically in portal.js (never
+    // "health score", never a number) — this nudges a buyer to ask their
+    // developer, it does not publicly shame the developer with a score.
+    // Reuses `projectId` from the construction-progress block above.
+    reservation.project_health_notice = projectId
+      ? await portalNoticeFor(customer.organization_id, projectId)
       : null;
   }
 
@@ -298,6 +418,13 @@ async function loadPortalAccount(customer) {
       // null for a buyer who owns rather than rents — portal.js only shows
       // this block when it is present.
       tenancy,
+      // SECTION 9 — "Apply for bank financing" button eligibility: 30% of
+      // the buyer's WHOLE account paid, and a credit score above 40. See
+      // financingService.isEligible for why this is decided in one place
+      // and re-checked, not just displayed, when they actually submit.
+      financing_eligible: isFinancingEligible({
+        totalContracted, totalPaid, creditScoreValue: customer.credit_score,
+      }),
     },
     reservations: reservations || [],
     documents: documents || [],
@@ -321,6 +448,26 @@ async function assertOwnsSchedule(customer, scheduleId) {
   return true;
 }
 
+// FEATURE — the check every portal route that takes a :reservationId in the
+// URL needs (hardship, messages, financing, handover, community): does this
+// reservation actually belong to the customer the bearer token resolved to.
+// Same 404-not-401 shape as assertOwnsSchedule/assertOwnsDocument — a
+// mistyped or tampered id reads as "not found", never as a hint that a
+// reservation with that id exists but belongs to someone else.
+async function assertOwnsReservation(customer, reservationId) {
+  const { data } = await supabaseAdmin
+    .from('re_reservations')
+    .select('id, customer_id')
+    .eq('id', reservationId)
+    .eq('organization_id', customer.organization_id)
+    .maybeSingle();
+
+  if (!data || data.customer_id !== customer.id) {
+    throw Object.assign(new Error('Reservation not found'), { statusCode: 404 });
+  }
+  return true;
+}
+
 async function assertOwnsDocument(customer, documentId) {
   const { data } = await supabaseAdmin
     .from('re_documents')
@@ -332,7 +479,11 @@ async function assertOwnsDocument(customer, documentId) {
   if (!data || data.re_reservations?.customer_id !== customer.id) {
     throw Object.assign(new Error('Document not found'), { statusCode: 404 });
   }
-  if (data.status !== 'generated') {
+  // SECTION 7 — the legal-documents tracker also offers a Download button on
+  // 'sent' and 'signed' documents, not only 'generated' ones: the file
+  // itself never moves or disappears once rendered, only its status
+  // advances past that point (sent to the buyer, then signed).
+  if (!['generated', 'sent', 'signed'].includes(data.status)) {
     throw Object.assign(new Error('That document is not ready yet.'), { statusCode: 409 });
   }
   return true;
@@ -349,5 +500,6 @@ module.exports = {
   verifyPortalToken,
   loadPortalAccount,
   assertOwnsSchedule,
+  assertOwnsReservation,
   assertOwnsDocument,
 };

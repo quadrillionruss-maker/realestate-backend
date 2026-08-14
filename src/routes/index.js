@@ -35,5 +35,11 @@ router.use('/audit', require('./audit'));
 router.use('/settings', require('./settings'));
 router.use('/recycle', require('./recycle'));
 router.use('/group', require('./group'));
+router.use('/hardship-requests', require('./hardshipRequests'));
+router.use('/legal-cases', require('./legalCases'));
+router.use('/financing-requests', require('./financingRequests'));
+router.use('/handover', require('./handover'));
+router.use('/contractor-payments', require('./contractorPayments'));
+router.use('/community', require('./community'));
 
 module.exports = router;

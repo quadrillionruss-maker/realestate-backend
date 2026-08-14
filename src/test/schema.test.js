@@ -34,7 +34,7 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -69,7 +69,7 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -84,7 +84,9 @@ function check(name, cond, detail) {
     're_payments', 're_documents', 're_tasks', 're_ai_briefs',
     're_org_settings', 're_commissions', 're_payment_promises', 're_audit_log', 're_notifications',
     'parent_organizations', 're_construction_milestones', 're_customer_referrals', 're_forecasts', 're_plan_recommendations', 're_document_templates',
-    're_agent_actions', 're_market_intel_reports'];
+    're_agent_actions', 're_market_intel_reports', 're_activities', 're_hardship_requests', 're_messages', 're_legal_cases', 're_financing_requests',
+    're_handover_checklists', 're_snagging_items', 're_contractors', 're_contractor_payments',
+    're_community_posts', 're_community_replies', 're_project_health'];
 
   for (const t of granted) {
     const [{ ok }] = await q(
@@ -118,7 +120,9 @@ function check(name, cond, detail) {
     're_tasks', 're_ai_briefs',
     're_org_settings', 're_commissions', 're_payment_promises', 're_audit_log', 're_notifications',
     'parent_organizations', 're_construction_milestones', 're_customer_referrals', 're_forecasts', 're_plan_recommendations', 're_document_templates',
-    're_agent_actions', 're_market_intel_reports',
+    're_agent_actions', 're_market_intel_reports', 're_activities', 're_hardship_requests', 're_messages', 're_legal_cases',
+    're_financing_requests', 're_handover_checklists', 're_snagging_items', 're_contractors', 're_contractor_payments',
+    're_community_posts', 're_community_replies', 're_project_health',
   ];
   for (const t of expected) {
     check(`table ${t} exists`, tables.includes(t), `have: ${tables.join(', ')}`);
@@ -1698,6 +1702,388 @@ function check(name, cond, detail) {
     `insert into re_market_intel_reports (organization_id, payload) values ($1,'{"summary":"x","signals":[]}'::jsonb) returning id`,
     [userId]);
   check('a market intel report round-trips', !!marketIntelId);
+
+  // ── SECTION 2 — buyer activity log ───────────────────────────────────────
+  const activityCols = await colsOf('re_activities');
+  check('re_activities has the columns the app selects',
+    ['organization_id', 'customer_id', 'logged_by_user_id', 'activity_type', 'notes', 'outcome', 'created_at', 'deleted_at']
+      .every((c) => activityCols.includes(c)), activityCols.join(', '));
+
+  const [{ id: activityCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Activity Buyer') returning id`, [userId]);
+
+  const [{ id: activityId }] = await q(
+    `insert into re_activities (organization_id, customer_id, logged_by_user_id, activity_type, notes, outcome)
+     values ($1,$2,$3,'call','Called to confirm next payment date','promised_payment') returning id`,
+    [userId, activityCustomer, userId]);
+  check('an activity round-trips', !!activityId);
+
+  let emptyNotesRefused = false;
+  try {
+    await q(`insert into re_activities (organization_id, customer_id, activity_type, notes) values ($1,$2,'note','   ')`,
+      [userId, activityCustomer]);
+  } catch (err) { emptyNotesRefused = /check/i.test(err.message); }
+  check('re_activities.notes cannot be blank', emptyNotesRefused);
+
+  let badActivityTypeRefused = false;
+  try {
+    await q(`update re_activities set activity_type='phone_call' where id=$1`, [activityId]);
+  } catch (err) { badActivityTypeRefused = /check/i.test(err.message); }
+  check('re_activities.activity_type is limited to the six known types', badActivityTypeRefused);
+
+  let badOutcomeRefused = false;
+  try {
+    await q(`update re_activities set outcome='maybe' where id=$1`, [activityId]);
+  } catch (err) { badOutcomeRefused = /check/i.test(err.message); }
+  check('re_activities.outcome is limited to the five known outcomes', badOutcomeRefused);
+
+  // ── SECTION 4 — payment pause / hardship mode ────────────────────────────
+  const hardshipCols = await colsOf('re_hardship_requests');
+  check('re_hardship_requests has the columns the app selects',
+    ['organization_id', 'reservation_id', 'customer_id', 'requested_by_portal', 'reason', 'status',
+      'pause_months', 'reviewed_by', 'reviewed_at', 'applied_at', 'created_at']
+      .every((c) => hardshipCols.includes(c)), hardshipCols.join(', '));
+
+  const [{ id: hardshipUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price)
+     values ($1,$2,'H1',20000000) returning id`, [userId, projectId]);
+  const [{ id: hardshipCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Hardship Buyer') returning id`, [userId]);
+  const [{ id: hardshipReservation }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, hardshipUnit, hardshipCustomer]);
+
+  let shortReasonRefused = false;
+  try {
+    await q(
+      `insert into re_hardship_requests (organization_id, reservation_id, customer_id, reason, pause_months)
+       values ($1,$2,$3,'too short','1')`,
+      [userId, hardshipReservation, hardshipCustomer]);
+  } catch (err) { shortReasonRefused = /check/i.test(err.message); }
+  check('re_hardship_requests.reason must be at least 20 characters', shortReasonRefused);
+
+  let badMonthsRefused = false;
+  try {
+    await q(
+      `insert into re_hardship_requests (organization_id, reservation_id, customer_id, reason, pause_months)
+       values ($1,$2,$3,'Lost my job this month and need time',4)`,
+      [userId, hardshipReservation, hardshipCustomer]);
+  } catch (err) { badMonthsRefused = /check/i.test(err.message); }
+  check('re_hardship_requests.pause_months is capped at 3', badMonthsRefused);
+
+  const [{ id: hardshipId }] = await q(
+    `insert into re_hardship_requests (organization_id, reservation_id, customer_id, reason, pause_months)
+     values ($1,$2,$3,'Lost my job this month and need time',2) returning id`,
+    [userId, hardshipReservation, hardshipCustomer]);
+  check('a hardship request round-trips and defaults to pending', !!hardshipId);
+
+  let secondPendingBlocked = false;
+  try {
+    await q(
+      `insert into re_hardship_requests (organization_id, reservation_id, customer_id, reason, pause_months)
+       values ($1,$2,$3,'A second request while the first is still pending',1)`,
+      [userId, hardshipReservation, hardshipCustomer]);
+  } catch (err) { secondPendingBlocked = /unique|duplicate/i.test(err.message); }
+  check('only one PENDING hardship request per reservation', secondPendingBlocked);
+
+  await q(`update re_hardship_requests set status='approved', reviewed_at=now(), applied_at=now() where id=$1`, [hardshipId]);
+
+  let secondApprovedBlocked = false;
+  try {
+    await q(
+      `insert into re_hardship_requests (organization_id, reservation_id, customer_id, reason, pause_months, status)
+       values ($1,$2,$3,'Requesting hardship mode again after using it once already',1,'approved')`,
+      [userId, hardshipReservation, hardshipCustomer]);
+  } catch (err) { secondApprovedBlocked = /unique|duplicate/i.test(err.message); }
+  check('a reservation can have at most one APPROVED hardship request, ever (once per reservation)', secondApprovedBlocked);
+
+  // ── SECTION 5 — buyer/staff message thread ───────────────────────────────
+  const messageCols = await colsOf('re_messages');
+  check('re_messages has the columns the app selects',
+    ['organization_id', 'customer_id', 'sender_type', 'sender_id', 'message', 'read_at', 'created_at']
+      .every((c) => messageCols.includes(c)), messageCols.join(', '));
+
+  const [{ id: buyerMessageId }] = await q(
+    `insert into re_messages (organization_id, customer_id, sender_type, message) values ($1,$2,'buyer','When is my next payment due?') returning id`,
+    [userId, hardshipCustomer]);
+  check('a buyer message round-trips with no sender_id', !!buyerMessageId);
+
+  const [{ id: staffMessageId }] = await q(
+    `insert into re_messages (organization_id, customer_id, sender_type, sender_id, message) values ($1,$2,'staff',$3,'It is due on the 1st.') returning id`,
+    [userId, hardshipCustomer, userId]);
+  check('a staff message round-trips with its sender_id', !!staffMessageId);
+
+  let buyerMessageWithSenderRefused = false;
+  try {
+    await q(`insert into re_messages (organization_id, customer_id, sender_type, sender_id, message) values ($1,$2,'buyer',$3,'x')`,
+      [userId, hardshipCustomer, userId]);
+  } catch (err) { buyerMessageWithSenderRefused = /check/i.test(err.message); }
+  check('a buyer message cannot carry a sender_id', buyerMessageWithSenderRefused);
+
+  let staffMessageWithoutSenderRefused = false;
+  try {
+    await q(`insert into re_messages (organization_id, customer_id, sender_type, message) values ($1,$2,'staff','x')`,
+      [userId, hardshipCustomer]);
+  } catch (err) { staffMessageWithoutSenderRefused = /check/i.test(err.message); }
+  check('a staff message must carry a sender_id', staffMessageWithoutSenderRefused);
+
+  let blankMessageRefused = false;
+  try {
+    await q(`insert into re_messages (organization_id, customer_id, sender_type, message) values ($1,$2,'buyer','   ')`,
+      [userId, hardshipCustomer]);
+  } catch (err) { blankMessageRefused = /check/i.test(err.message); }
+  check('re_messages.message cannot be blank', blankMessageRefused);
+
+  // ── SECTION 6 — rich unit profiles ────────────────────────────────────────
+  const unitDetailCols = await colsOf('re_units');
+  check('re_units has the new detail columns',
+    ['description', 'bedrooms', 'bathrooms', 'parking_spaces', 'floor_level', 'furnishing_status']
+      .every((c) => unitDetailCols.includes(c)), unitDetailCols.join(', '));
+
+  const [{ furnishing_status: defaultFurnishing }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price) values ($1,$2,'DETAIL-1',10000000) returning furnishing_status`,
+    [userId, projectId]);
+  check('furnishing_status defaults to unfurnished', defaultFurnishing === 'unfurnished');
+
+  let badFurnishingRefused = false;
+  try {
+    await q(`update re_units set furnishing_status='painted' where unit_number='DETAIL-1'`);
+  } catch (err) { badFurnishingRefused = /check/i.test(err.message); }
+  check('furnishing_status is limited to the three known states', badFurnishingRefused);
+
+  let negativeBedroomsRefused = false;
+  try {
+    await q(`update re_units set bedrooms=-1 where unit_number='DETAIL-1'`);
+  } catch (err) { negativeBedroomsRefused = /check/i.test(err.message); }
+  check('bedrooms cannot be negative', negativeBedroomsRefused);
+
+  await q(`update re_units set floor_level=0 where unit_number='DETAIL-1'`);
+  const [{ floor_level: groundFloor }] = await q(`select floor_level from re_units where unit_number='DETAIL-1'`);
+  check('floor_level of 0 (ground floor) is distinct from null (not yet recorded)', groundFloor === 0);
+
+  // ── SECTION 8 — legal and recovery tracker ────────────────────────────────
+  const legalCols = await colsOf('re_legal_cases');
+  check('re_legal_cases has the columns the app selects',
+    ['organization_id', 'customer_id', 'reservation_id', 'opened_by', 'status', 'lawyer_name', 'lawyer_phone',
+      'lawyer_email', 'demand_letter_sent_at', 'court_dates', 'settlement_amount', 'settlement_date', 'notes',
+      'created_at', 'updated_at']
+      .every((c) => legalCols.includes(c)), legalCols.join(', '));
+
+  const [{ id: legalCaseId }] = await q(
+    `insert into re_legal_cases (organization_id, customer_id, reservation_id) values ($1,$2,$3) returning id`,
+    [userId, hardshipCustomer, hardshipReservation]);
+  check('a legal case round-trips and defaults to active with empty court_dates', !!legalCaseId);
+
+  let secondActiveCaseBlocked = false;
+  try {
+    await q(`insert into re_legal_cases (organization_id, customer_id, reservation_id) values ($1,$2,$3)`,
+      [userId, hardshipCustomer, hardshipReservation]);
+  } catch (err) { secondActiveCaseBlocked = /unique|duplicate/i.test(err.message); }
+  check('only one ACTIVE legal case per reservation at a time', secondActiveCaseBlocked);
+
+  await q(`update re_legal_cases set status='settled' where id=$1`, [legalCaseId]);
+  let freshCaseAfterSettlement = true;
+  try {
+    await q(`insert into re_legal_cases (organization_id, customer_id, reservation_id) values ($1,$2,$3)`,
+      [userId, hardshipCustomer, hardshipReservation]);
+  } catch (err) { freshCaseAfterSettlement = false; }
+  check('a settled case does not block a fresh case being opened later', freshCaseAfterSettlement);
+
+  let badLegalStatusRefused = false;
+  try {
+    await q(`update re_legal_cases set status='appealed' where id=$1`, [legalCaseId]);
+  } catch (err) { badLegalStatusRefused = /check/i.test(err.message); }
+  check('re_legal_cases.status is limited to the five known states', badLegalStatusRefused);
+
+  const [{ id: demandLetterId }] = await q(
+    `insert into re_documents (organization_id, reservation_id, doc_type, status) values ($1,$2,'demand_letter','generated') returning id`,
+    [userId, hardshipReservation]);
+  check('demand_letter is now an accepted re_documents doc_type', !!demandLetterId);
+
+  // ── SECTION 9 — bank financing integration ────────────────────────────────
+  const financingCols = await colsOf('re_financing_requests');
+  check('re_financing_requests has the columns the app selects',
+    ['organization_id', 'customer_id', 'reservation_id', 'bank_name', 'amount_requested', 'status',
+      'submitted_at', 'bank_reference', 'notes', 'created_at']
+      .every((c) => financingCols.includes(c)), financingCols.join(', '));
+
+  const [{ id: financingId }] = await q(
+    `insert into re_financing_requests (organization_id, customer_id, reservation_id, bank_name, amount_requested)
+     values ($1,$2,$3,'GTBank',15000000) returning id`,
+    [userId, hardshipCustomer, hardshipReservation]);
+  check('a financing request round-trips and defaults to pending', !!financingId);
+
+  let zeroAmountRefused = false;
+  try {
+    await q(`insert into re_financing_requests (organization_id, customer_id, reservation_id, bank_name, amount_requested)
+             values ($1,$2,$3,'GTBank',0)`, [userId, hardshipCustomer, hardshipReservation]);
+  } catch (err) { zeroAmountRefused = /check/i.test(err.message); }
+  check('re_financing_requests.amount_requested must be positive', zeroAmountRefused);
+
+  let badFinancingStatusRefused = false;
+  try {
+    await q(`update re_financing_requests set status='cancelled' where id=$1`, [financingId]);
+  } catch (err) { badFinancingStatusRefused = /check/i.test(err.message); }
+  check('re_financing_requests.status is limited to the six known states', badFinancingStatusRefused);
+
+  const [{ id: financingLetterId }] = await q(
+    `insert into re_documents (organization_id, reservation_id, doc_type, status) values ($1,$2,'financing_letter','generated') returning id`,
+    [userId, hardshipReservation]);
+  check('financing_letter is now an accepted re_documents doc_type', !!financingLetterId);
+
+  // ── SECTION 11 — handover checklist and snagging ──────────────────────────
+  const handoverCols = await colsOf('re_handover_checklists');
+  check('re_handover_checklists has the columns the app selects',
+    ['organization_id', 'reservation_id', 'created_by', 'status', 'handover_date', 'keys_handed',
+      'meter_readings', 'documents_provided', 'created_at']
+      .every((c) => handoverCols.includes(c)), handoverCols.join(', '));
+
+  const snaggingCols = await colsOf('re_snagging_items');
+  check('re_snagging_items has the columns the app selects',
+    ['checklist_id', 'organization_id', 'description', 'photo_url', 'status', 'developer_response',
+      'fix_committed_date', 'fixed_at', 'created_at']
+      .every((c) => snaggingCols.includes(c)), snaggingCols.join(', '));
+
+  const [{ id: handoverUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price) values ($1,$2,'HANDOVER-1',30000000) returning id`,
+    [userId, projectId]);
+  const [{ id: handoverCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Handover Buyer') returning id`, [userId]);
+  const [{ id: handoverReservation }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, handoverUnit, handoverCustomer]);
+
+  const [{ id: checklistId }] = await q(
+    `insert into re_handover_checklists (organization_id, reservation_id) values ($1,$2) returning id`,
+    [userId, handoverReservation]);
+  check('a handover checklist round-trips and defaults to pending, keys not handed', !!checklistId);
+
+  let secondChecklistBlocked = false;
+  try {
+    await q(`insert into re_handover_checklists (organization_id, reservation_id) values ($1,$2)`,
+      [userId, handoverReservation]);
+  } catch (err) { secondChecklistBlocked = /unique|duplicate/i.test(err.message); }
+  check('only one handover checklist per reservation', secondChecklistBlocked);
+
+  const [{ id: snagId }] = await q(
+    `insert into re_snagging_items (checklist_id, organization_id, description) values ($1,$2,'Kitchen tap is leaking') returning id`,
+    [checklistId, userId]);
+  check('a snagging item round-trips and defaults to open', !!snagId);
+
+  let blankSnagRefused = false;
+  try {
+    await q(`insert into re_snagging_items (checklist_id, organization_id, description) values ($1,$2,'   ')`,
+      [checklistId, userId]);
+  } catch (err) { blankSnagRefused = /check/i.test(err.message); }
+  check('re_snagging_items.description cannot be blank', blankSnagRefused);
+
+  let badSnagStatusRefused = false;
+  try {
+    await q(`update re_snagging_items set status='ignored' where id=$1`, [snagId]);
+  } catch (err) { badSnagStatusRefused = /check/i.test(err.message); }
+  check('re_snagging_items.status is limited to the four known states', badSnagStatusRefused);
+
+  const [{ id: handoverCertId }] = await q(
+    `insert into re_documents (organization_id, reservation_id, doc_type, status) values ($1,$2,'handover_certificate','generated') returning id`,
+    [userId, handoverReservation]);
+  check('handover_certificate is now an accepted re_documents doc_type', !!handoverCertId);
+
+  // ── SECTION 12 — contractor and supplier payment tracking ────────────────
+  const contractorCols = await colsOf('re_contractors');
+  check('re_contractors has the columns the app selects',
+    ['organization_id', 'project_id', 'name', 'type', 'phone', 'email', 'created_at']
+      .every((c) => contractorCols.includes(c)), contractorCols.join(', '));
+
+  const contractorPaymentCols = await colsOf('re_contractor_payments');
+  check('re_contractor_payments has the columns the app selects',
+    ['organization_id', 'contractor_id', 'project_id', 'milestone_id', 'amount', 'due_date', 'paid_date',
+      'status', 'description', 'created_at']
+      .every((c) => contractorPaymentCols.includes(c)), contractorPaymentCols.join(', '));
+
+  const [{ id: contractorId }] = await q(
+    `insert into re_contractors (organization_id, project_id, name, type) values ($1,$2,'ABC Roofing Ltd','roofing') returning id`,
+    [userId, projectId]);
+  check('a contractor round-trips', !!contractorId);
+
+  let badContractorTypeRefused = false;
+  try {
+    await q(`insert into re_contractors (organization_id, project_id, name, type) values ($1,$2,'X','painting')`,
+      [userId, projectId]);
+  } catch (err) { badContractorTypeRefused = /check/i.test(err.message); }
+  check('re_contractors.type is limited to the seven known trades', badContractorTypeRefused);
+
+  const [{ id: contractorPaymentId }] = await q(
+    `insert into re_contractor_payments (organization_id, contractor_id, project_id, amount, due_date)
+     values ($1,$2,$3,15000000,'2026-09-15') returning id`,
+    [userId, contractorId, projectId]);
+  check('a contractor payment round-trips and defaults to pending', !!contractorPaymentId);
+
+  let negativeContractorAmountRefused = false;
+  try {
+    await q(`insert into re_contractor_payments (organization_id, contractor_id, project_id, amount, due_date)
+             values ($1,$2,$3,0,'2026-09-15')`, [userId, contractorId, projectId]);
+  } catch (err) { negativeContractorAmountRefused = /check/i.test(err.message); }
+  check('re_contractor_payments.amount must be positive', negativeContractorAmountRefused);
+
+  // ── SECTION 13 — buyer community forum ────────────────────────────────────
+  const postCols = await colsOf('re_community_posts');
+  check('re_community_posts has the columns the app selects',
+    ['organization_id', 'project_id', 'customer_id', 'content', 'pinned', 'moderated', 'created_at', 'deleted_at']
+      .every((c) => postCols.includes(c)), postCols.join(', '));
+
+  const replyCols = await colsOf('re_community_replies');
+  check('re_community_replies has the columns the app selects',
+    ['post_id', 'organization_id', 'customer_id', 'content', 'created_at', 'deleted_at']
+      .every((c) => replyCols.includes(c)), replyCols.join(', '));
+
+  const [{ id: postId }] = await q(
+    `insert into re_community_posts (organization_id, project_id, customer_id, content) values ($1,$2,$3,'Anyone else moved in yet?') returning id`,
+    [userId, projectId, hardshipCustomer]);
+  check('a community post round-trips and defaults to unpinned, unmoderated', !!postId);
+
+  let overlongPostRefused = false;
+  try {
+    await q(`insert into re_community_posts (organization_id, project_id, customer_id, content) values ($1,$2,$3,$4)`,
+      [userId, projectId, hardshipCustomer, 'x'.repeat(501)]);
+  } catch (err) { overlongPostRefused = /check/i.test(err.message); }
+  check('re_community_posts.content is capped at 500 characters', overlongPostRefused);
+
+  const [{ id: replyId }] = await q(
+    `insert into re_community_replies (post_id, organization_id, customer_id, content) values ($1,$2,$3,'Yes, last week!') returning id`,
+    [postId, userId, hardshipCustomer]);
+  check('a community reply round-trips', !!replyId);
+
+  let overlongReplyRefused = false;
+  try {
+    await q(`insert into re_community_replies (post_id, organization_id, customer_id, content) values ($1,$2,$3,$4)`,
+      [postId, userId, hardshipCustomer, 'x'.repeat(301)]);
+  } catch (err) { overlongReplyRefused = /check/i.test(err.message); }
+  check('re_community_replies.content is capped at 300 characters', overlongReplyRefused);
+
+  // ── SECTION 15 — abandoned project early warning system ──────────────────
+  const healthCols = await colsOf('re_project_health');
+  check('re_project_health has the columns the app selects',
+    ['organization_id', 'project_id', 'health_score', 'signals', 'computed_date', 'computed_at']
+      .every((c) => healthCols.includes(c)), healthCols.join(', '));
+
+  const [{ id: healthId }] = await q(
+    `insert into re_project_health (organization_id, project_id, health_score) values ($1,$2,55) returning id`,
+    [userId, projectId]);
+  check('a project health row round-trips', !!healthId);
+
+  let secondSameDayBlocked = false;
+  try {
+    await q(`insert into re_project_health (organization_id, project_id, health_score) values ($1,$2,40)`,
+      [userId, projectId]);
+  } catch (err) { secondSameDayBlocked = /unique|duplicate/i.test(err.message); }
+  check('only one health row per project per calendar day', secondSameDayBlocked);
+
+  let outOfRangeScoreRefused = false;
+  try {
+    await q(`insert into re_project_health (organization_id, project_id, health_score, computed_date) values ($1,$2,101,'2026-01-01')`,
+      [userId, projectId]);
+  } catch (err) { outOfRangeScoreRefused = /check/i.test(err.message); }
+  check('health_score is constrained to 0-100', outOfRangeScoreRefused);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

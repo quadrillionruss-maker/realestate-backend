@@ -438,6 +438,19 @@
         : '';
 
       view.innerHTML =
+        // SECTION 15 — "a prominent warning card... visible to owner
+        // only". First thing on the screen, before even the greeting —
+        // d.critical_projects is already [] for every other role (see
+        // routes/dashboard.js), so this never renders for them regardless.
+        (d.critical_projects && d.critical_projects.length
+          ? '<div class="notice mb-2">' +
+              d.critical_projects.map(function (p) {
+                return '<b>' + esc(p.project_name) + '</b> is showing signs of operational stress ' +
+                  '(health score ' + p.health_score + '/100). Review immediately.';
+              }).join('<br>') +
+            '</div>'
+          : '') +
+
         '<div class="greeting"><h1>' + esc(greeting()) + '</h1>' +
           '<div class="greeting-lines">' + lines.join('') + '</div></div>' +
 
@@ -484,6 +497,22 @@
                     (brief.payload.market_intelligence.signals || []).map(function (s) {
                       return '<div class="page-sub mt-1">' + esc(s.detail) + '</div>';
                     }).join('') +
+                  '</div>'
+                : '') +
+
+              // SECTION 15 — Monday only (aiBrief.js only ever computes
+              // this that one day), owner only — the same field exists in
+              // brief.payload for a Sales Director too (the brief row is
+              // shared, not role-specific), but this block is what
+              // actually decides whether it is shown.
+              (R.can('projectHealth.read') && brief && brief.payload && brief.payload.project_health_summary
+                ? '<div class="notice mt-1 mb-0">' +
+                    '<b>Project health</b> — ' +
+                    R.plural(brief.payload.project_health_summary.critical_count, 'project') + ' critical, ' +
+                    R.plural(brief.payload.project_health_summary.warning_count, 'project') + ' warning.<br>' +
+                    brief.payload.project_health_summary.projects.map(function (p) {
+                      return esc(p.project_name) + ': ' + p.health_score + '/100';
+                    }).join(' · ') +
                   '</div>'
                 : '') +
 
@@ -540,7 +569,7 @@
             (canSeeAtRisk
               ? card('At risk', atRisk.length
                   ? atRisk.slice(0, 6).map(riskRow).join('')
-                  : R.emptyState('Nobody is two or more installments behind', 'Good morning.'),
+                  : R.emptyState('Nobody has a missed installment', 'Good morning.'),
                   { flush: true, actions: atRisk.length > 6 ? '<a class="btn-quiet" href="#/at-risk">See all ' + atRisk.length + '</a>' : '' })
               : '') +
 
@@ -680,6 +709,13 @@
           ? '<button class="action-link" data-resolve-promise="' + esc(c.promise.id) + '" data-resolve-status="kept">Mark kept</button>' +
             '<button class="action-link" data-resolve-promise="' + esc(c.promise.id) + '" data-resolve-status="cancelled">Cancel promise</button>'
           : '<button class="action-link" data-promise="' + esc(c.oldest_schedule_id) + '" data-name="' + esc(c.customer.full_name) + '">Log a promise</button>') +
+        // SECTION 8 — surfaces once escalationService has already moved this
+        // reservation to its worst stage; opening the case itself is still a
+        // deliberate, owner-only click (legal.manage), never automatic.
+        (c.escalation && c.escalation.stage === 'legal' && R.can('legal.manage')
+          ? '<button class="action-link" data-open-legal-case="' + esc(c.reservation_id) + '" data-customer-id="' + esc(c.customer.id) +
+            '" data-name="' + esc(c.customer.full_name) + '">Open legal case</button>'
+          : '') +
         '<button class="action-link" data-buyer="' + esc(c.customer.id) + '">Open</button>' +
       '</div>' +
     '</div>';
@@ -710,6 +746,27 @@
     R.qsa('[data-buyer]', root).forEach(function (button) {
       button.addEventListener('click', function () { openCustomer(button.dataset.buyer); });
     });
+    R.onClick(root, '[data-open-legal-case]', async function (button) {
+      await openLegalCaseModal(button.dataset.openLegalCase, button.dataset.customerId, button.dataset.name);
+    });
+  }
+
+  // SECTION 8 — opening a legal case from the at-risk row or the buyer
+  // drawer. Owner only (legal.manage) — the button that leads here is
+  // itself hidden from anyone else.
+  async function openLegalCaseModal(reservationId, customerId, customerName) {
+    var confirmed = await R.confirm({
+      title: 'Open a legal case for ' + customerName + '?',
+      message: 'This generates a formal demand letter and sends ' + customerName +
+        ' a WhatsApp notice that their account has been escalated to legal recovery. This cannot be undone from here.',
+      confirmLabel: 'Open legal case',
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    await api.post('/legal-cases', { customer_id: customerId, reservation_id: reservationId });
+    toast('Legal case opened. Demand letter generated.', 'ok');
+    R.reload();
   }
 
   // Logged while the rep still has the buyer on the phone. Anything that takes
@@ -824,7 +881,7 @@
       var exposure = atRisk.reduce(function (sum, c) { return sum + Number(c.overdue_amount || 0); }, 0);
 
       view.innerHTML =
-        head('At risk', 'Buyers two or more installments behind, worst first. A broken promise outranks a bigger number.') +
+        head('At risk', 'Buyers with a missed installment, worst first. A broken promise outranks a bigger number.') +
         '<div class="grid cols-3 mb-2">' +
           stat('Buyers at risk', String(atRisk.length), { accent: atRisk.length ? 'clay' : null }) +
           stat('Total exposure', naira(exposure), { tone: 'clay' }) +
@@ -832,7 +889,7 @@
         '</div>' +
         card(null, atRisk.length
           ? atRisk.map(riskRow).join('')
-          : R.emptyState('Nobody is two or more installments behind', 'Every buyer is within one payment of current.'),
+          : R.emptyState('Nobody has a missed installment', 'Every buyer is fully current.'),
           { flush: true });
 
       wireRiskRows(view);
@@ -916,12 +973,17 @@
       // SECTION 2 — milestone management is owner + sales_director only,
       // matching construction.manage in permissions.js.
       var canManageConstruction = R.can('construction.manage');
+      // SECTION 12 — owner only, same tier as the investor report.
+      var canManageContractors = R.can('contractors.manage');
+      // SECTION 13 — owner/sales_director, same tier as every other
+      // moderation-adjacent action in this product.
+      var canModerateCommunity = R.can('community.moderate');
 
       view.innerHTML =
         head('Projects', 'Each development you are selling.',
           canWrite ? '<button class="btn primary" id="btn-new-project">New project</button>' : '') +
         (projects.length
-          ? '<div class="grid cols-3">' + projects.map(function (p) { return projectCard(p, canManageConstruction); }).join('') + '</div>'
+          ? '<div class="grid cols-3">' + projects.map(function (p) { return projectCard(p, canManageConstruction, canManageContractors, canModerateCommunity); }).join('') + '</div>'
           : card(null, R.emptyState(
               'No projects yet',
               'A project is one development — "Lekki Gardens Phase 2". Units, buyers and payments all hang off it.',
@@ -943,10 +1005,18 @@
       R.onClick(view, '[data-project-progress]', function (button) {
         openMilestonesModal(button.dataset.projectProgress, button.dataset.projectName);
       });
+
+      R.onClick(view, '[data-project-contractors]', async function (button) {
+        await openContractorsModal(button.dataset.projectContractors, button.dataset.projectName);
+      });
+
+      R.onClick(view, '[data-project-community]', async function (button) {
+        await openCommunityModerationModal(button.dataset.projectCommunity, button.dataset.projectName);
+      });
     },
   };
 
-  function projectCard(p, canManageConstruction) {
+  function projectCard(p, canManageConstruction, canManageContractors, canModerateCommunity) {
     var total = p.units_total || 0;
     var taken = (p.units_sold || 0) + (p.units_reserved || 0);
     var pct = total ? Math.round((taken / total) * 100) : 0;
@@ -967,6 +1037,12 @@
         '</div>' +
         (canManageConstruction
           ? '<button class="btn-quiet mt-2" data-stop data-project-progress="' + esc(p.id) + '" data-project-name="' + esc(p.name) + '">Construction progress</button>'
+          : '') +
+        (canManageContractors
+          ? '<button class="btn-quiet mt-2" data-stop data-project-contractors="' + esc(p.id) + '" data-project-name="' + esc(p.name) + '">Contractors</button>'
+          : '') +
+        (canModerateCommunity
+          ? '<button class="btn-quiet mt-2" data-stop data-project-community="' + esc(p.id) + '" data-project-name="' + esc(p.name) + '">Community</button>'
           : '') +
       '</div>' +
     '</div>';
@@ -1021,6 +1097,167 @@
     });
 
     wireMilestoneEditors(panel, projectId, projectName);
+  }
+
+  var CONTRACTOR_TYPES = ['foundation', 'roofing', 'finishing', 'electrical', 'plumbing', 'landscaping', 'other'];
+
+  // SECTION 12 — contractors and their payment schedules for one project,
+  // owner only. Same fetch-first, no-submitLabel shape as
+  // openMilestonesModal above: several independent actions (add a
+  // contractor, add a payment, mark one paid), not one shared submit.
+  async function openContractorsModal(projectId, projectName) {
+    var results = await Promise.all([
+      api('/projects/' + projectId + '/contractors'),
+      api('/projects/' + projectId + '/contractor-payments'),
+    ]);
+    var contractorList = results[0];
+    var payments = results[1].payments;
+    var forecast = results[1].forecast;
+
+    var panel = R.modal({
+      title: esc(projectName) + ' — Contractors',
+      wide: true,
+      body:
+        (forecast.shortfall
+          ? '<div class="notice mb-2">' + esc(forecast.shortfall.message) + '</div>'
+          : '<div class="notice info mb-2">No projected shortfall at the current collection rate '
+            + '(' + esc(nairaShort(forecast.avg_monthly_collection)) + '/month average, last 3 months).</div>') +
+
+        '<div class="page-sub label-caps mb-1">Contractors</div>' +
+        (contractorList.length
+          ? contractorList.map(function (c) {
+              return '<div class="flex-row justify-between gap-10 mb-1">' +
+                '<span>' + esc(c.name) + ' <span class="page-sub">(' + esc(c.type) + ')</span></span>' +
+                '<span class="page-sub">' + esc(c.phone || '') + '</span>' +
+              '</div>';
+            }).join('')
+          : '<p class="muted mb-2">No contractors added yet.</p>') +
+        '<div class="field-row mt-1">' +
+          '<div class="field"><label for="ct-name">Contractor name</label><input class="input" id="ct-name" name="ct_name"></div>' +
+          '<div class="field"><label for="ct-type">Trade</label><select class="select" id="ct-type" name="ct_type">' +
+            CONTRACTOR_TYPES.map(function (t) { return '<option value="' + t + '">' + t.charAt(0).toUpperCase() + t.slice(1) + '</option>'; }).join('') +
+          '</select></div>' +
+        '</div>' +
+        '<div class="field"><label for="ct-phone">Phone</label><input class="input" id="ct-phone" name="ct_phone"></div>' +
+        '<button class="btn-quiet mb-2" type="button" id="btn-add-contractor">Add contractor</button>' +
+
+        '<div class="divider"></div>' +
+        '<div class="page-sub label-caps mb-1 mt-1">Payment schedule</div>' +
+        (payments.length
+          ? payments.map(function (p) {
+              return '<div class="drawer-section">' +
+                '<div class="flex-row justify-between gap-10">' +
+                  '<span>' + esc(p.re_contractors ? p.re_contractors.name : '') + '</span>' + badge(p.status) +
+                '</div>' +
+                '<div class="page-sub mt-1">' + esc(naira(p.amount)) + ' due ' + esc(fmtDate(p.due_date)) +
+                  (p.description ? ' — ' + esc(p.description) : '') + '</div>' +
+                (p.status !== 'paid'
+                  ? '<button class="btn-quiet mt-1" data-mark-paid="' + esc(p.id) + '">Mark paid</button>'
+                  : '<div class="page-sub mt-1">Paid ' + esc(fmtDate(p.paid_date)) + '</div>') +
+              '</div>';
+            }).join('')
+          : '<p class="muted mb-2">No payments scheduled yet.</p>') +
+        '<div class="field-row mt-1">' +
+          '<div class="field"><label for="cp-contractor">Contractor</label><select class="select" id="cp-contractor" name="cp_contractor">' +
+            options(contractorList, 'id', 'name') +
+          '</select></div>' +
+          '<div class="field"><label for="cp-amount">Amount</label><div class="input-money"><input class="input" id="cp-amount" name="cp_amount" type="number" min="1" step="1"></div></div>' +
+        '</div>' +
+        '<div class="field"><label for="cp-due">Due date</label><input class="input" id="cp-due" name="cp_due" type="date"></div>' +
+        '<div class="field"><label for="cp-desc">Description</label><input class="input" id="cp-desc" name="cp_desc"></div>' +
+        (contractorList.length
+          ? '<button class="btn-quiet" type="button" id="btn-add-payment">Schedule payment</button>'
+          : '<p class="field-hint">Add a contractor first.</p>'),
+      onSubmit: function () {},
+    });
+
+    R.onClick(panel.root, '#btn-add-contractor', async function () {
+      var name = R.qs('#ct-name', panel.root).value.trim();
+      var type = R.qs('#ct-type', panel.root).value;
+      var phone = R.qs('#ct-phone', panel.root).value.trim();
+      if (!name) throw new Error('Enter a contractor name.');
+      await api.post('/projects/' + projectId + '/contractors', { name: name, type: type, phone: phone || null });
+      panel.close();
+      toast('Contractor added.', 'ok');
+      openContractorsModal(projectId, projectName);
+    });
+
+    R.onClick(panel.root, '#btn-add-payment', async function () {
+      var v = {
+        contractor_id: R.qs('#cp-contractor', panel.root).value,
+        amount: Number(R.qs('#cp-amount', panel.root).value),
+        due_date: R.qs('#cp-due', panel.root).value,
+        description: R.qs('#cp-desc', panel.root).value.trim() || null,
+      };
+      if (!v.amount || !v.due_date) throw new Error('Amount and due date are required.');
+      await api.post('/projects/' + projectId + '/contractor-payments', v);
+      panel.close();
+      toast('Payment scheduled.', 'ok');
+      openContractorsModal(projectId, projectName);
+    });
+
+    R.onClick(panel.root, '[data-mark-paid]', async function (button) {
+      await api.patch('/contractor-payments/' + button.dataset.markPaid, { status: 'paid' });
+      panel.close();
+      toast('Marked paid.', 'ok');
+      openContractorsModal(projectId, projectName);
+    });
+  }
+
+  // SECTION 13 — moderating one project's community: read every post (staff
+  // sees exactly what a buyer sees, plus Pin/Remove), owner/sales_director
+  // only (community.moderate). "No buyer can see another buyer's personal
+  // financial details" — this reuses the identical listPosts shape the
+  // portal itself renders, which never carries one.
+  async function openCommunityModerationModal(projectId, projectName) {
+    var posts = await api('/community/' + projectId);
+
+    var panel = R.modal({
+      title: esc(projectName) + ' — Community',
+      wide: true,
+      cancelLabel: 'Close',
+      body: posts.length
+        ? posts.map(function (p) {
+            return '<div class="drawer-section">' +
+              '<div class="flex-row justify-between gap-10">' +
+                '<span>' + (p.pinned ? badge('pinned') + ' ' : '') + '<b>' + esc(p.author_name) + '</b></span>' +
+                '<span class="page-sub nowrap">' + esc(fmtDate(p.created_at)) + '</span>' +
+              '</div>' +
+              '<div class="mt-1">' + esc(p.content) + '</div>' +
+              (p.replies.length
+                ? '<div class="mt-1 community-replies">' + p.replies.map(function (r) {
+                    return '<div class="mt-1"><b class="fs-12">' + esc(r.author_name) + '</b> ' + esc(r.content) + '</div>';
+                  }).join('') + '</div>'
+                : '') +
+              '<div class="btn-row mt-1">' +
+                '<button class="btn-quiet" data-community-pin="' + esc(p.id) + '" data-pinned="' + (p.pinned ? '0' : '1') + '">' +
+                  (p.pinned ? 'Unpin' : 'Pin') + '</button>' +
+                '<button class="btn-quiet" data-community-remove="' + esc(p.id) + '">Remove</button>' +
+              '</div>' +
+            '</div>';
+          }).join('')
+        : '<p class="muted">No posts yet.</p>',
+      onSubmit: function () {},
+    });
+
+    R.onClick(panel.root, '[data-community-pin]', async function (button) {
+      await api.patch('/community/post/' + button.dataset.communityPin + '/pin', { pinned: button.dataset.pinned === '1' });
+      panel.close();
+      openCommunityModerationModal(projectId, projectName);
+    });
+    R.onClick(panel.root, '[data-community-remove]', async function (button) {
+      var confirmed = await R.confirm({
+        title: 'Remove this post?',
+        message: 'This removes the post (and any replies stay attached to it) from the community. It can be restored from the database only.',
+        confirmLabel: 'Remove',
+        danger: true,
+      });
+      if (!confirmed) return;
+      await api('/community/post/' + button.dataset.communityRemove, { method: 'DELETE' });
+      panel.close();
+      toast('Post removed.', 'ok');
+      openCommunityModerationModal(projectId, projectName);
+    });
   }
 
   function milestoneEditor(m) {
@@ -1195,6 +1432,9 @@
                 '<button class="btn-quiet" data-media="' + esc(u.id) + '" data-unit="' + esc(u.unit_number) + '">' +
                   (mediaCount(u) ? 'Media ' + mediaCount(u) : 'Media') +
                 '</button> ' +
+                (canWrite
+                  ? '<button class="btn-quiet" data-edit-unit="' + esc(u.id) + '">Edit details</button> '
+                  : '') +
                 (u.status === 'available'
                   ? '<button class="btn-quiet" data-reserve="' + esc(u.id) + '">Reserve</button> '
                   : '') +
@@ -1251,6 +1491,13 @@
           unitMediaModal(unit);
         });
       });
+
+      R.qsa('[data-edit-unit]', view).forEach(function (button) {
+        button.addEventListener('click', function () {
+          var unit = units.find(function (u) { return u.id === button.dataset.editUnit; });
+          editUnitModal(unit);
+        });
+      });
     },
   };
 
@@ -1304,22 +1551,40 @@
   function unitMediaModal(unit) {
     var media = (unit.metadata && Array.isArray(unit.metadata.media)) ? unit.metadata.media : [];
 
+    // SECTION 6 — grouped by kind rather than one flat grid, so "which of
+    // these is the brochure?" is answered by which section it's in, not by
+    // reading every label. Site map keeps its own group too — the four kinds
+    // routes/units.js already accepts (unchanged), just no longer mixed
+    // together on screen.
+    var mediaGroups = [
+      ['floor_plan', 'Floor plans'], ['photo', 'Unit photos'], ['brochure', 'Brochure'], ['site_map', 'Site maps'],
+    ];
+
+    function mediaGrid(kind) {
+      var items = media.filter(function (m) { return m.kind === kind; });
+      if (!items.length) return '';
+      return items.map(function (m) {
+        var isPdf = /\.pdf$/i.test(m.url);
+        return '<a class="card media-card" href="' + esc(m.url) + '" target="_blank" rel="noopener">' +
+          (isPdf
+            ? '<div class="media-thumb-icon">▤</div>'
+            : '<img src="' + esc(m.url) + '" alt="' + esc(m.label || m.kind) + '" class="media-thumb-img">') +
+          '<div class="card-body media-card-body">' +
+            '<div class="fs-12">' + esc(m.label || String(m.kind).replace(/_/g, ' ')) + '</div>' +
+            '<div class="cell-meta">' + esc(fmtDate(m.uploaded_at)) + '</div>' +
+          '</div></a>';
+      }).join('');
+    }
+
     R.modal({
-      title: 'Unit ' + unit.unit_number + ' — floor plans and photos',
+      title: 'Unit ' + unit.unit_number + ' — floor plans, photos and brochure',
       wide: true,
       body:
         (media.length
-          ? '<div class="grid cols-3 mb-2">' + media.map(function (m) {
-              var isPdf = /\.pdf$/i.test(m.url);
-              return '<a class="card media-card" href="' + esc(m.url) + '" target="_blank" rel="noopener">' +
-                (isPdf
-                  ? '<div class="media-thumb-icon">▤</div>'
-                  : '<img src="' + esc(m.url) + '" alt="' + esc(m.label || m.kind) + '" class="media-thumb-img">') +
-                '<div class="card-body media-card-body">' +
-                  '<div class="fs-12">' + esc(m.label || String(m.kind).replace(/_/g, ' ')) + '</div>' +
-                  '<div class="cell-meta">' + esc(fmtDate(m.uploaded_at)) + '</div>' +
-                '</div></a>';
-            }).join('') + '</div>'
+          ? mediaGroups.map(function (g) {
+              var grid = mediaGrid(g[0]);
+              return grid ? '<div class="page-sub label-caps mb-1">' + g[1] + '</div><div class="grid cols-3 mb-2">' + grid + '</div>' : '';
+            }).join('')
           : '<p class="muted mb-2">Nothing attached to this unit yet.</p>') +
 
         '<div class="divider"></div>' +
@@ -1429,6 +1694,66 @@
         });
         close();
         toast('Unit added.', 'ok');
+        R.reload();
+      },
+    });
+  }
+
+  // SECTION 6 — the rich-profile fields (bedrooms, bathrooms, parking,
+  // floor, furnishing) plus the price/type fields unitModal only ever set
+  // at creation. Owner/sales_director only — the button that opens this is
+  // itself hidden from anyone else (see R.screens.units above, canWrite).
+  var FURNISHING_OPTIONS = [
+    ['unfurnished', 'Unfurnished'], ['semi-furnished', 'Semi-furnished'], ['fully-furnished', 'Fully furnished'],
+  ];
+
+  function editUnitModal(unit) {
+    R.modal({
+      title: 'Edit unit ' + unit.unit_number,
+      wide: true,
+      body:
+        '<div class="field-row">' +
+          '<div class="field"><label for="eu-type">Type</label>' +
+            '<input class="input" id="eu-type" name="unit_type" value="' + esc(unit.unit_type || '') + '" placeholder="3-bed terrace"></div>' +
+          '<div class="field"><label for="eu-size">Size (m²)</label>' +
+            '<input class="input" id="eu-size" name="size_sqm" type="number" min="0" step="0.1" value="' + esc(unit.size_sqm || '') + '"></div>' +
+        '</div>' +
+        '<div class="field"><label for="eu-price">List price</label>' +
+          '<div class="input-money"><input class="input" id="eu-price" name="list_price" type="number" min="1" step="1" required value="' + esc(unit.list_price || '') + '"></div></div>' +
+        '<div class="field-row">' +
+          '<div class="field"><label for="eu-bed">Bedrooms</label>' +
+            '<input class="input" id="eu-bed" name="bedrooms" type="number" min="0" step="1" value="' + esc(unit.bedrooms ?? '') + '"></div>' +
+          '<div class="field"><label for="eu-bath">Bathrooms</label>' +
+            '<input class="input" id="eu-bath" name="bathrooms" type="number" min="0" step="1" value="' + esc(unit.bathrooms ?? '') + '"></div>' +
+        '</div>' +
+        '<div class="field-row">' +
+          '<div class="field"><label for="eu-parking">Parking spaces</label>' +
+            '<input class="input" id="eu-parking" name="parking_spaces" type="number" min="0" step="1" value="' + esc(unit.parking_spaces ?? '') + '"></div>' +
+          '<div class="field"><label for="eu-floor">Floor level</label>' +
+            '<input class="input" id="eu-floor" name="floor_level" type="number" step="1" value="' + esc(unit.floor_level ?? '') + '" placeholder="0 = ground floor"></div>' +
+        '</div>' +
+        '<div class="field"><label for="eu-furnishing">Furnishing</label>' +
+          '<select class="select" id="eu-furnishing" name="furnishing_status">' +
+            options(FURNISHING_OPTIONS.map(function (f) { return { id: f[0], name: f[1] }; }), 'id', 'name', unit.furnishing_status || 'unfurnished') +
+          '</select></div>' +
+        '<div class="field"><label for="eu-desc">Description</label>' +
+          '<textarea class="input" id="eu-desc" name="description" rows="3" placeholder="A short description a buyer would read">' + esc(unit.description || '') + '</textarea></div>',
+      submitLabel: 'Save',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        await api.patch('/units/' + unit.id, {
+          unit_type: v.unit_type || null,
+          size_sqm: v.size_sqm,
+          list_price: v.list_price,
+          bedrooms: v.bedrooms,
+          bathrooms: v.bathrooms,
+          parking_spaces: v.parking_spaces,
+          floor_level: v.floor_level,
+          furnishing_status: v.furnishing_status,
+          description: v.description || null,
+        });
+        close();
+        toast('Unit details updated.', 'ok');
         R.reload();
       },
     });
@@ -1758,10 +2083,15 @@
         var v = R.values(form);
         if (!v.full_name) throw new Error('A name is required.');
         if (!v.referral_code) delete v.referral_code;
-        await api.post('/customers', v);
+
+        // SECTION 14 — a Sales Executive with no signal still gets "saved",
+        // queued in IndexedDB for the next reconnect, rather than a network
+        // error on a form they may have just spent five minutes filling in
+        // on a site visit. Every other role gets the ordinary error.
+        var result = await R.offlineQueue.submitOrQueue('new_buyer', '/customers', v);
         close();
-        toast('Buyer added.', 'ok');
-        R.reload();
+        toast(result.queued ? 'No connection — buyer saved and will sync automatically.' : 'Buyer added.', 'ok');
+        if (!result.queued) R.reload();
       },
     });
   }
@@ -1902,7 +2232,15 @@
     }
 
     try {
-      var c = await api('/customers/' + id);
+      var canSeeMessages = R.can('messages.read');
+      var results = await Promise.all([
+        api('/customers/' + id),
+        api('/customers/' + id + '/activities'),
+        canSeeMessages ? api('/customers/' + id + '/messages') : Promise.resolve([]),
+      ]);
+      var c = results[0];
+      var activities = results[1];
+      var thread = results[2];
       var reservations = c.re_reservations || [];
 
       panel.root.querySelector('.page-title').textContent = c.full_name;
@@ -1936,6 +2274,16 @@
         (credit
           ? '<div class="notice warn" id="d-credit-notice">Unallocated credit of ' + esc(naira(credit.amount)) +
               ' — tap to allocate</div>'
+          : '') +
+
+        // FEATURE — hardship request count, owner/sales_director only (the
+        // server only ever includes hardship_requests for that tier — see
+        // routes/customers.js).
+        (c.hardship_requests
+          ? '<div class="notice ' + (c.hardship_requests.pending ? 'warn' : 'info') + ' mb-2" id="d-hardship-notice">' +
+              R.plural(c.hardship_requests.total, 'hardship request') +
+              (c.hardship_requests.pending ? ' — ' + R.plural(c.hardship_requests.pending, 'pending') + ', tap to review' : '') +
+            '</div>'
           : '') +
 
         '<div class="grid cols-3">' +
@@ -1974,6 +2322,8 @@
           var openRows = schedule.filter(function (s) { return s.status !== 'paid'; });
           var paidRows = schedule.filter(function (s) { return s.status === 'paid'; });
           var paidTotal = paidRows.reduce(function (sum, s) { return sum + Number(s.amount_due || 0); }, 0);
+          var rep = r.re_sales_reps;
+          var repName = rep && rep.users ? (rep.users.full_name || rep.users.email) : null;
 
           return '<div class="drawer-section">' +
             '<div class="flex-row justify-between gap-10">' +
@@ -1981,6 +2331,19 @@
               '<div class="page-sub">' + esc([project.name, project.location].filter(Boolean).join(', ')) + '</div></div>' +
               badge(r.status) +
             '</div>' +
+            (R.can('reservations.reassign')
+              ? '<div class="page-sub mt-1">Rep: ' + esc(repName || 'Unassigned') +
+                  ' <button class="btn-quiet" data-change-rep="' + esc(r.id) + '" data-rep-name="' + esc(repName || '') + '">Change rep</button></div>'
+              : '') +
+            (r.escalation_stage === 'legal' && R.can('legal.manage')
+              ? '<div class="notice mt-1">Escalated to legal review. ' +
+                  '<button class="btn-quiet" data-open-legal-case="' + esc(r.id) + '" data-customer-id="' + esc(c.id) +
+                  '" data-name="' + esc(c.full_name) + '">Open legal case</button></div>'
+              : '') +
+            (r.status === 'completed' && R.can('handover.manage')
+              ? '<div class="page-sub mt-1"><button class="btn-quiet" data-manage-handover="' + esc(r.id) +
+                  '" data-buyer-name="' + esc(c.full_name) + '">Handover checklist</button></div>'
+              : '') +
             (plan
               ? '<div class="page-sub mt-1">' + plan.number_of_installments + ' ' + esc(plan.frequency) +
                 ' installments · ' + naira(plan.total_amount) + ' · from ' + esc(fmtDate(plan.start_date)) + '</div>' +
@@ -1998,7 +2361,41 @@
 
         (reservations.length ? '' : '<div class="drawer-section">' +
           R.emptyState('No reservations yet', 'This buyer has not been allocated a unit.',
-            '<button class="btn primary" id="d-reserve">Create a reservation</button>') + '</div>');
+            '<button class="btn primary" id="d-reserve">Create a reservation</button>') + '</div>') +
+
+        '<div class="drawer-section">' +
+          '<div class="flex-row justify-between gap-10">' +
+            '<b>Activity</b>' +
+            (R.can('activities.write')
+              ? '<button class="btn-quiet" id="d-log-activity">Log activity</button>' : '') +
+          '</div>' +
+          (activities.length
+            ? '<div class="mt-1">' + activities.map(activityRow).join('') + '</div>'
+            : '<p class="page-sub mt-1">No calls, visits or notes logged yet.</p>') +
+        '</div>' +
+
+        (canSeeMessages
+          ? '<div class="drawer-section">' +
+              '<b>Messages' +
+              (thread.filter(function (m) { return m.sender_type === 'buyer' && !m.read_at; }).length
+                ? ' <span class="badge clay">' + thread.filter(function (m) { return m.sender_type === 'buyer' && !m.read_at; }).length + ' unread</span>'
+                : '') +
+              '</b>' +
+              '<div class="message-thread mt-1">' +
+                (thread.length
+                  ? thread.map(function (m) {
+                      return '<div class="message-row ' + (m.sender_type === 'staff' ? 'mine' : 'theirs') + '">' +
+                        '<div class="message-bubble">' + esc(m.message) + '</div>' +
+                        '<div class="page-sub">' + (m.sender_type === 'staff' ? (m.users ? esc(m.users.full_name || m.users.email) : 'Staff') : esc(c.full_name)) +
+                          ' · ' + esc(R.fmtDateTime(m.created_at)) + '</div>' +
+                      '</div>';
+                    }).join('')
+                  : '<p class="page-sub">No messages yet.</p>') +
+              '</div>' +
+              '<div class="field mt-2"><textarea class="input" id="d-message-input" rows="2" placeholder="Reply to ' + esc(c.full_name) + '"></textarea></div>' +
+              '<button class="btn-quiet" id="d-send-message">Send</button>' +
+            '</div>'
+          : '');
       R.applyDynamicStyles(panel.body);
 
       // R.onClick — same reasoning as the unit-row Reserve buttons: shows a
@@ -2045,6 +2442,67 @@
         openCustomer(id); // the row has to reflect the new status immediately
       });
 
+      R.onClick(panel.body, '[data-change-rep]', async function (button) {
+        await changeRepModal(button.dataset.changeRep, button.dataset.repName);
+        openCustomer(id); // the row has to reflect the new rep immediately
+      });
+
+      R.onClick(panel.body, '[data-open-legal-case]', async function (button) {
+        await openLegalCaseModal(button.dataset.openLegalCase, button.dataset.customerId, button.dataset.name);
+        openCustomer(id);
+      });
+
+      R.onClick(panel.body, '[data-manage-handover]', async function (button) {
+        try {
+          await manageHandoverModal(button.dataset.manageHandover, button.dataset.buyerName);
+        } catch (err) {
+          if (err.status === 404) {
+            var wantsChecklist = await R.confirm({
+              title: 'No handover checklist yet',
+              message: 'Create one now for ' + button.dataset.buyerName + '?',
+              confirmLabel: 'Create checklist',
+            });
+            if (wantsChecklist) await createHandoverChecklistModal(button.dataset.manageHandover);
+          } else {
+            throw err;
+          }
+        }
+      });
+
+      var hardshipNotice = R.qs('#d-hardship-notice', panel.body);
+      if (hardshipNotice) {
+        hardshipNotice.addEventListener('click', async function () {
+          panel.close();
+          await hardshipReviewModal(c.id, c.full_name);
+          openCustomer(id);
+        });
+      }
+
+      R.onClick(panel.body, '#d-log-activity', async function () {
+        await logActivityModal(c.id);
+        openCustomer(id);
+      });
+
+      R.onClick(panel.body, '#d-send-message', async function () {
+        var input = R.qs('#d-message-input', panel.body);
+        var text = (input.value || '').trim();
+        if (!text) return;
+        await api.post('/customers/' + c.id + '/messages', { message: text });
+        openCustomer(id);
+      });
+
+      R.onClick(panel.body, '[data-delete-activity]', async function (button) {
+        var confirmed = await R.confirm({
+          title: 'Delete this activity note?',
+          message: 'This removes it from the buyer\'s activity timeline.',
+          confirmLabel: 'Delete',
+          danger: true,
+        });
+        if (!confirmed) return;
+        await api('/customers/' + c.id + '/activities/' + button.dataset.deleteActivity, { method: 'DELETE' });
+        openCustomer(id);
+      });
+
       R.qsa('[data-toggle-paid]', panel.body).forEach(function (button) {
         button.addEventListener('click', function () {
           var rows = R.qs('[data-paid-rows="' + button.dataset.togglePaid + '"]', panel.body);
@@ -2065,6 +2523,128 @@
     } catch (err) {
       panel.body.innerHTML = '<div class="notice">' + esc(err.message) + '</div>';
     }
+  }
+
+  /* Moves ONE reservation to a different rep, from the buyer drawer. Owner
+     and Sales Director only (reservations.reassign) — the button that opens
+     this is itself hidden from anyone else (see openCustomer above). */
+  async function changeRepModal(reservationId, currentRepName) {
+    var raw = await api('/sales-reps');
+    var reps = raw.map(function (r) {
+      return { id: r.id, name: (r.users && (r.users.full_name || r.users.email)) || 'Unnamed rep' };
+    });
+
+    R.modal({
+      title: 'Change sales rep',
+      body:
+        (currentRepName ? '<p class="muted mb-2">Currently ' + esc(currentRepName) + '.</p>' : '') +
+        '<div class="field"><label for="cr-target">New rep</label>' +
+          '<select class="select" id="cr-target" name="sales_rep_id">' +
+            '<option value="">Unassign</option>' +
+            options(reps, 'id', 'name') +
+          '</select></div>',
+      submitLabel: 'Save',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        await api.patch('/reservations/' + reservationId + '/sales-rep', { sales_rep_id: v.sales_rep_id || null });
+        close();
+        toast('Sales rep updated.', 'ok');
+      },
+    });
+  }
+
+  function activityRow(a) {
+    var me = RE.state.user;
+    var canDelete = R.can('activities.write') && (me.role !== 'sales_rep' || a.logged_by_user_id === me.id);
+    return '<div class="activity-row">' +
+      '<div class="flex-row justify-between gap-10">' +
+        '<span>' + badge(a.activity_type) +
+          (a.outcome ? ' ' + badge(a.outcome) : '') + '</span>' +
+        '<span class="page-sub nowrap">' + esc(R.fmtRelative(a.created_at)) + '</span>' +
+      '</div>' +
+      '<div class="mt-1">' + esc(a.notes) + '</div>' +
+      '<div class="page-sub mt-1">' + esc((a.users && (a.users.full_name || a.users.email)) || 'Someone') +
+        (canDelete ? ' · <button class="btn-quiet" data-delete-activity="' + esc(a.id) + '">Delete</button>' : '') +
+      '</div>' +
+    '</div>';
+  }
+
+  /* FEATURE — reviewing a buyer's hardship requests from the drawer's
+     hardship notice. Owner/sales_director only (the notice itself only
+     ever renders for that tier — see openCustomer above). */
+  async function hardshipReviewModal(customerId, customerName) {
+    var requests = await api('/hardship-requests?customer_id=' + customerId);
+
+    var panel = R.modal({
+      title: 'Payment pause requests — ' + customerName,
+      cancelLabel: 'Close',
+      body: requests.length
+        ? requests.map(function (r) {
+            return '<div class="drawer-section">' +
+              '<div class="flex-row justify-between gap-10">' + badge(r.status) +
+                '<span class="page-sub nowrap">' + esc(fmtDate(r.created_at)) + '</span></div>' +
+              '<div class="mt-1">' + R.plural(r.pause_months, 'month') + ' requested</div>' +
+              '<div class="page-sub mt-1">' + esc(r.reason) + '</div>' +
+              (r.status === 'pending'
+                ? '<div class="btn-row mt-1">' +
+                    '<button class="btn-quiet" data-hardship-approve="' + esc(r.id) + '">Approve</button>' +
+                    '<button class="btn-quiet" data-hardship-deny="' + esc(r.id) + '">Deny</button>' +
+                  '</div>'
+                : '') +
+            '</div>';
+          }).join('')
+        : '<p class="muted">No hardship requests on file.</p>',
+      onSubmit: function () {},
+    });
+
+    R.onClick(panel.root, '[data-hardship-approve]', async function (button) {
+      await api.patch('/hardship-requests/' + button.dataset.hardshipApprove + '/review', { status: 'approved' });
+      toast('Payment pause approved.', 'ok');
+      panel.close();
+    });
+    R.onClick(panel.root, '[data-hardship-deny]', async function (button) {
+      await api.patch('/hardship-requests/' + button.dataset.hardshipDeny + '/review', { status: 'denied' });
+      toast('Request denied.', 'ok');
+      panel.close();
+    });
+  }
+
+  var ACTIVITY_TYPES = [
+    ['call', 'Call'], ['visit', 'Visit'], ['whatsapp', 'WhatsApp'], ['email', 'Email'], ['note', 'Note'], ['site_visit', 'Site visit'],
+  ];
+  var ACTIVITY_OUTCOMES = [
+    ['', 'None'], ['interested', 'Interested'], ['not_interested', 'Not interested'],
+    ['promised_payment', 'Promised payment'], ['no_answer', 'No answer'], ['follow_up_needed', 'Follow-up needed'],
+  ];
+
+  async function logActivityModal(customerId) {
+    R.modal({
+      title: 'Log activity',
+      body:
+        '<div class="field"><label for="la-type">Type</label>' +
+          '<select class="select" id="la-type" name="activity_type">' +
+            ACTIVITY_TYPES.map(function (t) { return '<option value="' + t[0] + '">' + t[1] + '</option>'; }).join('') +
+          '</select></div>' +
+        '<div class="field"><label for="la-notes">Notes</label>' +
+          '<textarea class="input" id="la-notes" name="notes" rows="3" required placeholder="What happened, what was said"></textarea></div>' +
+        '<div class="field"><label for="la-outcome">Outcome (optional)</label>' +
+          '<select class="select" id="la-outcome" name="outcome">' +
+            ACTIVITY_OUTCOMES.map(function (o) { return '<option value="' + o[0] + '">' + o[1] + '</option>'; }).join('') +
+          '</select></div>',
+      submitLabel: 'Log activity',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        // SECTION 14 — logging a call from a site visit with no signal is
+        // exactly the case this queue exists for.
+        var result = await R.offlineQueue.submitOrQueue('log_activity', '/customers/' + customerId + '/activities', {
+          activity_type: v.activity_type,
+          notes: v.notes,
+          outcome: v.outcome || null,
+        });
+        close();
+        toast(result.queued ? 'No connection — activity saved and will sync automatically.' : 'Activity logged.', 'ok');
+      },
+    });
   }
 
   function scheduleRow(s) {
@@ -2177,6 +2757,92 @@
       });
     },
   };
+
+  /* ══ HANDOVER CHECKLIST ══════════════════════════════════════════════════
+     SECTION 11. Owner/sales_director only (handover.manage). Created once,
+     manually — see reservationStatusModal above for the prompt this answers,
+     and manageHandoverModal (buyer drawer) for reviewing snagging items
+     reported afterward. */
+  async function createHandoverChecklistModal(reservationId) {
+    R.modal({
+      title: 'Create handover checklist',
+      body:
+        '<div class="field"><label for="ho-date">Handover date</label>' +
+          '<input class="input" id="ho-date" name="handover_date" type="date" value="' + esc(R.todayISO()) + '"></div>' +
+        '<div class="field"><label><input type="checkbox" id="ho-keys" name="keys_handed"> Keys handed over</label></div>' +
+        '<div class="field-row">' +
+          '<div class="field"><label for="ho-electricity">Electricity meter reading</label>' +
+            '<input class="input" id="ho-electricity" name="electricity"></div>' +
+          '<div class="field"><label for="ho-water">Water meter reading</label>' +
+            '<input class="input" id="ho-water" name="water"></div>' +
+        '</div>' +
+        '<div class="field"><label for="ho-docs">Documents provided (comma separated)</label>' +
+          '<input class="input" id="ho-docs" name="documents_provided" placeholder="Warranty booklet, User manual"></div>',
+      submitLabel: 'Create checklist',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        await api.post('/reservations/' + reservationId + '/handover', {
+          handover_date: v.handover_date || null,
+          keys_handed: v.keys_handed,
+          meter_readings: { electricity: v.electricity || null, water: v.water || null },
+          documents_provided: (v.documents_provided || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+        });
+        close();
+        toast('Handover checklist created.', 'ok');
+      },
+    });
+  }
+
+  // SECTION 11 — reviewing snagging items reported against a completed
+  // reservation's checklist, and acting on each (acknowledge / mark fixed /
+  // dispute), from the buyer drawer.
+  async function manageHandoverModal(reservationId, buyerName) {
+    var checklist = await api('/reservations/' + reservationId + '/handover');
+    var items = checklist.snagging_items || [];
+
+    var panel = R.modal({
+      title: 'Handover — ' + buyerName,
+      wide: true,
+      cancelLabel: 'Close',
+      body:
+        '<div class="grid cols-3 mb-2">' +
+          stat('Status', checklist.status.replace(/_/g, ' ')) +
+          stat('Keys handed', checklist.keys_handed ? 'Yes' : 'No') +
+          stat('Snagging items', String(items.length)) +
+        '</div>' +
+        (items.length
+          ? items.map(function (s) {
+              return '<div class="drawer-section">' +
+                '<div class="flex-row justify-between gap-10">' + badge(s.status) +
+                  '<span class="page-sub nowrap">' + esc(fmtDate(s.created_at)) + '</span></div>' +
+                '<div class="mt-1">' + esc(s.description) + '</div>' +
+                (s.photo_url ? '<a href="' + esc(s.photo_url) + '" target="_blank" rel="noopener" class="btn-quiet mt-1">View photo</a>' : '') +
+                (s.developer_response ? '<div class="page-sub mt-1">Response: ' + esc(s.developer_response) + '</div>' : '') +
+                (s.status !== 'fixed'
+                  ? '<div class="btn-row mt-1">' +
+                      '<button class="btn-quiet" data-snag-ack="' + esc(s.id) + '">Acknowledge</button>' +
+                      '<button class="btn-quiet" data-snag-fix="' + esc(s.id) + '">Mark fixed</button>' +
+                    '</div>'
+                  : '') +
+              '</div>';
+            }).join('')
+          : '<p class="muted">No snagging items reported yet.</p>'),
+      onSubmit: function () {},
+    });
+
+    R.onClick(panel.root, '[data-snag-ack]', async function (button) {
+      await api.patch('/handover/snag/' + button.dataset.snagAck, { status: 'acknowledged' });
+      toast('Snagging item acknowledged.', 'ok');
+      panel.close();
+      manageHandoverModal(reservationId, buyerName);
+    });
+    R.onClick(panel.root, '[data-snag-fix]', async function (button) {
+      await api.patch('/handover/snag/' + button.dataset.snagFix, { status: 'fixed' });
+      toast('Snagging item marked fixed.', 'ok');
+      panel.close();
+      manageHandoverModal(reservationId, buyerName);
+    });
+  }
 
   /* ══ RENEW A TENANCY ═════════════════════════════════════════════════════
      The rental equivalent of restructuring. 60 days before a lease ends the
@@ -2513,23 +3179,32 @@
           };
         }
 
-        var created = await api.post('/reservations', payload);
+        // SECTION 14 — offline, this queues instead of creating outright;
+        // there is then no real reservation.id yet, so the plan-
+        // recommendation follow-up below (which needs one) only runs on
+        // the ordinary, online path.
+        var result = await R.offlineQueue.submitOrQueue('new_reservation', '/reservations', payload);
 
-        // SECTION 7 — logs the outcome regardless of which way it went:
-        // accepted (this reservation is the one it produced) or shown and
-        // not used. Never blocks the reservation itself on this call.
-        if (currentRecommendation) {
-          try {
-            await api.patch('/reservations/plan-recommendations/' + currentRecommendation.id, {
-              accepted: recommendationAccepted,
-              reservation_id: recommendationAccepted ? created.reservation.id : null,
-            });
-          } catch (err) { /* logging the decision must not block a reservation that already exists */ }
+        if (!result.queued) {
+          var created = result.data;
+          // SECTION 7 — logs the outcome regardless of which way it went:
+          // accepted (this reservation is the one it produced) or shown and
+          // not used. Never blocks the reservation itself on this call.
+          if (currentRecommendation) {
+            try {
+              await api.patch('/reservations/plan-recommendations/' + currentRecommendation.id, {
+                accepted: recommendationAccepted,
+                reservation_id: recommendationAccepted ? created.reservation.id : null,
+              });
+            } catch (err) { /* logging the decision must not block a reservation that already exists */ }
+          }
         }
 
         close();
-        toast(v.property_type === 'rental' ? 'Tenancy created.' : 'Reservation created.', 'ok');
-        R.reload();
+        toast(result.queued
+          ? 'No connection — reservation saved and will sync automatically.'
+          : (v.property_type === 'rental' ? 'Tenancy created.' : 'Reservation created.'), 'ok');
+        if (!result.queued) R.reload();
       },
     });
 
@@ -2683,6 +3358,21 @@
         await api.patch('/reservations/' + id + '/status', { status: next });
         close();
         toast('Reservation updated.', 'ok');
+
+        // SECTION 11 — "when a reservation is marked completed: prompt the
+        // owner to create a handover checklist." Rental's own 'completed'
+        // means the TENANCY ended (the buyer moving out, unit back on the
+        // market) rather than a buyer taking possession, so this only
+        // fires for an off-plan/outright sale actually closing.
+        if (next === 'completed' && current !== 'completed' && !isRental && R.can('handover.manage')) {
+          var wantsChecklist = await R.confirm({
+            title: 'Create a handover checklist?',
+            message: buyerName + '’s unit is now marked completed. Start the handover checklist now?',
+            confirmLabel: 'Create checklist',
+          });
+          if (wantsChecklist) await createHandoverChecklistModal(id);
+        }
+
         R.reload();
       },
     });
@@ -3760,6 +4450,112 @@
   }
 
   /* ══ REPORTS ════════════════════════════════════════════════════════════ */
+  var LEGAL_CASE_STATUSES = [
+    ['active', 'Active'], ['settled', 'Settled'], ['judgment_obtained', 'Judgment obtained'],
+    ['withdrawn', 'Withdrawn'], ['closed', 'Closed'],
+  ];
+
+  // SECTION 8 — owner only (legal.manage), the entry point PATCH
+  // /legal-cases/:id has in this app: lawyer details, status, settlement,
+  // and a download link for whichever demand letter(s) have been generated
+  // for this reservation (documentService.getDownloadUrl, reused as-is).
+  async function manageLegalCaseModal(caseId) {
+    var legalCase = await api('/legal-cases/' + caseId);
+
+    R.modal({
+      title: 'Legal case — ' + (legalCase.re_customers ? legalCase.re_customers.full_name : 'buyer'),
+      wide: true,
+      body:
+        (legalCase.demand_letters && legalCase.demand_letters.length
+          ? '<p class="field-hint">' +
+              legalCase.demand_letters.map(function (d) {
+                return '<button type="button" class="btn-quiet" data-download-doc="' + esc(d.id) + '">Download demand letter (' +
+                  esc(fmtDate(d.generated_at)) + ')</button>';
+              }).join(' ') +
+            '</p>'
+          : '<p class="field-hint">No demand letter was generated for this case.</p>') +
+        '<div class="field"><label for="lc-status">Status</label>' +
+          '<select class="select" id="lc-status" name="status">' +
+            options(LEGAL_CASE_STATUSES.map(function (s) { return { id: s[0], name: s[1] }; }), 'id', 'name', legalCase.status) +
+          '</select></div>' +
+        '<div class="field-row">' +
+          '<div class="field"><label for="lc-lawyer-name">Lawyer name</label>' +
+            '<input class="input" id="lc-lawyer-name" name="lawyer_name" value="' + esc(legalCase.lawyer_name || '') + '"></div>' +
+          '<div class="field"><label for="lc-lawyer-phone">Lawyer phone</label>' +
+            '<input class="input" id="lc-lawyer-phone" name="lawyer_phone" value="' + esc(legalCase.lawyer_phone || '') + '"></div>' +
+        '</div>' +
+        '<div class="field"><label for="lc-lawyer-email">Lawyer email</label>' +
+          '<input class="input" id="lc-lawyer-email" name="lawyer_email" type="email" value="' + esc(legalCase.lawyer_email || '') + '"></div>' +
+        '<div class="field-row">' +
+          '<div class="field"><label for="lc-settlement-amount">Settlement amount</label>' +
+            '<div class="input-money"><input class="input" id="lc-settlement-amount" name="settlement_amount" type="number" min="0" step="1" value="' + esc(legalCase.settlement_amount || '') + '"></div></div>' +
+          '<div class="field"><label for="lc-settlement-date">Settlement date</label>' +
+            '<input class="input" id="lc-settlement-date" name="settlement_date" type="date" value="' + esc((legalCase.settlement_date || '').slice(0, 10)) + '"></div>' +
+        '</div>' +
+        '<div class="field"><label for="lc-notes">Notes</label>' +
+          '<textarea class="input" id="lc-notes" name="notes" rows="3">' + esc(legalCase.notes || '') + '</textarea></div>',
+      submitLabel: 'Save',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        await api.patch('/legal-cases/' + caseId, {
+          status: v.status,
+          lawyer_name: v.lawyer_name || null,
+          lawyer_phone: v.lawyer_phone || null,
+          lawyer_email: v.lawyer_email || null,
+          settlement_amount: v.settlement_amount,
+          settlement_date: v.settlement_date || null,
+          notes: v.notes || null,
+        });
+        close();
+        toast('Legal case updated.', 'ok');
+      },
+    });
+
+    R.onClick(R.el('overlay'), '[data-download-doc]', async function (button) {
+      var result = await api('/documents/' + button.dataset.downloadDoc + '/download');
+      R.openFile(result.download_url);
+    });
+  }
+
+  var FINANCING_STATUSES = [
+    ['pending', 'Pending'], ['submitted', 'Submitted'], ['under_review', 'Under review'],
+    ['approved', 'Approved'], ['rejected', 'Rejected'], ['disbursed', 'Disbursed'],
+  ];
+
+  // SECTION 9 — owner only (financing.manage). No GET /financing-requests/:id
+  // route exists (the spec's own route list has none) — the row already
+  // sitting in the Reports screen's fetched list is enough to populate this.
+  async function manageFinancingModal(id, requests) {
+    var request = requests.find(function (r) { return r.id === id; });
+    if (!request) return;
+
+    R.modal({
+      title: 'Financing request — ' + (request.re_customers ? request.re_customers.full_name : 'buyer'),
+      body:
+        '<p class="field-hint">' + esc(request.bank_name) + ' · ' + esc(naira(request.amount_requested)) +
+          (request.notes ? '<br>' + esc(request.notes) : '') + '</p>' +
+        '<div class="field"><label for="fr-status">Status</label>' +
+          '<select class="select" id="fr-status" name="status">' +
+            options(FINANCING_STATUSES.map(function (s) { return { id: s[0], name: s[1] }; }), 'id', 'name', request.status) +
+          '</select></div>' +
+        '<div class="field"><label for="fr-reference">Bank reference</label>' +
+          '<input class="input" id="fr-reference" name="bank_reference" value="' + esc(request.bank_reference || '') + '"></div>' +
+        '<div class="field"><label for="fr-notes">Notes</label>' +
+          '<textarea class="input" id="fr-notes" name="notes" rows="3">' + esc(request.notes || '') + '</textarea></div>',
+      submitLabel: 'Save',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        await api.patch('/financing-requests/' + id, {
+          status: v.status,
+          bank_reference: v.bank_reference || null,
+          notes: v.notes || null,
+        });
+        close();
+        toast('Financing request updated.', 'ok');
+      },
+    });
+  }
+
   R.screens.reports = {
     render: async function (view, params, query) {
       var scope = query.project ? '?project_id=' + encodeURIComponent(query.project) : '';
@@ -3777,6 +4573,13 @@
       var canExport = R.can('reports.export');
       var canReferrals = R.can('reports.referrals');
       var canForecast = R.can('reports.forecast');
+      // SECTION 8 — owner only, same as reports.investor: this is exposure,
+      // not a sales-book number a director's own reports.collections/
+      // reports.rental tier would otherwise cover.
+      var canLegal = R.can('legal.manage');
+      // SECTION 9 — same owner-only tier as legal cases: "Owner can mark the
+      // request as submitted... from the financing requests screen."
+      var canFinancing = R.can('financing.manage');
 
       var results = await Promise.all([
         canInvestor ? api('/reports/investor' + scope) : Promise.resolve(null),
@@ -3784,8 +4587,12 @@
         canRental ? api('/reports/rental') : Promise.resolve(null),
         canReferrals ? api('/reports/referrals') : Promise.resolve(null),
         canForecast ? api('/reports/forecast') : Promise.resolve(null),
+        canLegal ? api('/legal-cases/summary') : Promise.resolve(null),
+        canLegal ? api('/legal-cases?status=active') : Promise.resolve(null),
+        canFinancing ? api('/financing-requests') : Promise.resolve(null),
       ]);
       var report = results[0], collections = results[1], rental = results[2], referralStats = results[3], forecast = results[4];
+      var legalSummary = results[5], legalCases = results[6], financingRequests = results[7];
       var t = report && report.totals;
       // Only a developer who actually runs a rental portfolio sees this
       // section — nothing to report on is nothing to show.
@@ -3864,6 +4671,19 @@
               stat('Receivables outstanding', nairaShort(t.receivables_outstanding), {
                 sub: t.receivables_overdue ? nairaShort(t.receivables_overdue) + ' overdue' : 'none overdue',
                 accent: t.receivables_overdue ? 'clay' : null,
+              }) +
+            '</div>'
+          : '') +
+
+        // SECTION 12 — the other side of the ledger: money going OUT to
+        // contractors, on the same investor-only screen as money coming in.
+        (canInvestor && report.contractor_payments
+          ? '<div class="grid cols-3 mb-2">' +
+              stat('Contractor payments — paid', nairaShort(report.contractor_payments.paid_total), { tone: 'moss' }) +
+              stat('Contractor payments — pending', nairaShort(report.contractor_payments.pending_total)) +
+              stat('Contractor payments — overdue', nairaShort(report.contractor_payments.overdue_total), {
+                sub: R.plural(report.contractor_payments.overdue_count, 'payment'),
+                accent: report.contractor_payments.overdue_count ? 'clay' : null,
               }) +
             '</div>'
           : '') +
@@ -3959,6 +4779,53 @@
               },
               { emptyTitle: 'Nothing expiring soon', emptyHint: 'Renewals due in the next 90 days will appear here.' }
             ), { flush: true })
+          : '') +
+
+        // SECTION 8 — active cases, total exposure, what settled this month.
+        (canLegal
+          ? card('Legal cases',
+              '<div class="grid cols-3">' +
+                stat('Active cases', String(legalSummary.active_count), { accent: legalSummary.active_count ? 'clay' : null }) +
+                stat('Total in dispute', nairaShort(legalSummary.total_in_dispute), { tone: 'clay' }) +
+                stat('Settled this month', legalSummary.settled_this_month_count + ' · ' + nairaShort(legalSummary.settled_this_month_amount), { tone: 'moss' }) +
+              '</div>', { flush: false })
+          : '') +
+
+        (canLegal
+          ? card(null, table(
+              [{ label: 'Buyer' }, { label: 'Unit', hideMobile: true }, { label: 'Lawyer', hideMobile: true }, { label: '' }],
+              legalCases,
+              function (c) {
+                var unit = c.re_reservations && c.re_reservations.re_units;
+                return '<tr>' +
+                  '<td class="cell-primary">' + esc((c.re_customers && c.re_customers.full_name) || '—') + '</td>' +
+                  '<td class="muted hide-mobile">' + esc((unit && unit.unit_number) || '—') +
+                    '<div class="cell-meta">' + esc((unit && unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
+                  '<td class="muted hide-mobile">' + esc(c.lawyer_name || '—') + '</td>' +
+                  '<td class="right"><button class="btn-quiet" data-manage-case="' + esc(c.id) + '">Manage</button></td>' +
+                '</tr>';
+              },
+              { emptyTitle: 'No active legal cases' }
+            ), { flush: true })
+          : '') +
+
+        // SECTION 9 — bank financing requests, owner only.
+        (canFinancing
+          ? card('Financing requests', table(
+              [{ label: 'Buyer' }, { label: 'Bank', hideMobile: true }, { label: 'Amount', num: true },
+                { label: 'Status' }, { label: '' }],
+              financingRequests,
+              function (f) {
+                return '<tr>' +
+                  '<td class="cell-primary">' + esc((f.re_customers && f.re_customers.full_name) || '—') + '</td>' +
+                  '<td class="muted hide-mobile">' + esc(f.bank_name) + '</td>' +
+                  '<td class="num">' + naira(f.amount_requested) + '</td>' +
+                  '<td>' + badge(f.status) + '</td>' +
+                  '<td class="right"><button class="btn-quiet" data-manage-financing="' + esc(f.id) + '">Manage</button></td>' +
+                '</tr>';
+              },
+              { emptyTitle: 'No financing requests yet' }
+            ), { flush: true })
           : '');
 
       // Collections bars carry their height as data-h (a CSP with no
@@ -3979,6 +4846,16 @@
 
       R.onClick(view, '[data-renew]', async function (button) {
         await renewTenancyModal(button.dataset.renew, button.dataset.buyerName);
+      });
+
+      R.onClick(view, '[data-manage-case]', async function (button) {
+        await manageLegalCaseModal(button.dataset.manageCase);
+        R.reload();
+      });
+
+      R.onClick(view, '[data-manage-financing]', async function (button) {
+        await manageFinancingModal(button.dataset.manageFinancing, financingRequests);
+        R.reload();
       });
 
       R.onClick(view, '#btn-regenerate-forecast', async function () {
@@ -4465,7 +5342,10 @@
             '<td class="muted hide-mobile">' + esc((rep.users && rep.users.email) || '') + '</td>' +
             '<td class="num">' + (rep.commission_rate || 0) + '%</td>' +
             '<td>' + badge(rep.active ? 'active' : 'none') + '</td>' +
-            '<td class="right"><button class="btn-quiet" data-rate="' + esc(rep.id) + '" data-current="' + esc(rep.commission_rate || 0) + '">Set rate</button></td>' +
+            '<td class="right nowrap">' +
+              '<button class="btn-quiet" data-profile="' + esc(rep.id) + '">Profile</button> ' +
+              '<button class="btn-quiet" data-rate="' + esc(rep.id) + '" data-current="' + esc(rep.commission_rate || 0) + '">Set rate</button>' +
+            '</td>' +
           '</tr>';
         },
         {
@@ -4692,6 +5572,10 @@
       });
     });
 
+    R.onClick(view, '[data-profile]', async function (button) {
+      await repProfileModal(button.dataset.profile);
+    });
+
     // R.onClick for the spinner/disable and automatic error toast on the
     // (rare, but real — a stale invite, a race with another admin) failure
     // path a bare addEventListener here had no try/catch for. `team` is
@@ -4845,6 +5729,65 @@
     // Scoped to this modal's own root — see the comment in deleteModal().
     var submit = R.qs('[type="submit"]', panel.root);
     if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
+  }
+
+  /* FEATURE — a sales rep's profile from Settings → Team: what they are
+     carrying right now, and a "Reassign all reservations" action for moving
+     their WHOLE portfolio (not just the open deals the removal flow above
+     moves) onto another rep in one deliberate action — a territory handover
+     or portfolio rebalance while the rep is still active, not a response to
+     them leaving. No submitLabel: like openAccountModal, this dialog holds
+     one independent action wired to its own button rather than a form
+     submit, so an onSubmit no-op keeps Enter from closing it. */
+  async function repProfileModal(repId) {
+    var summary = await api('/sales-reps/' + repId + '/summary');
+    var rep = summary.rep;
+    var hasTargets = summary.other_reps.length > 0;
+
+    var panel = R.modal({
+      title: rep.name,
+      cancelLabel: 'Close',
+      body:
+        '<div class="grid cols-3 mb-2">' +
+          stat('Commission', rep.commission_rate + '%') +
+          stat('Reservations', String(summary.total_reservations)) +
+          stat('Active', String(summary.active_reservations)) +
+        '</div>' +
+        (summary.total_reservations
+          ? ('<div class="divider"></div>' +
+            '<div class="field"><label for="rp-target">Reassign all reservations to</label>' +
+              (hasTargets
+                ? '<select class="select" id="rp-target" name="target_rep_id">' +
+                    options(summary.other_reps.map(function (r) { return { id: r.id, name: r.name }; }), 'id', 'name') +
+                  '</select>'
+                : '<p class="muted">No other active rep in this workspace yet.</p>') +
+            '</div>' +
+            '<p class="field-hint">Moves every reservation this rep has ever held — including completed and cancelled ones — ' +
+              'onto the rep chosen above. Commission already accrued stays credited to ' + esc(rep.name) +
+              '; only future payments accrue to the new rep.</p>' +
+            (hasTargets
+              ? '<button class="btn danger" type="button" id="btn-reassign-all">Reassign all reservations</button>'
+              : ''))
+          : '<p class="muted mt-2">No reservations to reassign.</p>'),
+      onSubmit: function () {},
+    });
+
+    R.onClick(panel.root, '#btn-reassign-all', async function () {
+      var targetId = R.qs('#rp-target', panel.root).value;
+      var confirmed = await R.confirm({
+        title: 'Reassign all reservations?',
+        message: 'This moves all ' + summary.total_reservations + ' of ' + rep.name +
+          '’s reservations — including completed and cancelled ones — to another rep. This cannot be undone from here.',
+        confirmLabel: 'Reassign',
+        danger: true,
+      });
+      if (!confirmed) return;
+
+      var result = await api.post('/sales-reps/' + repId + '/reassign', { target_rep_id: targetId });
+      panel.close();
+      toast(result.moved + ' reservation(s) reassigned to ' + result.to + '.', 'ok');
+      R.reload();
+    });
   }
 
   async function activityTab(view, tabs) {

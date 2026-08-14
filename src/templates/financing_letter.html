@@ -1,0 +1,69 @@
+<!-- Financing Support Letter — SECTION 9. Rendered by
+     src/services/financingService.js and printed by src/services/pdfAdapter.js
+     (Puppeteer), the same convention src/templates/allocation_letter.html
+     documents: uppercase {{TOKEN}} placeholders, no conditional syntax —
+     anything optional is pre-assembled as a _BLOCK token by the service.
+     Every interpolated value is escaped there. -->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 25mm 20mm; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; font-size: 12pt; line-height: 1.7; }
+  .letterhead { display: flex; justify-content: space-between; align-items: center; border-bottom: 3px double #1a1a1a; padding-bottom: 12px; margin-bottom: 32px; }
+  .letterhead img { max-height: 60px; max-width: 200px; object-fit: contain; }
+  .letterhead .company { font-size: 15pt; font-weight: bold; letter-spacing: 0.5px; }
+  .ref-date { display: flex; justify-content: space-between; margin-bottom: 28px; font-size: 11pt; }
+  h1 { font-size: 13pt; text-align: center; text-decoration: underline; text-transform: uppercase; letter-spacing: 1px; margin: 28px 0; }
+  table.details { width: 100%; border-collapse: collapse; margin: 20px 0; }
+  table.details td { padding: 8px 12px; border: 1px solid #999; }
+  table.details td:first-child { font-weight: bold; width: 50%; background: #f5f5f0; }
+  .signature-block { margin-top: 60px; display: flex; justify-content: space-between; }
+  .signature-line { border-top: 1px solid #1a1a1a; width: 220px; padding-top: 6px; font-size: 10.5pt; }
+  .fineprint { margin-top: 28px; font-size: 9.5pt; color: #555; }
+</style>
+</head>
+<body>
+  <div class="letterhead">
+    <div class="company">{{COMPANY_NAME}}</div>
+    {{LOGO_BLOCK}}
+  </div>
+  <div class="ref-date">
+    <span>Ref: {{REFERENCE_NUMBER}}</span>
+    <span>{{DATE}}</span>
+  </div>
+
+  <p>To Whom It May Concern,</p>
+  <p>{{BANK_NAME}}</p>
+
+  <h1>Financing Support Letter — {{CUSTOMER_NAME}}</h1>
+
+  <p>This letter is issued at the request of {{CUSTOMER_NAME}} in support of an application for property
+  financing in respect of the unit particulars below, held under an active Contract of Sale with
+  {{COMPANY_NAME}}.</p>
+
+  <table class="details">
+    <tr><td>Unit</td><td>{{UNIT_NUMBER}}, {{PROJECT_LINE}}</td></tr>
+    <tr><td>Total Contracted Amount</td><td>{{TOTAL_CONTRACTED}}</td></tr>
+    <tr><td>Amount Paid to Date</td><td>{{TOTAL_PAID}}</td></tr>
+    <tr><td>Outstanding Balance</td><td>{{OUTSTANDING_BALANCE}}</td></tr>
+    <tr><td>Payment Consistency Rate</td><td>{{CONSISTENCY_RATE}}</td></tr>
+    <tr><td>Credit Score (Archta)</td><td>{{CREDIT_SCORE}}</td></tr>
+    <tr><td>Amount Being Requested</td><td>{{AMOUNT_REQUESTED}}</td></tr>
+  </table>
+
+  <p>Based on our records, {{CUSTOMER_NAME}} has maintained the payment history summarised above.
+  We confirm that the allocation referenced remains valid and in good standing, and we have no objection
+  to the financing arrangement described herein, subject to your institution's own terms and conditions.</p>
+
+  <p>Please do not hesitate to contact our office should you require any further verification.</p>
+
+  <div class="signature-block">
+    <div class="signature-line">For and on behalf of<br>{{COMPANY_NAME}}</div>
+    <div class="signature-line">Date</div>
+  </div>
+
+  <div class="fineprint">This letter is issued for the sole purpose of supporting a financing application and confers no additional right, title or interest beyond the buyer's existing Contract of Sale.</div>
+</body>
+</html>

@@ -128,10 +128,53 @@ const PERMISSIONS = {
   // separate, orthogonal fact checked in src/services/groupService.js by
   // parent_organizations.owner_id, not by this matrix — see routes/group.js.
   'group.manage': OWNER,
+  // FEATURE — opening a legal case, and everything that follows from it
+  // (a demand letter, the buyer being told they are in legal recovery), is
+  // the same weight as waiving debt or deleting a record: owner-only, never
+  // a director's call.
+  'legal.manage': OWNER,
+  // FEATURE — contractor/supplier outflows and the cash-flow forecast built
+  // from them are construction-cost and financial-planning information,
+  // the same owner-only tier as the investor report — "Contractors tab...
+  // (owner only)" in the product spec.
+  'contractors.manage': OWNER,
+  // FEATURE — the abandoned-project early warning score and its signal
+  // breakdown. Same owner-only tier as the investor report and forecast it
+  // sits beside on the Reports/Dashboard screens.
+  'projectHealth.read': OWNER,
+  // FEATURE — the owner is the one who actually talks to the bank; moving a
+  // financing request forward is that same conversation, not a sales
+  // decision a director could make on their behalf.
+  'financing.manage': OWNER,
 
   // ── Owner + Sales Director ───────────────────────────────────────────────
   'reservations.restructure': DIRECTORS,
   'reservations.renewTenancy': DIRECTORS,
+  // FEATURE — moving a reservation to a different rep changes whose
+  // commission accrues on every future payment, the same weight as a
+  // restructure. A Sales Executive may see the "Change rep" control appear on
+  // a colleague's reservation (reservations.read is broader than SELLERS-only
+  // in some views) but never touch it.
+  'reservations.reassign': DIRECTORS,
+  // FEATURE — "pause requires owner or sales_director approval (never
+  // automatic)". Same tier as commissions.approve: a judgment call with
+  // money and a buyer relationship riding on it.
+  'hardship.review': DIRECTORS,
+  // FEATURE — moderating the buyer community forum (reading every project's
+  // threads, pinning an announcement, removing a post). The buyers who
+  // posted still own the content; this is oversight, not authorship.
+  'community.moderate': DIRECTORS,
+  // FEATURE — creating and managing a handover checklist, and acting on a
+  // buyer's snagging reports, is a sales-completion task the same tier as
+  // restructuring a plan or renewing a tenancy.
+  'handover.manage': DIRECTORS,
+  // FEATURE — reading the legal-case list and a case's own detail. Opening
+  // and editing a case (legal.manage, above) stays owner-only; a director
+  // can still see where every file stands without being able to act on one.
+  'legal.read': DIRECTORS,
+  // FEATURE — reading the financing-request queue. Advancing one
+  // (financing.manage, above) stays owner-only.
+  'financing.read': DIRECTORS,
   'imports.write': DIRECTORS,
   'reports.export': DIRECTORS,
   'reports.collections': DIRECTORS,
@@ -172,6 +215,16 @@ const PERMISSIONS = {
   // one. It was owner/admin before this model existed and stays at the
   // equivalent tier rather than widening to collections.
   'payments.void': DIRECTORS,
+
+  // FEATURE — call/visit notes. Everyone who actually talks to a buyer
+  // (selling, or chasing them) may log one; Documentation's remit is letters
+  // and deeds, not conversations, so it is the one operational role missing
+  // here — no existing group constant is exactly "everyone but
+  // Documentation", so this is spelled out rather than forced into MONEY_IN
+  // or SELLERS. routes/customers.js narrows sales_rep further, to their own
+  // buyers only, the same isOwnRecordsOnly filter every other own-records
+  // rule in this file uses.
+  'activities.write': ['owner', 'sales_director', 'sales_rep', 'collections'],
 
   // ── Owner + Sales Director + Collections ─────────────────────────────────
   // Money arriving, and everything that is really "chasing it".
@@ -217,6 +270,12 @@ const PERMISSIONS = {
   'customers.update': SELLERS,
   'reservations.create': SELLERS,
   'reservations.updateStatus': SELLERS,
+  // FEATURE — the buyer message thread. Collections and Documentation are
+  // deliberately absent: this is a sales relationship channel (routes/
+  // customers.js narrows sales_rep further, to their own buyers only), not a
+  // collections tool or a paperwork one.
+  'messages.read': SELLERS,
+  'messages.write': SELLERS,
 
   // ── Read surfaces, filtered per role rather than route-gated ─────────────
   // Everyone below sees a DIFFERENT subset of the same endpoint. The route

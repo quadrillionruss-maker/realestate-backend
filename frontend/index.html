@@ -282,6 +282,12 @@
       </div>
 
       <div class="topbar-right">
+        <!-- SECTION 14 — offline-first mode, sales_rep only. Both start
+             hidden; realestate.js's own online/offline listeners and
+             offline-queue.js's refreshSyncBadge() are what ever unhide
+             them, and only for that one role. -->
+        <span class="offline-banner hidden" id="offline-banner">Offline</span>
+        <span class="sync-status hidden" id="sync-status" title="Tap to retry any failed submissions"></span>
         <span class="dateline" id="dateline"></span>
         <button class="btn ghost sm" id="btn-signout" type="button">Sign out</button>
         <!-- Under 640px the search bar gets squeezed between the hamburger and
@@ -299,6 +305,22 @@
 <div id="overlay"></div>
 
 <script src="./realestate.js"></script>
+<script src="./offline-queue.js"></script>
 <script src="./screens.js"></script>
+<script>
+  // SECTION 14 — registered unconditionally (cheap, and every role benefits
+  // from the app-shell speed-up); which SCREENS actually use what it caches
+  // is gated to sales_rep inside screens.js and offline-queue.js instead.
+  // Guarded by the feature check itself, the standard pattern — an old
+  // browser or a locked-down webview with no serviceWorker support must not
+  // throw and take the rest of this inline block down with it.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('./service-worker.js').catch(function (err) {
+        console.warn('[archta] service worker registration failed:', err.message);
+      });
+    });
+  }
+</script>
 </body>
 </html>

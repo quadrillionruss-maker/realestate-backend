@@ -8,6 +8,7 @@ const { audit } = require('../services/auditService');
 const { sanitizeSearchTerm } = require('../utils/searchFilter');
 const creditScore = require('../services/creditScoreService');
 const referrals = require('../services/referralService');
+const messages = require('../services/messageService');
 const router = express.Router();
 
 router.get('/', requirePermission('customers.read'), async (req, res, next) => {
@@ -65,7 +66,8 @@ router.get('/:id', requirePermission('customers.read'), async (req, res, next) =
       .select(`
         *,
         re_reservations(
-          id, status, reserved_at,
+          id, status, reserved_at, sales_rep_id, escalation_stage,
+          re_sales_reps(id, active, users(full_name, email)),
           re_units(unit_number, list_price, re_projects(name, location)),
           re_installment_plans(
             id, total_amount, number_of_installments, frequency, start_date,
@@ -93,6 +95,30 @@ router.get('/:id', requirePermission('customers.read'), async (req, res, next) =
       // omitted outright, so the screen still shows which unit and which
       // installment is due WHEN without saying how much it is due for.
       stripFinancials(data);
+    }
+
+    // FEATURE — hardship request count on the buyer drawer, owner/director
+    // only (the same tier that reviews these requests — permissions.js's
+    // hardship.review — since a count with no way to act on it is just a
+    // number nobody else on the team needs).
+    if (canAccess(req.orgRole, 'hardship.review')) {
+      const { data: hardshipRows } = await supabaseAdmin
+        .from('re_hardship_requests')
+        .select('status')
+        .eq('organization_id', req.orgId)
+        .eq('customer_id', data.id);
+      const rows = hardshipRows || [];
+      data.hardship_requests = {
+        total: rows.length,
+        pending: rows.filter((r) => r.status === 'pending').length,
+        approved: rows.filter((r) => r.status === 'approved').length,
+      };
+    }
+
+    // FEATURE — unread message badge on the buyer drawer, for whoever can
+    // read this thread at all (messages.read — same tier that can open it).
+    if (canAccess(req.orgRole, 'messages.read')) {
+      data.unread_messages = await messages.unreadCountForCustomer(req.orgId, data.id, 'buyer');
     }
 
     res.json(data);
@@ -270,6 +296,156 @@ router.get('/:id/credit-score', requirePermission('customers.read'), async (req,
 
     const { score, breakdown } = await creditScore.computeBreakdown(req.orgId, customer.id);
     res.json({ customer_id: customer.id, score, tier: creditScore.tier(score), breakdown });
+  } catch (e) { next(e); }
+});
+
+// ── Activity log ─────────────────────────────────────────────────────────
+// Free-text call/visit/WhatsApp/email notes against a buyer — see
+// migrations/029. Read follows the SAME visibility as the buyer record
+// itself: a Sales Executive who cannot open this buyer at all (the 404 above)
+// cannot see their activity notes either, and one who can see the buyer sees
+// every note logged on it, not just their own.
+const ACTIVITY_TYPES = ['call', 'visit', 'whatsapp', 'email', 'note', 'site_visit'];
+const ACTIVITY_OUTCOMES = ['interested', 'not_interested', 'promised_payment', 'no_answer', 'follow_up_needed'];
+
+// Shared by GET/POST/DELETE below: confirms the buyer exists in this org and,
+// for a Sales Executive, that it is one of THEIR OWN buyers — the identical
+// ownership check GET /:id already applies, so a rep gets the same 404 a
+// stranger would rather than a 403 that confirms the buyer exists.
+async function findOwnCustomer(req) {
+  let query = supabaseAdmin
+    .from('re_customers')
+    .select('id, full_name, phone, email, created_by_user_id')
+    .eq('id', req.params.id)
+    .eq('organization_id', req.orgId);
+  if (isOwnRecordsOnly(req.orgRole)) query = query.eq('created_by_user_id', req.userId);
+  const { data } = await query.maybeSingle();
+  return data;
+}
+
+router.get('/:id/activities', requirePermission('customers.read'), async (req, res, next) => {
+  try {
+    const customer = await findOwnCustomer(req);
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const { data, error } = await supabaseAdmin
+      .from('re_activities')
+      .select('id, activity_type, notes, outcome, created_at, logged_by_user_id, users(full_name, email)')
+      .eq('organization_id', req.orgId)
+      .eq('customer_id', customer.id)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/activities', requirePermission('activities.write'), async (req, res, next) => {
+  try {
+    const customer = await findOwnCustomer(req);
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const { activity_type, notes, outcome } = req.body || {};
+    if (!ACTIVITY_TYPES.includes(activity_type)) {
+      return res.status(400).json({ error: `activity_type must be one of: ${ACTIVITY_TYPES.join(', ')}` });
+    }
+    if (!String(notes || '').trim()) {
+      return res.status(400).json({ error: 'notes is required' });
+    }
+    if (outcome !== undefined && outcome !== null && !ACTIVITY_OUTCOMES.includes(outcome)) {
+      return res.status(400).json({ error: `outcome must be one of: ${ACTIVITY_OUTCOMES.join(', ')}` });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('re_activities')
+      .insert({
+        organization_id: req.orgId,
+        customer_id: customer.id,
+        logged_by_user_id: req.userId,
+        activity_type,
+        notes: String(notes).trim(),
+        outcome: outcome || null,
+      })
+      .select('id, activity_type, notes, outcome, created_at, logged_by_user_id, users(full_name, email)')
+      .single();
+    if (error) throw error;
+
+    audit(req, {
+      action: 'activity.logged',
+      entityType: 're_activities',
+      entityId: data.id,
+      summary: `${activity_type} logged for customer`,
+      metadata: { customer_id: customer.id, activity_type, outcome: outcome || null },
+    });
+
+    res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
+router.delete('/:id/activities/:activityId', requirePermission('activities.write'), async (req, res, next) => {
+  try {
+    const customer = await findOwnCustomer(req);
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    let query = supabaseAdmin
+      .from('re_activities')
+      .select('id, logged_by_user_id')
+      .eq('id', req.params.activityId)
+      .eq('organization_id', req.orgId)
+      .eq('customer_id', customer.id)
+      .is('deleted_at', null);
+    const { data: activity } = await query.maybeSingle();
+    if (!activity) return res.status(404).json({ error: 'Activity not found' });
+
+    // A Sales Executive may tidy up their OWN notes on their OWN buyer, but
+    // not a collections officer's or a colleague's — the same "own it, not
+    // just see it" boundary the removal reassignment above draws around who
+    // may act, versus who may merely look.
+    if (isOwnRecordsOnly(req.orgRole) && activity.logged_by_user_id !== req.userId) {
+      return res.status(404).json({ error: 'Activity not found' });
+    }
+
+    const { error } = await supabaseAdmin
+      .from('re_activities')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', activity.id)
+      .eq('organization_id', req.orgId);
+    if (error) throw error;
+
+    audit(req, {
+      action: 'activity.deleted',
+      entityType: 're_activities',
+      entityId: activity.id,
+      summary: 'Activity note deleted',
+      metadata: { customer_id: customer.id },
+    });
+
+    res.json({ deleted: true });
+  } catch (e) { next(e); }
+});
+
+// ── Message thread ─────────────────────────────────────────────────────
+// Reading marks the OTHER party's messages read — a staff member opening
+// this thread has, by definition, just read whatever the buyer sent.
+router.get('/:id/messages', requirePermission('messages.read'), async (req, res, next) => {
+  try {
+    const customer = await findOwnCustomer(req);
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const data = await messages.listForCustomer(req.orgId, customer.id);
+    await messages.markRead(req.orgId, customer.id, 'staff');
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/messages', requirePermission('messages.write'), async (req, res, next) => {
+  try {
+    const customer = await findOwnCustomer(req);
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const data = await messages.sendFromStaff(req, customer, req.body?.message);
+    res.status(201).json(data);
   } catch (e) { next(e); }
 });
 

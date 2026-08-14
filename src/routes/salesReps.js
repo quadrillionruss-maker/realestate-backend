@@ -1,6 +1,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission } = require('../middleware/rbac');
+const { audit } = require('../services/auditService');
 const router = express.Router();
 
 // A sales rep is a platform user tagged for this product, joined here to their
@@ -118,6 +119,117 @@ router.patch('/:id', requirePermission('salesReps.write'), async (req, res, next
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Sales rep not found' });
     res.json(data);
+  } catch (e) { next(e); }
+});
+
+// FEATURE — the "profile" view behind Settings → Team's Sales reps card. What
+// this rep is carrying right now, and who else could take it on — the same
+// two questions the team-removal workload endpoint answers
+// (routes/settings.js's GET /team/:id/workload), just keyed by re_sales_reps
+// id directly rather than by team_members id, since this rep may still be an
+// active member with no removal in sight.
+router.get('/:id/summary', requirePermission('salesReps.read'), async (req, res, next) => {
+  try {
+    const { data: rep } = await supabaseAdmin
+      .from('re_sales_reps')
+      .select('id, active, commission_rate, users(full_name, email)')
+      .eq('id', req.params.id)
+      .eq('organization_id', req.orgId)
+      .maybeSingle();
+    if (!rep) return res.status(404).json({ error: 'Sales rep not found' });
+
+    const { data: reservations } = await supabaseAdmin
+      .from('re_reservations')
+      .select('id, status')
+      .eq('organization_id', req.orgId)
+      .eq('sales_rep_id', rep.id);
+
+    const rows = reservations || [];
+
+    const { data: others } = await supabaseAdmin
+      .from('re_sales_reps')
+      .select('id, commission_rate, users(full_name, email)')
+      .eq('organization_id', req.orgId)
+      .eq('active', true)
+      .neq('id', rep.id);
+
+    res.json({
+      rep: {
+        id: rep.id,
+        name: rep.users?.full_name || rep.users?.email || 'Unnamed rep',
+        email: rep.users?.email || null,
+        active: rep.active,
+        commission_rate: Number(rep.commission_rate || 0),
+      },
+      total_reservations: rows.length,
+      active_reservations: rows.filter((r) => ['reserved', 'confirmed'].includes(r.status)).length,
+      other_reps: (others || []).map((r) => ({
+        id: r.id,
+        name: r.users?.full_name || r.users?.email || 'Unnamed rep',
+        commission_rate: Number(r.commission_rate || 0),
+      })),
+    });
+  } catch (e) { next(e); }
+});
+
+// Moves EVERY reservation this rep has ever held — not just the open ones
+// the team-removal flow moves (routes/settings.js's reassignWork) — onto
+// another rep in one action. Deliberately more sweeping than that flow: this
+// is a manual, explicit, confirmed action a director takes on an ACTIVE rep
+// (a territory handover, a portfolio rebalance), not an automatic side effect
+// of someone leaving, so keeping a completed sale's original name is not the
+// same default here.
+//
+// re_commissions rows are untouched either way — every one already carries
+// the rep who was assigned when its payment landed (commissionService), so
+// moving sales_rep_id here changes nothing about what was already earned.
+// Only the NEXT payment on each of these reservations pays the new rep.
+router.post('/:id/reassign', requirePermission('salesReps.write'), async (req, res, next) => {
+  try {
+    const targetRepId = req.body?.target_rep_id;
+    if (!targetRepId) return res.status(400).json({ error: 'target_rep_id is required' });
+    if (targetRepId === req.params.id) {
+      return res.status(400).json({ error: 'Choose a different rep to reassign to.' });
+    }
+
+    const { data: source } = await supabaseAdmin
+      .from('re_sales_reps')
+      .select('id, users(full_name, email)')
+      .eq('id', req.params.id)
+      .eq('organization_id', req.orgId)
+      .maybeSingle();
+    if (!source) return res.status(404).json({ error: 'Sales rep not found' });
+
+    const { data: target } = await supabaseAdmin
+      .from('re_sales_reps')
+      .select('id, active, users(full_name, email)')
+      .eq('id', targetRepId)
+      .eq('organization_id', req.orgId)
+      .maybeSingle();
+    if (!target || !target.active) {
+      return res.status(400).json({ error: 'Reassign to an active sales rep in this workspace.' });
+    }
+
+    const { data: moved, error } = await supabaseAdmin
+      .from('re_reservations')
+      .update({ sales_rep_id: targetRepId })
+      .eq('organization_id', req.orgId)
+      .eq('sales_rep_id', source.id)
+      .select('id');
+    if (error) throw error;
+
+    const fromName = source.users?.full_name || source.users?.email || 'this rep';
+    const toName = target.users?.full_name || target.users?.email || 'another rep';
+
+    audit(req, {
+      action: 'salesRep.reservations_reassigned',
+      entityType: 're_sales_reps',
+      entityId: source.id,
+      summary: `${moved?.length || 0} reservation(s) reassigned from ${fromName} to ${toName}`,
+      metadata: { from_sales_rep_id: source.id, to_sales_rep_id: targetRepId, moved: moved?.length || 0 },
+    });
+
+    res.json({ moved: moved?.length || 0, from: fromName, to: toName });
   } catch (e) { next(e); }
 });
 

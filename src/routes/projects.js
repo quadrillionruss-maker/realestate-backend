@@ -4,6 +4,8 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission } = require('../middleware/rbac');
 const { audit } = require('../services/auditService');
 const construction = require('../services/constructionService');
+const contractors = require('../services/contractorService');
+const projectHealth = require('../services/projectHealthService');
 const router = express.Router();
 
 // Up to 10 photos per milestone, a handful of milestones per project — this
@@ -191,6 +193,66 @@ router.post('/:id/milestones/:milestoneId/photos', requirePermission('constructi
 
     const updated = await construction.addPhotos(req, req.params.id, req.params.milestoneId, photos);
     res.json(updated);
+  } catch (e) { next(e); }
+});
+
+// ── Contractors and supplier payments (SECTION 12) ─────────────────────
+// Owner only throughout (contractors.manage) — construction-cost outflows
+// and the cash-flow forecast built from them sit at the same tier as the
+// investor report, not general inventory management.
+router.get('/:id/contractors', requirePermission('contractors.manage'), async (req, res, next) => {
+  try {
+    if (!(await assertProjectInOrg(req, res))) return;
+    res.json(await contractors.listContractors(req.orgId, req.params.id));
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/contractors', requirePermission('contractors.manage'), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const result = await contractors.createContractor(req, req.params.id, {
+      name: body.name, type: body.type, phone: body.phone, email: body.email,
+    });
+    if (result.notFound) return res.status(404).json({ error: 'Project not found' });
+    res.status(201).json(result);
+  } catch (e) { next(e); }
+});
+
+router.get('/:id/contractor-payments', requirePermission('contractors.manage'), async (req, res, next) => {
+  try {
+    if (!(await assertProjectInOrg(req, res))) return;
+    const [payments, forecast] = await Promise.all([
+      contractors.listPayments(req.orgId, req.params.id),
+      contractors.cashFlowForecast(req.orgId, req.params.id),
+    ]);
+    res.json({ payments, forecast });
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/contractor-payments', requirePermission('contractors.manage'), async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const result = await contractors.createPayment(req, req.params.id, {
+      contractorId: body.contractor_id,
+      milestoneId: body.milestone_id,
+      amount: body.amount,
+      dueDate: body.due_date,
+      description: body.description,
+    });
+    if (result.notFound) return res.status(404).json({ error: 'Project not found' });
+    res.status(201).json(result);
+  } catch (e) { next(e); }
+});
+
+// SECTION 15 — abandoned project early warning system. Owner only
+// (projectHealth.read). Computed once a day by jobs/daily.js; this just
+// reads back whatever the most recent run stored.
+router.get('/:id/health', requirePermission('projectHealth.read'), async (req, res, next) => {
+  try {
+    if (!(await assertProjectInOrg(req, res))) return;
+    const data = await projectHealth.getLatestHealth(req.orgId, req.params.id);
+    if (!data) return res.status(404).json({ error: 'No health score computed for this project yet.' });
+    res.json(data);
   } catch (e) { next(e); }
 });
 

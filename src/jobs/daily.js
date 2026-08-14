@@ -23,6 +23,8 @@ const { sweepBrokenPromises } = require('../services/promiseService');
 const { sweepEscalations } = require('../services/escalationService');
 const { notifyOverdue, remindUpcoming } = require('../services/overdueAlerts');
 const { checkTenancyRenewals } = require('../services/rentalService');
+const { sweepOverdueContractorPayments } = require('../services/contractorService');
+const { computeAndStoreForAllProjects } = require('../services/projectHealthService');
 const { mapWithConcurrency } = require('../utils/concurrency');
 const collectionsAgent = require('../services/collectionsAgent');
 const documentAgent = require('../services/documentAgent');
@@ -91,6 +93,32 @@ async function runDailyJob() {
   });
   if (renewals.filed) {
     console.log(`[re-daily] flagged ${renewals.filed} tenancy renewal(s) for a decision`);
+  }
+
+  // SECTION 12 — pending → overdue for contractor payments, and a task for
+  // the owner on each one that just flipped. Platform-wide, same as
+  // markOverdue above — there is no per-org loop for this because the
+  // query itself is already global and idempotent (see the function's own
+  // comment on why a re-run never double-files).
+  const contractorSweep = await sweepOverdueContractorPayments().catch((err) => {
+    console.error('[re-daily] contractor payment sweep failed:', err.message);
+    return { flagged: 0 };
+  });
+  if (contractorSweep.flagged) {
+    console.log(`[re-daily] flagged ${contractorSweep.flagged} contractor payment(s) overdue`);
+  }
+
+  // SECTION 15 — one health score per project per day, platform-wide (the
+  // function itself walks every org's projects, same shape as the
+  // contractor sweep above). Runs BEFORE the per-org brief loop below so a
+  // Monday brief can read today's just-computed figures, not yesterday's.
+  const health = await computeAndStoreForAllProjects().catch((err) => {
+    console.error('[re-daily] project health sweep failed:', err.message);
+    return { computed: 0, warningTasksFiled: 0 };
+  });
+  if (health.computed) {
+    console.log(`[re-daily] computed health for ${health.computed} project(s), `
+      + `${health.warningTasksFiled} new warning task(s) filed`);
   }
 
   // Brief every org that has at least one RESERVATION.

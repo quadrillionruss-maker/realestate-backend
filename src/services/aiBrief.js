@@ -14,6 +14,7 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { lagosToday } = require('./overdueService');
 const { openAndBrokenForBrief } = require('./promiseService');
 const { describeStage } = require('./escalationService');
+const projectHealth = require('./projectHealthService');
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 
@@ -104,7 +105,12 @@ async function gatherOrgState(orgId) {
       )
     )`;
 
-  const [overdue, upcoming, documents, promises] = await Promise.all([
+  // SECTION 2 — yesterday's call/visit notes. Read the same way a human would
+  // scan the log before writing the brief: everything logged since this time
+  // yesterday, so a rep who calls at 6pm still makes tomorrow's 7am brief.
+  const yesterday = new Date(Date.parse(today) - 86_400_000).toISOString().slice(0, 10);
+
+  const [overdue, upcoming, documents, promises, activities] = await Promise.all([
     supabaseAdmin
       .from('re_installment_schedule')
       .select(scheduleSelect)
@@ -131,6 +137,18 @@ async function gatherOrgState(orgId) {
       console.warn('[re-brief] could not read promises:', err.message);
       return [];
     }),
+    supabaseAdmin
+      .from('re_activities')
+      .select('activity_type, notes, outcome, created_at, re_customers(id, full_name)')
+      .eq('organization_id', orgId)
+      .gte('created_at', `${yesterday}T00:00:00.000Z`)
+      .lt('created_at', `${today}T00:00:00.000Z`)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false })
+      .catch((err) => {
+        console.warn('[re-brief] could not read activities:', err.message);
+        return { data: [] };
+      }),
   ]);
 
   // A stable, opaque token per buyer — BUYER_1, BUYER_2… — assigned once
@@ -215,12 +233,36 @@ async function gatherOrgState(orgId) {
         unit_number: d.re_reservations?.re_units?.unit_number || null,
       };
     }),
+    // SECTION 2 — yesterday's call/visit notes, so the brief can say "Mrs
+    // Adeyemi called yesterday and said she will pay Monday" instead of
+    // flagging her as silently overdue. refFor() may mint a fresh ref here
+    // for a buyer who has no overdue/upcoming/document row at all — talking
+    // to someone with nothing else due is still worth a line in the brief.
+    recentActivities: (activities.data || []).map((a) => ({
+      customer_ref: refFor(a.re_customers),
+      customer_name: a.re_customers?.full_name || 'Unknown buyer',
+      activity_type: a.activity_type,
+      outcome: a.outcome || null,
+      notes: a.notes,
+    })),
     // Not sent to OpenAI (see requestBriefFromModel) — kept on the state
     // object so the model's ref-only response can be resolved back to a
     // real name before anyone reads the brief.
     nameByRef,
   };
 }
+
+// SECTION 2 — how each activity_type reads as a sentence verb. re_activities
+// itself does not carry these words (migrations/029's check constraint is
+// the source of truth for the six values) — this is presentation only.
+const ACTIVITY_VERB = {
+  call: 'called',
+  visit: 'visited',
+  site_visit: 'visited on site',
+  whatsapp: 'messaged on WhatsApp',
+  email: 'emailed',
+  note: 'noted',
+};
 
 // ── Rule-based brief ───────────────────────────────────────────────────────
 // Used when there is nothing to report, when OPENAI_API_KEY is absent, and
@@ -315,6 +357,21 @@ function buildFallbackBrief(state) {
     // the date themselves, so it is the call most likely to go somewhere.
     const first = brokenPromises[0] || behind[0];
     sentences.push(`Start with ${first.customer_name} — ${naira(first.amount)}, ${first.max_days_late} day${first.max_days_late === 1 ? '' : 's'} late.`);
+  }
+
+  // SECTION 2 — yesterday's call/visit notes. A buyer already spoken to reads
+  // differently from one who has simply gone quiet — "Mrs Adeyemi called
+  // yesterday and said she will pay Monday" is a different fact from "Mrs
+  // Adeyemi is 30 days overdue" even though both are true of the same person.
+  // Capped at 3 lines: this is a summary paragraph, not the activity log
+  // itself — the full log is on the buyer's own drawer.
+  for (const activity of (state.recentActivities || []).slice(0, 3)) {
+    const verb = ACTIVITY_VERB[activity.activity_type] || 'contacted';
+    sentences.push(
+      `${activity.customer_name} was ${verb} yesterday`
+      + (activity.outcome === 'promised_payment' ? ' and promised payment' : '')
+      + (activity.notes ? ` — "${activity.notes}"` : '') + '.'
+    );
   }
 
   return {
@@ -471,6 +528,7 @@ function sanitizeStateForModel(state) {
     upcomingWeek: state.upcomingWeek.map(stripPII),
     pendingDocuments: state.pendingDocuments.map(stripPII),
     promises: state.promises.map(stripPII),
+    recentActivities: (state.recentActivities || []).map(stripPII),
   };
 }
 
@@ -565,7 +623,17 @@ async function requestBriefFromModel(state) {
             'The `promises` array is what buyers themselves said they would do. A buyer with a status:"broken" ' +
             'promise should be high severity and appear first: they named the date, not us. Reference it directly ' +
             '("we understood payment would come through by the 15th"), and never repeat a due date they have ' +
-            'already acknowledged as though they had not.',
+            'already acknowledged as though they had not.\n\n' +
+            // SECTION 2 — without this the model recommends "call BUYER_3"
+            // for someone a rep already called yesterday, which reads as the
+            // AI not having read its own data.
+            'The `recentActivities` array is what staff logged about a buyer YESTERDAY — a call, a visit, a ' +
+            'WhatsApp exchange. If a buyer in `overdue` or `upcomingWeek` also appears in `recentActivities`, ' +
+            'use it: mention what was already said instead of recommending they be contacted again, and if the ' +
+            'note or outcome is "promised_payment", reference the promise in the summary the same way a broken ' +
+            '`promises` entry is referenced. A buyer who ONLY appears in `recentActivities` (no arrears, nothing ' +
+            'due) is worth a short mention in the summary if the outcome or notes are notable ' +
+            '(e.g. "interested", "not_interested") — never invent a follow_up or recommendation for them alone.',
         },
         {
           role: 'user',
@@ -602,11 +670,33 @@ async function requestBriefFromModel(state) {
   return resolveRefs(parsed, state.nameByRef);
 }
 
+// SECTION 15 — "Include project health summary in the Monday morning
+// brief for the owner." Read off state.today (lagosToday(), already
+// Africa/Lagos) rather than the server's own local clock, matching every
+// other date decision in this file.
+function isMonday(dateStr) {
+  return new Date(`${dateStr}T12:00:00Z`).getUTCDay() === 1;
+}
+
 // ── Orchestration ──────────────────────────────────────────────────────────
 async function generateDailyBrief(orgId) {
   const state = await gatherOrgState(orgId);
   const nothingToReport =
     !state.overdue.length && !state.upcomingWeek.length && !state.pendingDocuments.length;
+
+  // Attached to the brief's own payload rather than folded into `summary`
+  // (which sales_director also reads, per dashboard.js) — the DASHBOARD
+  // decides whether to render this block, gated on projectHealth.read
+  // (owner only), the same "shared data, gated display" split
+  // documentationDashboard's own comment describes for a different field.
+  let projectHealthSummary = null;
+  if (isMonday(state.today)) {
+    try {
+      projectHealthSummary = await projectHealth.summaryForBrief(orgId);
+    } catch (err) {
+      console.warn('[re-brief] could not build Monday project health summary:', err.message);
+    }
+  }
 
   // A quiet day is a fact, not a prompt. Don't spend a call restating it.
   if (nothingToReport) {
@@ -615,6 +705,7 @@ async function generateDailyBrief(orgId) {
       risks: [],
       follow_ups: [],
       recommendations: [],
+      project_health_summary: projectHealthSummary,
     };
     await storeBrief(orgId, quiet, 'fallback');
     return { ...quiet, generated_by: 'fallback' };
@@ -666,6 +757,8 @@ async function generateDailyBrief(orgId) {
       generatedBy = 'fallback';
     }
   }
+
+  brief.project_health_summary = projectHealthSummary;
 
   await storeBrief(orgId, brief, generatedBy);
   await fileRecommendationsAsTasks(orgId, brief.recommendations);

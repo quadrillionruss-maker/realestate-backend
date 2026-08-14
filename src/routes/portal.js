@@ -17,6 +17,12 @@ const portal = require('../services/portalService');
 const { getDownloadUrl } = require('../services/documentService');
 const { initInstallmentPayment } = require('../services/paystackService');
 const { auditSystem } = require('../services/auditService');
+const hardship = require('../services/hardshipService');
+const messages = require('../services/messageService');
+const financing = require('../services/financingService');
+const exchangeRates = require('../services/exchangeRateService');
+const handover = require('../services/handoverService');
+const community = require('../services/communityService');
 
 const router = express.Router();
 
@@ -129,6 +135,118 @@ router.post('/pay/:scheduleId', payLimiter, async (req, res, next) => {
       metadata: { reference: result.reference, amount: result.amount },
     });
 
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+// FEATURE — payment pause / hardship mode. The eligibility rule ("has no
+// existing pending or approved request, has never had an approved one
+// before") is checked again here, server-side, even though the buyer
+// portal's own UI already hides the button in the same case — that hiding
+// is presentation only, the same rule every other permission check in this
+// product follows.
+router.post('/hardship-request/:reservationId', async (req, res, next) => {
+  try {
+    await portal.assertOwnsReservation(req.customer, req.params.reservationId);
+    const data = await hardship.requestPause(req.customer, req.params.reservationId, {
+      reason: req.body?.reason,
+      pauseMonths: req.body?.pause_months,
+    });
+    res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
+// ── Messages ─────────────────────────────────────────────────────────────
+// One thread per BUYER (re_messages.customer_id), not per reservation —
+// :reservationId in the URL only proves this buyer actually owns something
+// here, matching every other portal route's shape.
+router.get('/messages/:reservationId', async (req, res, next) => {
+  try {
+    await portal.assertOwnsReservation(req.customer, req.params.reservationId);
+    const data = await messages.listForCustomer(req.customer.organization_id, req.customer.id);
+    await messages.markRead(req.customer.organization_id, req.customer.id, 'buyer');
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
+router.post('/messages/:reservationId', async (req, res, next) => {
+  try {
+    await portal.assertOwnsReservation(req.customer, req.params.reservationId);
+    const data = await messages.sendFromBuyer(req.customer, req.body?.message);
+    res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
+// FEATURE — bank financing. Eligibility (30% paid, credit score above 40)
+// is re-checked server-side inside financingService.requestFinancing even
+// though the portal UI already hides the button in the same case — the
+// same "hiding is presentation only" rule every gate in this product follows.
+router.post('/financing-request/:reservationId', async (req, res, next) => {
+  try {
+    await portal.assertOwnsReservation(req.customer, req.params.reservationId);
+    const data = await financing.requestFinancing(req.customer, req.params.reservationId, {
+      bankName: req.body?.bank_name,
+      amountRequested: req.body?.amount_requested,
+      notes: req.body?.notes,
+    });
+    res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
+// SECTION 10 — display only (see exchangeRateService.js's own file
+// comment). Cached in memory for 6 hours; this route just serves whatever
+// that cache currently holds, never fetching on the buyer's own request.
+router.get('/exchange-rates', async (req, res, next) => {
+  try {
+    res.json(await exchangeRates.getRates());
+  } catch (e) { next(e); }
+});
+
+// SECTION 11 — the buyer's Handover tab logs a defect against the
+// checklist their sales office already created; there is no route here
+// that creates one, matching the spec's own list (POST .../snag only).
+router.post('/handover/:reservationId/snag', async (req, res, next) => {
+  try {
+    await portal.assertOwnsReservation(req.customer, req.params.reservationId);
+    const body = req.body || {};
+    const data = await handover.logSnag(req.customer, req.params.reservationId, {
+      description: body.description,
+      photo: body.photo, // { content, contentType } — optional
+    });
+    res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
+// SECTION 13 — the buyer community forum. assertBuyerInProject
+// (communityService.js) is the boundary: knowing a project's id is not
+// enough, a buyer must actually hold a unit there.
+router.get('/community/:projectId', async (req, res, next) => {
+  try {
+    if (!(await community.assertBuyerInProject(req.customer, req.params.projectId))) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+    res.json(await community.listPosts(req.customer.organization_id, req.params.projectId));
+  } catch (e) { next(e); }
+});
+
+router.post('/community/:projectId', async (req, res, next) => {
+  try {
+    const data = await community.createPost(req.customer, req.params.projectId, req.body?.content);
+    res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
+router.post('/community/post/:postId/reply', async (req, res, next) => {
+  try {
+    const data = await community.createReply(req.customer, req.params.postId, req.body?.content);
+    res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
+router.delete('/community/post/:postId', async (req, res, next) => {
+  try {
+    const result = await community.deleteOwnPost(req.customer, req.params.postId);
+    if (result.notFound) return res.status(404).json({ error: 'Post not found' });
     res.json(result);
   } catch (e) { next(e); }
 });

@@ -256,7 +256,12 @@ const EXPORTS = {
     async load(orgId) {
       const { data, error } = await supabaseAdmin
         .from('re_customers')
-        .select('full_name, phone, email, source, created_at, credit_score')
+        .select(`
+          full_name, phone, email, source, created_at, credit_score,
+          re_reservations(
+            status,
+            re_units(unit_number, bedrooms, bathrooms, parking_spaces, floor_level, furnishing_status, re_projects(name))
+          )`)
         .eq('organization_id', orgId)
         .order('full_name');
       if (error) throw error;
@@ -271,6 +276,17 @@ const EXPORTS = {
       // SECTION 3 — 0-100, built entirely from data this export's own
       // sibling files (payments, promises) already contain.
       ['Credit score', (r) => r.credit_score ?? ''],
+      // SECTION 6 — the unit behind whichever of this buyer's reservations
+      // is not cancelled, falling back to the first one at all so a buyer
+      // whose only reservation was cancelled still shows what they once
+      // held rather than a blank row.
+      ['Project', (r) => primaryUnit(r)?.re_projects?.name || ''],
+      ['Unit', (r) => primaryUnit(r)?.unit_number || ''],
+      ['Bedrooms', (r) => primaryUnit(r)?.bedrooms ?? ''],
+      ['Bathrooms', (r) => primaryUnit(r)?.bathrooms ?? ''],
+      ['Parking', (r) => primaryUnit(r)?.parking_spaces ?? ''],
+      ['Floor level', (r) => primaryUnit(r)?.floor_level ?? ''],
+      ['Furnishing', (r) => primaryUnit(r)?.furnishing_status || ''],
     ],
   },
 
@@ -353,6 +369,18 @@ const EXPORTS = {
 
 const reservationOf = (payment) =>
   payment.re_installment_schedule?.re_installment_plans?.re_reservations;
+
+// SECTION 6 — one unit to show per buyer row on the customers export. A
+// buyer with more than one reservation shows their live one; cancelled is
+// the fallback, not the default, so a currently-active allocation always
+// wins over history.
+function primaryUnit(customer) {
+  const reservations = Array.isArray(customer.re_reservations)
+    ? customer.re_reservations
+    : [customer.re_reservations].filter(Boolean);
+  const live = reservations.find((r) => r.status !== 'cancelled') || reservations[0];
+  return live?.re_units || null;
+}
 
 router.get('/export/:kind', exportLimiter, requirePermission('reports.export'), async (req, res, next) => {
   try {

@@ -41,6 +41,17 @@
   <header class="portal-header">
     <span class="portal-mark">◆</span>
     <span class="serif portal-brand" id="developer-name">Your account</span>
+    <!-- SECTION 10 — display currency only; every actual payment still
+         transacts in NGN regardless of what is selected here. Hidden until
+         portal.js has rates to show (no point offering a toggle with
+         nothing to convert with). -->
+    <select id="currency-select" class="currency-select hidden" aria-label="Display currency">
+      <option value="NGN">₦ NGN</option>
+      <option value="USD">$ USD</option>
+      <option value="GBP">£ GBP</option>
+      <option value="EUR">€ EUR</option>
+      <option value="CAD">CA$ CAD</option>
+    </select>
   </header>
 
   <div id="portal-view">

@@ -2,7 +2,9 @@ const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { lagosToday } = require('../services/overdueService');
-const { describeStage } = require('../services/escalationService');
+const { describeStage, isAtRisk } = require('../services/escalationService');
+const { canAccess } = require('../services/permissions');
+const projectHealth = require('../services/projectHealthService');
 const router = express.Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -131,6 +133,18 @@ router.get('/', requirePermission('dashboard.read'), async (req, res, next) => {
       if (result.error) throw result.error;
     }
 
+    // SECTION 15 — the "health score below 40" warning card, owner only.
+    // Not part of the Promise.all above: it is its own multi-query read
+    // (projectHealthService.criticalProjects), not a single supabaseAdmin
+    // call the generic error-check loop just above could validate the
+    // same way.
+    const criticalProjects = canAccess(req.orgRole, 'projectHealth.read')
+      ? await projectHealth.criticalProjects(orgId).catch((err) => {
+          console.warn('[dashboard] could not load critical projects:', err.message);
+          return [];
+        })
+      : [];
+
     const scheduleRows = schedule.data || [];
     const overdueRows = scheduleRows.filter((s) => s.status === 'overdue');
     const unitRows = units.data || [];
@@ -197,11 +211,15 @@ router.get('/', requirePermission('dashboard.read'), async (req, res, next) => {
       // null outright for anyone but Owner/Sales Director — see the query
       // above, which never fetches one for them.
       latest_brief: brief.data || null,
+      // SECTION 15 — [] for anyone but the owner (see the query above,
+      // which never fetches this for anyone else either).
+      critical_projects: criticalProjects,
     });
   } catch (e) { next(e); }
 });
 
-// At-risk customers: 2+ overdue installments, worst first.
+// At-risk customers: any overdue installment at all, worst first — see
+// escalationService.isAtRisk for why the threshold is 1, not 2.
 // This is the list a sales manager actually works through in the morning.
 // Owner, Sales Director and Collections only — a Sales Executive sees their
 // own buyers' status on the buyer screen instead, and Documentation has no
@@ -267,7 +285,7 @@ router.get('/at-risk', requirePermission('atRisk.read'), async (req, res, next) 
       byCustomer.set(customer.id, entry);
     }
 
-    const atRisk = [...byCustomer.values()].filter((c) => c.overdue_count >= 2);
+    const atRisk = [...byCustomer.values()].filter((c) => isAtRisk(c.overdue_count));
 
     // Promises turn "two months behind" into "two months behind AND broke a
     // promise on the 15th" — a different conversation, and it belongs on the

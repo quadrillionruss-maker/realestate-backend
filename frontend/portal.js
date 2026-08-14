@@ -36,6 +36,14 @@
   // after paying, which is the worst possible moment for it.
   var STORE_KEY = 'archta.portal.token';
   var PAID_KEY = 'archta.portal.paid';
+  // SECTION 10 — display only (see src/services/exchangeRateService.js's own
+  // comment); every actual payment still transacts in NGN regardless of
+  // this. sessionStorage, not localStorage, matching the token's own
+  // reasoning above — the reset-per-tab boundary already exists for a
+  // reason, no need for a preference to outlive it either.
+  var CURRENCY_KEY = 'archta.portal.currency';
+  var exchangeRates = null;
+  var displayCurrency = session(CURRENCY_KEY) || 'NGN';
 
   var fragmentToken = (/[#&]token=([^&]+)/.exec(window.location.hash) || [])[1] || '';
   var token = fragmentToken || session(STORE_KEY) || '';
@@ -78,6 +86,37 @@
   function naira(amount) {
     var n = Number(amount || 0);
     return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+  }
+
+  var CURRENCY_SYMBOL = { USD: '$', GBP: '£', EUR: '€', CAD: 'CA$' };
+
+  // The small grey line under an NGN figure — nothing if NGN itself is the
+  // preferred currency (redundant with the figure right above it) or the
+  // rate cache has nothing yet (a fresh deploy's first six hours, or the
+  // free-tier API being unreachable — exchangeRateService.js never lets
+  // that fail the page, it just means no conversion to show).
+  function fxLine(ngnAmount) {
+    if (displayCurrency === 'NGN' || !exchangeRates || !exchangeRates.rates) return '';
+    var rate = exchangeRates.rates[displayCurrency];
+    if (!rate) return '';
+    var converted = Number(ngnAmount || 0) * rate;
+    var symbol = CURRENCY_SYMBOL[displayCurrency] || displayCurrency + ' ';
+    return '<div class="fx-line">≈ ' + symbol + converted.toLocaleString('en-US', { maximumFractionDigits: 0 }) + ' ' + displayCurrency + '</div>';
+  }
+
+  // Unit pricing is marketing information international buyers reference in
+  // dollars and pounds specifically, regardless of which currency a buyer
+  // personally prefers for their OWN balance (fxLine above, toggle-driven) —
+  // so this always shows both, not whichever one is currently selected.
+  function fxLineFixed(ngnAmount) {
+    if (!exchangeRates || !exchangeRates.rates) return '';
+    var parts = ['USD', 'GBP'].map(function (code) {
+      var rate = exchangeRates.rates[code];
+      if (!rate) return null;
+      var converted = Number(ngnAmount || 0) * rate;
+      return (CURRENCY_SYMBOL[code] || code) + converted.toLocaleString('en-US', { maximumFractionDigits: 0 });
+    }).filter(Boolean);
+    return parts.length ? '<div class="fx-line">≈ ' + parts.join(' · ') + '</div>' : '';
   }
 
   function fmtDate(value) {
@@ -202,8 +241,42 @@
       return fail(err.message);
     }
 
+    // Never blocks the page — a buyer's balance and schedule matter far more
+    // than a currency conversion, so this failing (or the rate cache simply
+    // having nothing yet) just means fxLine() renders nothing.
+    try {
+      exchangeRates = await api('/exchange-rates');
+    } catch (err) { exchangeRates = null; }
+
+    var currencySelect = el('currency-select');
+    if (exchangeRates && exchangeRates.rates && Object.keys(exchangeRates.rates).length) {
+      currencySelect.classList.remove('hidden');
+      currencySelect.value = displayCurrency;
+      // Property assignment, not addEventListener: load() re-runs this same
+      // block on every reload (a payment, a sent message, this very
+      // handler), and the <select> itself is never replaced — an
+      // addEventListener here would stack a new listener each time and fire
+      // load() once per accumulated listener on the next change.
+      currencySelect.onchange = function () {
+        displayCurrency = currencySelect.value;
+        session(CURRENCY_KEY, displayCurrency);
+        load();
+      };
+    }
+
     var s = account.summary;
     var developer = account.developer || {};
+
+    // SECTION 13 — the project the Community card talks to. Pulled from
+    // whichever reservation has one (the first that does, not blindly the
+    // first reservation, in case a buyer's very first entry is somehow
+    // missing a project link).
+    communityOwnCustomerId = account.customer.id;
+    activeProjectId = null;
+    for (var ri = 0; ri < account.reservations.length; ri++) {
+      var riProject = account.reservations[ri].re_units && account.reservations[ri].re_units.re_projects;
+      if (riProject && riProject.id) { activeProjectId = riProject.id; break; }
+    }
 
     if (developer.company_name) el('developer-name').textContent = developer.company_name;
 
@@ -237,9 +310,9 @@
       '<div class="card mt-2"><div class="card-body">' +
         '<div class="flex-row justify-between gap-18">' +
           '<div><div class="stat-label">Paid so far</div>' +
-            '<div class="stat-value moss">' + esc(naira(s.total_paid)) + '</div></div>' +
+            '<div class="stat-value moss">' + esc(naira(s.total_paid)) + '</div>' + fxLine(s.total_paid) + '</div>' +
           '<div class="right"><div class="stat-label">Balance</div>' +
-            '<div class="stat-value">' + esc(naira(s.balance)) + '</div></div>' +
+            '<div class="stat-value">' + esc(naira(s.balance)) + '</div>' + fxLine(s.balance) + '</div>' +
         '</div>' +
         '<div class="meter mt-2"><i data-w="' + s.progress_percent + '"></i></div>' +
         '<div class="page-sub mt-1">' + s.progress_percent + '% of ' + esc(naira(s.total_contracted)) + ' settled</div>' +
@@ -286,7 +359,7 @@
         ? '<div class="card mt-2"><div class="card-body">' +
             '<div class="stat-label">' + (nextDue.property_type === 'rental' ? 'Next rent due' : 'Next payment') + '</div>' +
             '<div class="flex-row justify-between gap-14 align-end mt-8px">' +
-              '<div><div class="mono fs-21">' + esc(naira(nextDue.amount_due)) + '</div>' +
+              '<div><div class="mono fs-21">' + esc(naira(nextDue.amount_due)) + '</div>' + fxLine(nextDue.amount_due) +
                 '<div class="page-sub">due <span class="nowrap">' + esc(fmtDate(nextDue.due_date)) + '</span>' +
                   (nextDue.unit_number ? ' · Unit ' + esc(nextDue.unit_number) : '') + '</div></div>' +
               '<button class="btn brass" id="btn-pay" data-schedule="' + esc(nextDue.schedule_id) + '">Pay now</button>' +
@@ -341,11 +414,137 @@
                 '">Share on WhatsApp</a>' +
             '</div>' +
           '</div></div>'
+        : '') +
+
+      // SECTION 9 — shown only once eligible (30% of the account paid, credit
+      // score above 40 — financingService.isEligible, computed server-side).
+      // Applies against the first reservation on the account, same reasoning
+      // Messages below gives for using one reservation to name in the URL.
+      (s.financing_eligible && account.reservations.length
+        ? '<div class="card mt-2"><div class="card-body">' +
+            '<div class="stat-label">Bank financing</div>' +
+            '<p class="page-sub mt-1">Use your payment history with us as proof of creditworthiness when applying for financing.</p>' +
+            '<button class="btn-quiet mt-1" id="btn-financing-toggle">Apply for bank financing</button>' +
+            '<div class="hidden mt-2" id="financing-form">' +
+              '<div class="field"><label>Bank name</label><input class="input" id="financing-bank" placeholder="e.g. GTBank"></div>' +
+              '<div class="field"><label>Amount requested</label><div class="input-money"><input class="input" id="financing-amount" type="number" min="1" step="1"></div></div>' +
+              '<div class="field"><label>Note (optional)</label><textarea class="input" id="financing-notes" rows="2"></textarea></div>' +
+              '<button class="btn brass" id="btn-financing-submit">Submit application</button>' +
+            '</div>' +
+          '</div></div>'
+        : '') +
+
+      // SECTION 5 — a shared thread with the developer, whichever reservation
+      // the buyer holds. There is no reservation picker: re_messages is one
+      // thread per buyer, not per unit, so the first reservation on the
+      // account is enough to name in the URL — see routes/portal.js.
+      (account.reservations.length
+        ? '<div class="card mt-2">' +
+            '<div class="card-head"><div class="card-title">Messages</div></div>' +
+            '<div class="card-body">' +
+              '<div id="message-thread" class="message-thread"><p class="page-sub">Loading…</p></div>' +
+              '<div class="field mt-2"><textarea class="input" id="message-input" rows="2" placeholder="Write a message to your developer"></textarea></div>' +
+              '<button class="btn brass" id="btn-send-message">Send</button>' +
+            '</div>' +
+          '</div>'
+        : '') +
+
+      // SECTION 13 — one community per PROJECT, not per buyer. Uses the
+      // first reservation's own project, same reasoning Messages above
+      // gives for using the first reservation to name a URL when there is
+      // no picker on this single-column page.
+      (activeProjectId
+        ? '<div class="card mt-2">' +
+            '<div class="card-head"><div class="card-title">Community</div></div>' +
+            '<div class="card-body">' +
+              '<div id="community-thread"><p class="page-sub">Loading…</p></div>' +
+              '<div class="field mt-2"><textarea class="input" id="community-post-input" rows="2" maxlength="500" placeholder="Share something with other buyers in this project"></textarea></div>' +
+              '<button class="btn brass" id="btn-post-community">Post</button>' +
+            '</div>' +
+          '</div>'
         : '');
 
     applyDynamicStyles(el('portal-view'));
     wire();
+    if (account.reservations.length) loadMessages(account.reservations[0].id);
+    if (activeProjectId) loadCommunity();
     if (justPaidSchedule) watchForConfirmation(account);
+  }
+
+  var activeReservationId = null;
+  // Set inside load(), just before el('portal-view').innerHTML is built —
+  // see the assignment a few lines above this function.
+  var activeProjectId = null;
+
+  async function loadCommunity() {
+    try {
+      var posts = await api('/community/' + activeProjectId);
+      renderCommunity(posts);
+    } catch (err) {
+      var host = el('community-thread');
+      if (host) host.innerHTML = '<p class="page-sub">' + esc(err.message) + '</p>';
+    }
+  }
+
+  function renderCommunity(posts) {
+    var host = el('community-thread');
+    if (!host) return;
+    host.innerHTML = posts.length
+      ? posts.map(function (p) {
+          return '<div class="drawer-section">' +
+            '<div class="flex-row justify-between gap-10">' +
+              '<span>' + (p.pinned ? '<span class="badge pinned">Pinned</span> ' : '') + '<b>' + esc(p.author_name) + '</b></span>' +
+              '<span class="page-sub nowrap">' + esc(fmtDate(p.created_at)) + '</span>' +
+            '</div>' +
+            '<div class="mt-1">' + esc(p.content) + '</div>' +
+            (p.customer_id === communityOwnCustomerId
+              ? '<button class="btn-quiet mt-1" data-community-delete="' + esc(p.id) + '">Delete</button>'
+              : '') +
+            (p.replies.length
+              ? '<div class="mt-1 community-replies">' + p.replies.map(function (r) {
+                  return '<div class="mt-1"><b class="fs-12">' + esc(r.author_name) + '</b> ' +
+                    '<span class="page-sub fs-11-5">' + esc(fmtDate(r.created_at)) + '</span>' +
+                    '<div>' + esc(r.content) + '</div></div>';
+                }).join('') + '</div>'
+              : '') +
+            '<button class="btn-quiet mt-1" data-community-reply-toggle="' + esc(p.id) + '">Reply</button>' +
+            '<div class="hidden mt-1" data-community-reply-form="' + esc(p.id) + '">' +
+              '<textarea class="input" data-community-reply-input="' + esc(p.id) + '" rows="2" maxlength="300"></textarea>' +
+              '<button class="btn-quiet mt-1" data-community-reply-submit="' + esc(p.id) + '">Send reply</button>' +
+            '</div>' +
+          '</div>';
+        }).join('')
+      : '<p class="page-sub">No posts yet. Say hello to your fellow buyers.</p>';
+  }
+
+  // Set once from GET /me — the portal token resolves to exactly one
+  // customer, so "is this my own post" is a plain id comparison, no
+  // separate identity check needed the way staff moderation would.
+  var communityOwnCustomerId = null;
+
+  async function loadMessages(reservationId) {
+    activeReservationId = reservationId;
+    try {
+      var thread = await api('/messages/' + reservationId);
+      renderThread(thread);
+    } catch (err) {
+      var host = el('message-thread');
+      if (host) host.innerHTML = '<p class="page-sub">' + esc(err.message) + '</p>';
+    }
+  }
+
+  function renderThread(thread) {
+    var host = el('message-thread');
+    if (!host) return;
+    host.innerHTML = thread.length
+      ? thread.map(function (m) {
+          return '<div class="message-row ' + (m.sender_type === 'buyer' ? 'mine' : 'theirs') + '">' +
+            '<div class="message-bubble">' + esc(m.message) + '</div>' +
+            '<div class="page-sub">' + (m.sender_type === 'buyer' ? 'You' : 'Developer') + ' · ' + esc(fmtDate(m.created_at)) + '</div>' +
+          '</div>';
+        }).join('')
+      : '<p class="page-sub">No messages yet. Say hello.</p>';
+    host.scrollTop = host.scrollHeight;
   }
 
   // Polls until the webhook lands, then re-renders so the buyer sees "paid"
@@ -401,6 +600,48 @@
     return found;
   }
 
+  function unitFactsLine(unit) {
+    var parts = [];
+    if (unit.bedrooms != null) parts.push(unit.bedrooms + (unit.bedrooms === 1 ? ' bed' : ' beds'));
+    if (unit.bathrooms != null) parts.push(unit.bathrooms + (unit.bathrooms === 1 ? ' bath' : ' baths'));
+    if (unit.parking_spaces != null) parts.push(unit.parking_spaces + ' parking');
+    if (unit.floor_level != null) parts.push(unit.floor_level === 0 ? 'Ground floor' : 'Floor ' + unit.floor_level);
+    if (unit.furnishing_status) parts.push(unit.furnishing_status.replace(/-/g, ' '));
+    return parts.join(' · ');
+  }
+
+  function unitPhotos(unit) {
+    var media = (unit.metadata && Array.isArray(unit.metadata.media)) ? unit.metadata.media : [];
+    return media.filter(function (m) { return m.kind === 'photo'; });
+  }
+
+  function unitFloorPlanUrl(unit) {
+    if (unit.metadata && unit.metadata.floor_plan_url) return unit.metadata.floor_plan_url;
+    var media = (unit.metadata && Array.isArray(unit.metadata.media)) ? unit.metadata.media : [];
+    var plan = media.find(function (m) { return m.kind === 'floor_plan'; });
+    return plan ? plan.url : null;
+  }
+
+  // Highlights whichever step the document is CURRENTLY at, not every step
+  // it has passed through — pending/generated/sent/signed is a single
+  // current state (re_documents.status), not a set of completed milestones.
+  function legalDocStep(doc) {
+    return '<div class="legal-step ' + esc(doc.status) + '">' +
+      '<div class="legal-step-dot"></div>' +
+      '<div class="legal-step-body">' +
+        '<div class="flex-row justify-between gap-10">' +
+          '<span>' + esc(doc.label) + '</span>' +
+          '<span class="badge ' + esc(doc.status) + '">' + esc(doc.status) + '</span>' +
+        '</div>' +
+        (doc.id
+          ? (doc.status === 'generated' || doc.status === 'sent' || doc.status === 'signed'
+              ? '<button class="btn-quiet mt-1" data-doc="' + esc(doc.id) + '">Download</button>'
+              : '')
+          : '<p class="page-sub mt-1">This document will be available after your reservation is confirmed.</p>') +
+      '</div>' +
+    '</div>';
+  }
+
   function reservationBlock(r) {
     var unit = r.re_units || {};
     var project = unit.re_projects || {};
@@ -424,6 +665,38 @@
           esc([project.name, project.location].filter(Boolean).join(', ')) +
           (unit.unit_type ? ' · ' + esc(unit.unit_type) : '') +
         '</div>' +
+
+        // SECTION 10 — the unit's own list price, in NGN plus a fixed
+        // USD/GBP reference (fxLineFixed, not the toggle) — see that
+        // function's own comment for why this one line stays fixed while
+        // the buyer's personal balance/payment figures follow their
+        // preferred currency instead.
+        (unit.list_price
+          ? '<div class="page-sub mt-1">List price: ' + esc(naira(unit.list_price)) + '</div>' + fxLineFixed(unit.list_price)
+          : '') +
+
+        // SECTION 15 — worded generically on purpose: never "health
+        // score", never a number out of 100. This nudges a buyer to ask
+        // their developer for an update; it does not publicly grade them.
+        (r.project_health_notice
+          ? '<div class="notice mt-1">Your developer has not updated construction progress in ' +
+              (r.project_health_notice.days_since_update != null ? r.project_health_notice.days_since_update + ' days' : 'a while') +
+              '. Contact your developer for an update.</div>'
+          : '') +
+
+        // SECTION 6 — bedrooms/bathrooms/parking/floor only show what is
+        // actually on file; a unit nobody has entered these for renders no
+        // row at all rather than "0 bed, 0 bath".
+        (unitFactsLine(unit) ? '<div class="page-sub mt-1">' + esc(unitFactsLine(unit)) + '</div>' : '') +
+        (unitPhotos(unit).length
+          ? '<div class="unit-photos mt-2">' + unitPhotos(unit).map(function (p) {
+              return '<img class="unit-photo" src="' + esc(p.url) + '" alt="' + esc(p.label || 'Unit photo') + '">';
+            }).join('') + '</div>'
+          : '') +
+        (unitFloorPlanUrl(unit)
+          ? '<a class="btn-quiet mt-1" target="_blank" rel="noopener" href="' + esc(unitFloorPlanUrl(unit)) + '">Download floor plan</a>'
+          : '') +
+
         (r.construction
           ? '<div class="page-sub mt-2 label-caps">Construction progress</div>' +
             '<div class="flex-row justify-between gap-14 align-end mt-1">' +
@@ -474,6 +747,70 @@
           : '<div class="page-sub mt-1">' +
               (rental ? 'No rent schedule set up yet.' : 'Outright purchase — no installment plan.') +
             '</div>') +
+
+        // SECTION 7 — a fixed three-step vertical timeline (pending →
+        // generated → sent → signed), always all three, whether or not a
+        // document has been started — see portalService.js's
+        // LEGAL_DOC_TYPES for why the order and the three types are fixed.
+        (r.legal_documents && r.legal_documents.length
+          ? '<div class="page-sub mt-2 label-caps">Legal documents</div>' +
+            '<div class="legal-timeline mt-1">' + r.legal_documents.map(legalDocStep).join('') + '</div>'
+          : '') +
+
+        // SECTION 4 — "once per reservation" (migrations/030): the button
+        // itself disappears once a request is pending or has ever been
+        // approved, rather than the page relying on a 400 from the server
+        // to explain why nothing happened.
+        (r.hardship && r.hardship.can_request
+          ? '<div class="mt-2">' +
+              '<button class="btn-quiet" data-hardship-toggle="' + esc(r.id) + '">Request payment pause</button>' +
+              '<div class="hidden mt-1" data-hardship-form="' + esc(r.id) + '">' +
+                '<div class="field"><label>Reason</label>' +
+                  '<textarea class="input" data-hardship-reason="' + esc(r.id) + '" rows="3" ' +
+                    'placeholder="Tell us briefly what has changed (at least 20 characters)"></textarea></div>' +
+                '<div class="field"><label>How many months do you need?</label>' +
+                  '<select class="select" data-hardship-months="' + esc(r.id) + '">' +
+                    '<option value="1">1 month</option><option value="2">2 months</option><option value="3">3 months</option>' +
+                  '</select></div>' +
+                '<p class="page-sub">This pauses upcoming due dates — nothing owed is forgiven, it moves to later in your plan. ' +
+                  'An owner or sales director reviews every request.</p>' +
+                '<button class="btn brass" data-hardship-submit="' + esc(r.id) + '">Submit request</button>' +
+              '</div>' +
+            '</div>'
+          : (r.hardship && r.hardship.status === 'pending'
+              ? '<p class="page-sub mt-2">Your payment pause request is pending review.</p>'
+              : '')) +
+
+        // SECTION 11 — the Handover tab, only once this reservation is
+        // actually 'completed' — portalService.js never attaches
+        // r.handover for anything else, so this is equivalent to gating on
+        // reservation status directly.
+        (r.handover
+          ? '<div class="page-sub mt-2 label-caps">Handover</div>' +
+            '<div class="flex-row justify-between gap-10 mt-1">' +
+              '<span>' + badge(r.handover.status) + (r.handover.keys_handed ? ' <span class="page-sub">Keys handed over</span>' : '') + '</span>' +
+            '</div>' +
+            (r.handover.snagging_items.length
+              ? '<div class="mt-1">' + r.handover.snagging_items.map(function (s) {
+                  return '<div class="activity-row">' +
+                    '<div class="flex-row justify-between gap-10">' + badge(s.status) +
+                      '<span class="page-sub nowrap">' + esc(fmtDate(s.created_at)) + '</span></div>' +
+                    '<div class="mt-1">' + esc(s.description) + '</div>' +
+                    (s.photo_url ? '<img class="unit-photo mt-1" src="' + esc(s.photo_url) + '" alt="Snagging photo">' : '') +
+                    (s.developer_response ? '<div class="page-sub mt-1">Developer: ' + esc(s.developer_response) + '</div>' : '') +
+                    (s.fix_committed_date ? '<div class="page-sub">Fix committed by ' + esc(fmtDate(s.fix_committed_date)) + '</div>' : '') +
+                  '</div>';
+                }).join('') + '</div>'
+              : '<p class="page-sub mt-1">No snagging items reported yet.</p>') +
+            '<button class="btn-quiet mt-1" data-snag-toggle="' + esc(r.id) + '">Log a snagging item</button>' +
+            '<div class="hidden mt-1" data-snag-form="' + esc(r.id) + '">' +
+              '<div class="field"><label>Describe the issue</label>' +
+                '<textarea class="input" data-snag-description="' + esc(r.id) + '" rows="2"></textarea></div>' +
+              '<div class="field"><label>Photo (optional)</label>' +
+                '<input class="input" type="file" accept="image/jpeg,image/png,image/webp" data-snag-photo="' + esc(r.id) + '"></div>' +
+              '<button class="btn brass" data-snag-submit="' + esc(r.id) + '">Submit</button>' +
+            '</div>'
+          : '') +
       '</div>' +
     '</div>';
   }
@@ -548,6 +885,206 @@
         }
       });
     });
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-hardship-toggle]'), function (button) {
+      button.addEventListener('click', function () {
+        var form = document.querySelector('[data-hardship-form="' + button.dataset.hardshipToggle + '"]');
+        if (form) form.classList.toggle('hidden');
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-hardship-submit]'), function (button) {
+      button.addEventListener('click', async function () {
+        var reservationId = button.dataset.hardshipSubmit;
+        var reasonField = document.querySelector('[data-hardship-reason="' + reservationId + '"]');
+        var monthsField = document.querySelector('[data-hardship-months="' + reservationId + '"]');
+        var reason = (reasonField.value || '').trim();
+
+        if (reason.length < 20) {
+          toast('Please explain in at least 20 characters.', 'err');
+          return;
+        }
+
+        button.disabled = true;
+        button.classList.add('is-working');
+        try {
+          await api('/hardship-request/' + reservationId, {
+            method: 'POST',
+            body: JSON.stringify({ reason: reason, pause_months: Number(monthsField.value) }),
+          });
+          toast('Request submitted. Your developer will review it shortly.', 'ok');
+          load();
+        } catch (err) {
+          toast(err.message, 'err');
+          button.disabled = false;
+          button.classList.remove('is-working');
+        }
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-snag-toggle]'), function (button) {
+      button.addEventListener('click', function () {
+        var form = document.querySelector('[data-snag-form="' + button.dataset.snagToggle + '"]');
+        if (form) form.classList.toggle('hidden');
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-snag-submit]'), function (button) {
+      button.addEventListener('click', async function () {
+        var reservationId = button.dataset.snagSubmit;
+        var description = (document.querySelector('[data-snag-description="' + reservationId + '"]').value || '').trim();
+        var fileInput = document.querySelector('[data-snag-photo="' + reservationId + '"]');
+        var file = fileInput.files && fileInput.files[0];
+
+        if (!description) { toast('Describe the issue.', 'err'); return; }
+
+        button.disabled = true;
+        button.classList.add('is-working');
+        try {
+          var photo = null;
+          if (file) {
+            var base64 = await new Promise(function (resolve, reject) {
+              var reader = new FileReader();
+              reader.onload = function () { resolve(String(reader.result).split(',')[1]); };
+              reader.onerror = function () { reject(new Error('could not be read')); };
+              reader.readAsDataURL(file);
+            });
+            photo = { content: base64, contentType: file.type };
+          }
+
+          await api('/handover/' + reservationId + '/snag', {
+            method: 'POST',
+            body: JSON.stringify({ description: description, photo: photo }),
+          });
+          toast('Snagging item reported.', 'ok');
+          load();
+        } catch (err) {
+          toast(err.message, 'err');
+        } finally {
+          button.disabled = false;
+          button.classList.remove('is-working');
+        }
+      });
+    });
+
+    var financingToggle = el('btn-financing-toggle');
+    if (financingToggle) {
+      financingToggle.addEventListener('click', function () {
+        el('financing-form').classList.toggle('hidden');
+      });
+    }
+
+    var financingSubmit = el('btn-financing-submit');
+    if (financingSubmit) {
+      financingSubmit.addEventListener('click', async function () {
+        var bank = (el('financing-bank').value || '').trim();
+        var amount = Number(el('financing-amount').value);
+        var notes = (el('financing-notes').value || '').trim();
+
+        if (!bank) { toast('Enter a bank name.', 'err'); return; }
+        if (!(amount > 0)) { toast('Enter the amount you are requesting.', 'err'); return; }
+
+        financingSubmit.disabled = true;
+        financingSubmit.classList.add('is-working');
+        try {
+          await api('/financing-request/' + activeReservationId, {
+            method: 'POST',
+            body: JSON.stringify({ bank_name: bank, amount_requested: amount, notes: notes }),
+          });
+          toast('Application submitted. Your developer will review and forward it to the bank.', 'ok');
+          el('financing-form').classList.add('hidden');
+        } catch (err) {
+          toast(err.message, 'err');
+        } finally {
+          financingSubmit.disabled = false;
+          financingSubmit.classList.remove('is-working');
+        }
+      });
+    }
+
+    var postCommunity = el('btn-post-community');
+    if (postCommunity) {
+      postCommunity.addEventListener('click', async function () {
+        var input = el('community-post-input');
+        var text = (input.value || '').trim();
+        if (!text) return;
+
+        postCommunity.disabled = true;
+        postCommunity.classList.add('is-working');
+        try {
+          await api('/community/' + activeProjectId, { method: 'POST', body: JSON.stringify({ content: text }) });
+          input.value = '';
+          await loadCommunity();
+        } catch (err) {
+          toast(err.message, 'err');
+        } finally {
+          postCommunity.disabled = false;
+          postCommunity.classList.remove('is-working');
+        }
+      });
+    }
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-community-reply-toggle]'), function (button) {
+      button.addEventListener('click', function () {
+        var form = document.querySelector('[data-community-reply-form="' + button.dataset.communityReplyToggle + '"]');
+        if (form) form.classList.toggle('hidden');
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-community-reply-submit]'), function (button) {
+      button.addEventListener('click', async function () {
+        var postId = button.dataset.communityReplySubmit;
+        var input = document.querySelector('[data-community-reply-input="' + postId + '"]');
+        var text = (input.value || '').trim();
+        if (!text) return;
+
+        button.disabled = true;
+        button.classList.add('is-working');
+        try {
+          await api('/community/post/' + postId + '/reply', { method: 'POST', body: JSON.stringify({ content: text }) });
+          await loadCommunity();
+        } catch (err) {
+          toast(err.message, 'err');
+          button.disabled = false;
+          button.classList.remove('is-working');
+        }
+      });
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('[data-community-delete]'), function (button) {
+      button.addEventListener('click', async function () {
+        button.disabled = true;
+        try {
+          await api('/community/post/' + button.dataset.communityDelete, { method: 'DELETE' });
+          await loadCommunity();
+        } catch (err) {
+          toast(err.message, 'err');
+          button.disabled = false;
+        }
+      });
+    });
+
+    var sendMessage = el('btn-send-message');
+    if (sendMessage) {
+      sendMessage.addEventListener('click', async function () {
+        var input = el('message-input');
+        var text = (input.value || '').trim();
+        if (!text) return;
+
+        sendMessage.disabled = true;
+        sendMessage.classList.add('is-working');
+        try {
+          await api('/messages/' + activeReservationId, { method: 'POST', body: JSON.stringify({ message: text }) });
+          input.value = '';
+          await loadMessages(activeReservationId);
+        } catch (err) {
+          toast(err.message, 'err');
+        } finally {
+          sendMessage.disabled = false;
+          sendMessage.classList.remove('is-working');
+        }
+      });
+    }
 
     var copyReferral = el('btn-copy-referral');
     if (copyReferral) {

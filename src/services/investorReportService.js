@@ -134,6 +134,19 @@ async function getInvestorReport(orgId, projectId = null) {
     };
   });
 
+  // SECTION 12 — contractor/supplier outflows against these same projects,
+  // so an investor sees both sides of the ledger on one page: money coming
+  // in from buyers (everything above) and money going out to build the
+  // thing (this). Read directly rather than through contractorService,
+  // which is scoped to one project at a time — this report can span every
+  // project in the org.
+  const { data: contractorPayments } = await supabaseAdmin
+    .from('re_contractor_payments')
+    .select('amount, status')
+    .eq('organization_id', orgId)
+    .in('project_id', projectIds);
+  const cpRows = contractorPayments || [];
+
   return {
     generated_at: new Date().toISOString(),
     period_end: today,
@@ -151,6 +164,12 @@ async function getInvestorReport(orgId, projectId = null) {
       receivables_outstanding: round2(totals.receivables_outstanding + row.receivables_outstanding),
       receivables_overdue: round2(totals.receivables_overdue + row.receivables_overdue),
     }), emptyTotals()),
+    contractor_payments: {
+      paid_total: round2(sum(cpRows.filter((p) => p.status === 'paid'), 'amount')),
+      pending_total: round2(sum(cpRows.filter((p) => p.status === 'pending'), 'amount')),
+      overdue_total: round2(sum(cpRows.filter((p) => p.status === 'overdue'), 'amount')),
+      overdue_count: cpRows.filter((p) => p.status === 'overdue').length,
+    },
   };
 }
 

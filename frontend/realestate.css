@@ -1029,7 +1029,7 @@ table.data td.num, table.data th.num {
 }
 
 .badge.reserved, .badge.pending, .badge.open, .badge.accrued,
-.badge.formal_notice, .badge.reminder, .badge.planning, .badge.invited {
+.badge.formal_notice, .badge.reminder, .badge.planning, .badge.invited, .badge.pinned {
   background: var(--gold-wash); color: var(--gold); border-color: var(--line-gold);
 }
 
@@ -1461,6 +1461,45 @@ table.data td.num, table.data th.num {
 }
 .sched-paid-summary:last-child { border-bottom: none; }
 
+/* Buyer drawer → Activity timeline (SECTION 2). One entry per call/visit/note,
+   same bordered-row rhythm as .sched above. */
+.activity-row { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.activity-row:last-child { border-bottom: none; }
+
+/* Buyer portal → Messages card (SECTION 5). Buyer bubbles align right (their
+   own outgoing text), staff bubbles align left — the one visual convention
+   every messaging surface already uses, so it needs no legend. */
+.message-thread { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.message-row { display: flex; flex-direction: column; max-width: 80%; }
+.message-row.mine { align-self: flex-end; align-items: flex-end; }
+.message-row.theirs { align-self: flex-start; align-items: flex-start; }
+.message-bubble { padding: 8px 12px; border-radius: 12px; background: var(--panel-2); font-size: 13.5px; line-height: 1.4; }
+.message-row.mine .message-bubble { background: var(--gold-wash); }
+
+/* Buyer portal → unit photos carousel (SECTION 6). Horizontal scroll rather
+   than a slideshow — no JS state to manage, works identically on touch and
+   mouse, and never needs a "1 of 6" counter to explain itself. */
+.unit-photos { display: flex; gap: 8px; overflow-x: auto; }
+.unit-photo { width: 120px; height: 90px; object-fit: cover; border-radius: var(--radius-sm); flex-shrink: 0; }
+
+/* Buyer portal → legal documents timeline (SECTION 7). A vertical line
+   through three fixed dots — pending/generated/sent all read as an outline
+   dot the same dim colour as everything merely true (CLAUDE.md's colour
+   rule); signed is the one state worth a filled gold dot, the same accent
+   this product reserves for "what the AI wrote and the one primary action
+   per screen" elsewhere. */
+.legal-timeline { position: relative; padding-left: 22px; }
+.legal-step { position: relative; padding-bottom: 16px; }
+.legal-step:last-child { padding-bottom: 0; }
+.legal-step:not(:last-child)::before {
+  content: ''; position: absolute; left: -17px; top: 14px; bottom: -2px; width: 1px; background: var(--line);
+}
+.legal-step-dot {
+  position: absolute; left: -22px; top: 3px; width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid var(--line-2); background: var(--panel);
+}
+.legal-step.signed .legal-step-dot { border-color: var(--gold); background: var(--gold); }
+
 /* Payments → Schedule: one row per buyer, expanding inline to their full
    installment list. The caret rotates via a class on the row (set in JS when
    it is the expanded one), not a CSS :has() — this app's minimum supported
@@ -1821,6 +1860,39 @@ table.data td.sched-detail-cell {
   font-size: 11px;
 }
 .portal-brand { font-size: 16px; letter-spacing: .03em; }
+.currency-select {
+  margin-left: auto;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: var(--sans);
+  padding: 5px 8px;
+}
+.fx-line { color: var(--text-faint); font-size: 11.5px; margin-top: 2px; }
+
+/* Buyer portal → Community card (SECTION 13). Replies sit indented under
+   their post, the one visual convention every threaded-comment surface
+   already uses. */
+.community-replies { padding-left: 14px; border-left: 2px solid var(--line); }
+
+/* Topbar → offline mode (SECTION 14), sales_rep only. Colour follows the
+   same state-carries-meaning rule as everywhere else in this app: clay for
+   offline/failed, dim gold for a pending sync, moss reads as "done" but
+   that state hides itself immediately (nothing left to announce). */
+.offline-banner, .sync-status {
+  font-size: 11.5px;
+  font-family: var(--sans);
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  white-space: nowrap;
+}
+.offline-banner { background: var(--clay-wash); color: var(--clay); border-color: rgba(205, 95, 67, 0.28); }
+.sync-status.pending, .sync-status.syncing { background: var(--gold-wash); color: var(--gold); border-color: var(--line-gold); cursor: default; }
+.sync-status.failed { background: var(--clay-wash); color: var(--clay); border-color: rgba(205, 95, 67, 0.28); cursor: pointer; }
+.sync-status.synced { background: var(--moss-wash); color: var(--moss); border-color: rgba(116, 171, 132, 0.28); }
 .portal-skeleton-title { width: 60%; height: 26px; }
 .portal-skeleton-line-1 { width: 85%; }
 .portal-skeleton-line-2 { width: 70%; }

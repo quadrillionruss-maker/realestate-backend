@@ -1,0 +1,60 @@
+<!-- Handover Certificate — SECTION 11. Rendered by
+     src/services/handoverService.js and printed by src/services/pdfAdapter.js
+     (Puppeteer), the same convention src/templates/allocation_letter.html
+     documents: uppercase {{TOKEN}} placeholders, no conditional syntax —
+     anything optional is pre-assembled as a _BLOCK token by the service.
+     Every interpolated value is escaped there. -->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 25mm 20mm; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; font-size: 12pt; line-height: 1.7; text-align: center; }
+  .letterhead { display: flex; justify-content: center; align-items: center; gap: 16px; border-bottom: 3px double #1a1a1a; padding-bottom: 12px; margin-bottom: 32px; }
+  .letterhead img { max-height: 60px; max-width: 200px; object-fit: contain; }
+  .letterhead .company { font-size: 15pt; font-weight: bold; letter-spacing: 0.5px; }
+  h1 { font-size: 20pt; text-transform: uppercase; letter-spacing: 2px; margin: 40px 0 8px; }
+  .subtitle { font-size: 11pt; color: #555; margin-bottom: 40px; }
+  .recipient { font-size: 15pt; margin: 30px 0 6px; }
+  table.details { width: 70%; margin: 30px auto; border-collapse: collapse; text-align: left; }
+  table.details td { padding: 8px 12px; border: 1px solid #999; }
+  table.details td:first-child { font-weight: bold; width: 45%; background: #f5f5f0; }
+  .body-text { max-width: 480px; margin: 20px auto; text-align: left; }
+  .signature-block { margin-top: 70px; display: flex; justify-content: space-around; }
+  .signature-line { border-top: 1px solid #1a1a1a; width: 220px; padding-top: 6px; font-size: 10.5pt; }
+  .fineprint { margin-top: 40px; font-size: 9.5pt; color: #555; }
+</style>
+</head>
+<body>
+  <div class="letterhead">
+    {{LOGO_BLOCK}}
+    <div class="company">{{COMPANY_NAME}}</div>
+  </div>
+
+  <h1>Certificate of Handover</h1>
+  <div class="subtitle">Ref: {{REFERENCE_NUMBER}} · {{DATE}}</div>
+
+  <div class="recipient">This is to certify that</div>
+  <div class="recipient"><b>{{CUSTOMER_NAME}}</b></div>
+
+  <div class="body-text">
+    <p>has taken formal possession of the unit particulars below, following a satisfactory inspection at
+    which all reported snagging items were resolved to the buyer's confirmation.</p>
+  </div>
+
+  <table class="details">
+    <tr><td>Unit</td><td>{{UNIT_NUMBER}}, {{PROJECT_LINE}}</td></tr>
+    <tr><td>Handover Date</td><td>{{HANDOVER_DATE}}</td></tr>
+    <tr><td>Keys Handed Over</td><td>{{KEYS_HANDED}}</td></tr>
+    <tr><td>Snagging Items Resolved</td><td>{{SNAG_COUNT}}</td></tr>
+  </table>
+
+  <div class="signature-block">
+    <div class="signature-line">Buyer</div>
+    <div class="signature-line">For and on behalf of<br>{{COMPANY_NAME}}</div>
+  </div>
+
+  <div class="fineprint">This certificate confirms physical handover of the unit and does not itself constitute title. Title remains governed by the buyer's Contract of Sale and, where applicable, the Deed of Assignment.</div>
+</body>
+</html>

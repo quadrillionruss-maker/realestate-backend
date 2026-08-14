@@ -63,6 +63,18 @@ const STAGES = [
 
 const byKey = new Map(STAGES.map((stage) => [stage.key, stage]));
 
+// FEATURE — the at-risk list (routes/dashboard.js's GET /at-risk) used to
+// require 2+ overdue installments before a buyer surfaced there at all,
+// which meant a rep's very first missed payment went unflagged on the one
+// screen a collections officer actually works every morning. One overdue
+// installment is now enough — it already carries the 'reminder' escalation
+// stage (STAGES above), so this is "list every buyer who has been
+// escalated at all", not a separate judgment call. Named here, not as a
+// bare `>= 1` in the route, so the one number the at-risk screen, its KPI
+// tile and this file's own tests all agree on lives in exactly one place.
+const AT_RISK_MIN_OVERDUE = 1;
+const isAtRisk = (overdueCount) => Number(overdueCount || 0) >= AT_RISK_MIN_OVERDUE;
+
 // Highest threshold the count clears.
 function stageForOverdueCount(count) {
   let match = STAGES[0];
@@ -159,4 +171,6 @@ async function sweepEscalations(orgId = null) {
   return { evaluated: overdueByReservation.size, raised };
 }
 
-module.exports = { STAGES, stageForOverdueCount, describeStage, sweepEscalations };
+module.exports = {
+  STAGES, stageForOverdueCount, describeStage, sweepEscalations, AT_RISK_MIN_OVERDUE, isAtRisk,
+};

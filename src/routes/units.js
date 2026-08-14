@@ -9,6 +9,31 @@ const router = express.Router();
 
 const UNIT_STATUSES = ['available', 'reserved', 'sold'];
 const MAX_BULK_UNITS = 500;
+const FURNISHING_STATUSES = ['unfurnished', 'semi-furnished', 'fully-furnished'];
+
+// SECTION 6 — the fixed detail fields every listing has (migrations/032),
+// shared by POST, POST /bulk and PATCH so the three don't each grow their
+// own copy of the same validation.
+function detailFields(body) {
+  const out = {};
+  if (body.description !== undefined) out.description = body.description || null;
+  for (const field of ['bedrooms', 'bathrooms', 'parking_spaces', 'floor_level']) {
+    if (body[field] === undefined) continue;
+    if (body[field] === null || body[field] === '') { out[field] = null; continue; }
+    const n = Number(body[field]);
+    if (!Number.isInteger(n) || (field !== 'floor_level' && n < 0)) {
+      throw Object.assign(new Error(`${field} must be a whole number${field === 'floor_level' ? '' : ' of 0 or more'}`), { statusCode: 400 });
+    }
+    out[field] = n;
+  }
+  if (body.furnishing_status !== undefined) {
+    if (!FURNISHING_STATUSES.includes(body.furnishing_status)) {
+      throw Object.assign(new Error(`furnishing_status must be one of: ${FURNISHING_STATUSES.join(', ')}`), { statusCode: 400 });
+    }
+    out.furnishing_status = body.furnishing_status;
+  }
+  return out;
+}
 
 // Up to 6MB per call and only the generic global limiter otherwise — that
 // budget alone allows gigabytes of upload traffic from one account in 15
@@ -119,6 +144,7 @@ router.post('/', requirePermission('inventory.write'), async (req, res, next) =>
         size_sqm: size_sqm ?? null,
         list_price,
         metadata: sanitizeMetadata(metadata),
+        ...detailFields(req.body || {}),
       })
       .select()
       .single();
@@ -220,6 +246,7 @@ router.patch('/:id', requirePermission('inventory.write'), async (req, res, next
       updates.list_price = list_price;
     }
     if (metadata !== undefined) updates.metadata = sanitizeMetadata(metadata);
+    Object.assign(updates, detailFields(req.body || {}));
 
     if (!Object.keys(updates).length) {
       return res.status(400).json({ error: 'No updatable fields provided' });

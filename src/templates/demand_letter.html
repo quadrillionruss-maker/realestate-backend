@@ -1,0 +1,78 @@
+<!-- Formal demand letter — SECTION 8. Rendered by
+     src/services/legalCaseService.js and printed by src/services/pdfAdapter.js
+     (Puppeteer), the same pattern src/templates/allocation_letter.html
+     documents in its own header comment: uppercase {{TOKEN}} placeholders,
+     no conditional syntax — anything optional is pre-assembled as a _BLOCK
+     token by the service. Every interpolated value is escaped there. -->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 25mm 20mm; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a1a; font-size: 12pt; line-height: 1.7; }
+  .letterhead { display: flex; justify-content: space-between; align-items: center; border-bottom: 3px double #1a1a1a; padding-bottom: 12px; margin-bottom: 32px; }
+  .letterhead img { max-height: 60px; max-width: 200px; object-fit: contain; }
+  .letterhead .company { font-size: 15pt; font-weight: bold; letter-spacing: 0.5px; }
+  .company-address { font-size: 10pt; color: #444; margin-top: 4px; }
+  .ref-date { display: flex; justify-content: space-between; margin-bottom: 28px; font-size: 11pt; }
+  h1 { font-size: 13pt; text-align: center; text-decoration: underline; text-transform: uppercase; letter-spacing: 1px; margin: 28px 0; }
+  table.details { width: 100%; border-collapse: collapse; margin: 20px 0; }
+  table.details td { padding: 8px 12px; border: 1px solid #999; }
+  table.details td:first-child { font-weight: bold; width: 45%; background: #f5f5f0; }
+  .demand-notice { border: 2px solid #1a1a1a; padding: 14px 18px; margin: 24px 0; font-weight: bold; text-align: center; }
+  .signature-block { margin-top: 60px; display: flex; justify-content: space-between; }
+  .signature-line { border-top: 1px solid #1a1a1a; width: 220px; padding-top: 6px; font-size: 10.5pt; }
+  .fineprint { margin-top: 28px; font-size: 9.5pt; color: #555; }
+</style>
+</head>
+<body>
+  <div class="letterhead">
+    <div>
+      <div class="company">{{COMPANY_NAME}}</div>
+      <div class="company-address">{{COMPANY_ADDRESS_BLOCK}}</div>
+    </div>
+    {{LOGO_BLOCK}}
+  </div>
+  <div class="ref-date">
+    <span>Ref: {{REFERENCE_NUMBER}}</span>
+    <span>{{DATE}}</span>
+  </div>
+
+  <p>{{CUSTOMER_NAME}}<br>{{CUSTOMER_ADDRESS_BLOCK}}</p>
+  <p>Dear {{CUSTOMER_SALUTATION}},</p>
+
+  <h1>Formal Demand for Payment — {{PROJECT_NAME}}, Unit {{UNIT_NUMBER}}</h1>
+
+  <p>We write further to your Contract of Sale in respect of the above-named property. Our records show
+  that your account is presently in arrears, the particulars of which are set out below:</p>
+
+  <table class="details">
+    <tr><td>Unit</td><td>{{UNIT_NUMBER}}, {{PROJECT_LINE}}</td></tr>
+    <tr><td>Total Contracted Amount</td><td>{{TOTAL_CONTRACTED}}</td></tr>
+    <tr><td>Total Amount Paid to Date</td><td>{{TOTAL_PAID}}</td></tr>
+    <tr><td>Amount Outstanding</td><td>{{AMOUNT_OUTSTANDING}}</td></tr>
+    <tr><td>Number of Missed Installments</td><td>{{MISSED_INSTALLMENTS}}</td></tr>
+  </table>
+
+  <div class="demand-notice">
+    You are hereby formally required to settle the outstanding sum of {{AMOUNT_OUTSTANDING}}
+    within FOURTEEN (14) DAYS of the date of this letter.
+  </div>
+
+  <p>Should payment not be received, or a satisfactory arrangement not be reached with our office,
+  within the stated period, we shall have no alternative but to take such further steps as we consider
+  necessary to protect our interests and recover the sum due, including but not limited to the institution
+  of legal proceedings and/or the exercise of our rights under the Contract of Sale in respect of the
+  allocation referred to above, without any further reference to you.</p>
+
+  <p>We trust this will not be necessary and look forward to your prompt response.</p>
+
+  <div class="signature-block">
+    <div class="signature-line">For and on behalf of<br>{{COMPANY_NAME}}</div>
+    <div class="signature-line">Date</div>
+  </div>
+
+  <div class="fineprint">This letter is issued without prejudice to any other rights and remedies available to {{COMPANY_NAME}} under the Contract of Sale or otherwise at law.</div>
+</body>
+</html>
