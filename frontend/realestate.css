@@ -1,28 +1,28 @@
 /* ══════════════════════════════════════════════════════════════════════════
    ARCHTA — Real Estate Intelligence
-   Black + gold. Built for a screen that is open all day, in an office with
-   the blinds down, showing numbers that matter.
+   Indigo fintech. A light, white-surfaced workspace with one deep-indigo
+   sidebar anchoring it and one accent colour carrying every interactive and
+   "selected" state.
 
    THE IDEA
-   A private bank's terminal, not a SaaS dashboard. Near-black paper, one
-   champagne-gold accent used sparingly enough that it still means something,
-   editorial serif for the things a person reads and tabular monospace for
-   every figure. Colour carries state and nothing else:
+   Off-white paper (#F7F8FC, not pure white — a hair of blue keeps large
+   fields of it from glaring), white cards, one indigo accent (#4F46E5) used
+   for every primary action, active state and link. Gold is reserved for
+   exactly two things in the whole product: the ◆ mark in the wordmark, and
+   the Morning Brief card's left rule — everywhere else, colour carries
+   state the way it always has:
 
-     gold   what the AI wrote, and the one primary action per screen
-     moss   money in
-     clay   late
-     dim    everything that is merely true
-
-   This replaces the warm "morning dispatch" almanac. The typography survived
-   the move — serif for prose, tabular mono for money — because that part was
-   never about the paper stock; it was about figures reading like an
-   instrument.
+     accent   the one primary action per screen, links, "selected"
+     moss     money in / positive outcomes
+     warn     needs attention, not yet urgent
+     danger   overdue / broken / failed
+     dim      everything that is merely true
 
    WHAT IS DELIBERATELY ABSENT
-   No glassmorphism, no gradient-on-gradient, no neon, no floating robot.
-   A developer managing ₦2bn of other people's money is buying trust and
-   legibility. Restraint is the design.
+   No glassmorphism, no gradient-on-gradient, no neon. A developer managing
+   ₦2bn of other people's money is buying trust and legibility. Restraint is
+   the design — the sidebar's indigo and the brief's gold rule are the two
+   places this palette allows itself a flourish.
 
    STRUCTURE
      1. Tokens          8. Tables
@@ -36,39 +36,58 @@
 
 /* ── 1. Tokens ─────────────────────────────────────────────────────────── */
 :root {
-  /* Surfaces, darkest first. Four steps is enough to build depth without
-     anything glowing. */
-  --ink:        #090909;
-  --ink-2:      #0e0e0e;
-  --panel:      #141414;
-  --panel-2:    #1a1a1a;
-  --panel-3:    #202020;
+  /* Surfaces, lightest first. A hair of blue in --bg keeps a large field of
+     it from reading as stark white next to the actual white cards. */
+  --bg:        #F7F8FC;
+  --bg-2:      #F0F1F7;
+  --bg-3:      #E8EAF2;
+  --panel:     #FFFFFF;
+  --panel-2:   #F4F5FA;
+  --panel-3:   #ECEDF5;
 
-  --line:       #242424;
-  --line-2:     #2f2f2f;
-  --line-gold:  rgba(201, 164, 92, 0.28);
+  --line:        #EAEAF2;
+  --line-strong: #D8D9E8;
+  --line-gold:   #E8D5A0;
 
-  /* Warm white, not #fff. Pure white on near-black vibrates. */
-  --text:       #ece7dd;
-  --text-dim:   #9d988e;
-  /* WCAG AA (4.5:1) against the darkest AND lightest surfaces this token
-     appears on — panel-3 is the binding case (a badge background). */
-  --text-faint: #8c8779;
+  --text:       #111827;
+  --text-dim:   #374151;
+  --text-faint: #9CA3AF;
 
-  --gold:       #c9a45c;
-  --gold-soft:  #e0c48c;
-  --gold-deep:  #8d7038;
-  --gold-wash:  rgba(201, 164, 92, 0.10);
+  /* Gold survives as exactly two things: the ◆ mark, and the brief card's
+     left rule. Never a background wash, never a general "pending" colour —
+     see badges below, which used to lean on it for that. */
+  --gold:      #C9A45C;
+  --gold-soft: #FEF9EE;
 
-  --moss:       #74ab84;
-  --moss-wash:  rgba(116, 171, 132, 0.12);
-  --clay:       #cd5f43;
-  --clay-wash:  rgba(205, 95, 67, 0.12);
-  --steel:      #7f9ec6;
-  --steel-wash: rgba(127, 158, 198, 0.12);
+  --accent:       #4F46E5;
+  --accent-2:     #4338CA;
+  --accent-soft:  #EEF2FF;
+  --accent-faint: #F5F7FF;
 
-  --serif: 'Fraunces', 'Iowan Old Style', Georgia, serif;
-  --sans:  'Archivo', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  /* The one surface that stays dark — the sidebar and the gate's brand
+     panel, an indigo island in an otherwise white product. */
+  --sidebar-bg:          #1E1B4B;
+  --sidebar-line:        rgba(255, 255, 255, 0.07);
+  --sidebar-text:        rgba(255, 255, 255, 0.58);
+  --sidebar-text-active: #FFFFFF;
+  --sidebar-active-bg:   #4F46E5;
+
+  --danger:      #EF4444;
+  --danger-soft: #FEF2F2;
+  --moss:        #059669;
+  --moss-soft:   #F0FDF4;
+  --warn:        #D97706;
+  --warn-soft:   #FFFBEB;
+
+  --ink-inv: #FFFFFF;
+
+  /* --serif is Playfair Display now, and it is used in exactly one place:
+     the gate's tagline (see .gate-headline-line). Everything that used to
+     read Fraunces via var(--serif) — page titles, modal titles, the brief
+     body — now reads var(--sans) instead; this app is Inter end to end
+     apart from that one tagline. */
+  --serif: 'Playfair Display', Georgia, serif;
+  --sans:  'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --mono:  'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
   --sidebar-w: 236px;
@@ -76,10 +95,13 @@
   --radius: 10px;
   --radius-sm: 6px;
 
-  /* Shadows on near-black do almost nothing, so depth comes from a lighter
-     surface plus a hairline. These are for things that genuinely float. */
-  --lift: 0 18px 44px rgba(0, 0, 0, 0.62);
-  --lift-sm: 0 6px 18px rgba(0, 0, 0, 0.45);
+  /* A white-surfaced product still needs real shadows for anything that
+     floats — there is no lighter surface to fall back on the way a dark
+     theme uses a raised panel. Indigo-tinted rather than pure black, so a
+     modal's shadow reads as part of the same palette instead of a generic
+     drop-shadow. */
+  --lift: 0 20px 60px rgba(30, 27, 75, 0.18);
+  --lift-sm: 0 4px 12px rgba(0, 0, 0, 0.15);
 
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -107,7 +129,7 @@ html { -webkit-text-size-adjust: 100%; }
 
 body {
   margin: 0;
-  background: var(--ink);
+  background: var(--bg);
   color: var(--text);
   font-family: var(--sans);
   font-size: 14px;
@@ -123,23 +145,24 @@ a { color: inherit; }
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; background: none; border: none; padding: 0; }
 
-::selection { background: var(--gold); color: #0b0b0b; }
+::selection { background: var(--accent); color: #fff; }
 
 :focus-visible {
-  outline: 2px solid var(--gold);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: 3px;
 }
 
-/* Scrollbars, so a dark app does not get a bright grey gutter down the side. */
-* { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
+/* Scrollbars, so a light app does not get a jarring OS-default grey gutter. */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) var(--panel-2); }
 *::-webkit-scrollbar { width: 10px; height: 10px; }
-*::-webkit-scrollbar-track { background: transparent; }
-*::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 6px; border: 3px solid var(--ink); }
-*::-webkit-scrollbar-thumb:hover { background: #3b3b3b; }
+*::-webkit-scrollbar-track { background: var(--panel-2); }
+*::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 6px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
 
 /* Money. Tabular figures so a column of Naira lines up on the comma —
-   the single most important typographic decision in the product. */
+   the single most important typographic decision in the product. IBM Plex
+   Mono stays exactly where it was; nothing about this token changed. */
 .mono, .money {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -154,6 +177,9 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   font-weight: 600;
 }
 
+/* Kept for the one call site that still wants it (the gate tagline uses its
+   own explicit classes instead, so this is unused there) — every other
+   former .serif call site in this file was moved to var(--sans) directly. */
 .serif { font-family: var(--serif); font-weight: 400; }
 
 /* ── 3. Auth gate ──────────────────────────────────────────────────────── */
@@ -162,29 +188,32 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   min-height: 100dvh;
   display: grid;
   grid-template-columns: 1.05fr 1fr;
-  background: var(--ink);
+  background: var(--bg);
 }
 
-/* Left: the identity. Right: the form. On a phone the identity collapses
-   away entirely, because nobody scrolls past a manifesto to sign in. */
+/* Left: the identity, on the one dark surface this product still has —
+   the same indigo as the sidebar. Right: the white form. On a phone the
+   identity collapses away entirely, because nobody scrolls past a
+   manifesto to sign in. */
 .gate-brand {
   position: relative;
   padding: 56px 56px 44px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  border-right: 1px solid var(--line);
+  background: var(--sidebar-bg);
   overflow: hidden;
 }
 
-/* A single, very slow gold bloom. The only decorative gradient in the whole
-   product, at 16% behind text that never sits on its brightest point. */
+/* A single, very slow indigo bloom — the only decorative gradient in the
+   whole product, at 18% behind text that never sits on its brightest point.
+   Indigo, not gold: gold is reserved for the ◆ mark and the brief's rule. */
 .gate-brand::after {
   content: '';
   position: absolute;
   inset: -30% -40% auto -20%;
   height: 80%;
-  background: radial-gradient(60% 60% at 30% 30%, rgba(201, 164, 92, 0.16), transparent 70%);
+  background: radial-gradient(60% 60% at 30% 30%, rgba(79, 70, 229, 0.28), transparent 70%);
   pointer-events: none;
 }
 
@@ -194,37 +223,53 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   display: inline-flex;
   align-items: center;
   gap: 11px;
-  font-family: var(--serif);
-  font-size: 19px;
-  letter-spacing: 0.04em;
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.03em;
+  color: var(--sidebar-text-active);
 }
 
+/* The brand mark: ◆ on a filled indigo square, everywhere it appears
+   (gate, sidebar, mobile gate-card fallback below). The diamond itself is
+   the one foreground use of gold in the entire product. */
 .gate-mark i {
-  width: 26px; height: 26px;
+  width: 28px; height: 28px;
   display: grid; place-items: center;
-  border: 1px solid var(--line-gold);
-  border-radius: 5px;
+  background: var(--accent);
+  border-radius: 7px;
   color: var(--gold);
   font-style: normal;
-  font-size: 12px;
+  font-size: 13px;
+  flex-shrink: 0;
 }
 
+/* The tagline — Playfair Display, stacked, four lines, the one place in the
+   whole product this typeface appears. Each line is its own element rather
+   than inline markup (<em>, etc.) because each carries an independent
+   colour/weight/style treatment "Every" plain, "naira," dimmed, "accounted"
+   italic, "for." plain — a single run of text with one <em> could not
+   express that. */
 .gate-headline {
-  font-family: var(--serif);
-  font-size: clamp(34px, 4.2vw, 52px);
-  line-height: 1.06;
-  font-weight: 400;
-  letter-spacing: -0.02em;
-  max-width: 15ch;
+  display: flex;
+  flex-direction: column;
+  font-family: 'Playfair Display', Georgia, serif;
+  font-size: 38px;
+  font-weight: 900;
+  letter-spacing: -1.5px;
+  line-height: 0.95;
   margin: 0 0 18px;
 }
 
-.gate-headline em { font-style: italic; color: var(--gold); }
+.gate-headline-line { color: var(--sidebar-text-active); font-weight: 900; }
+.gate-headline-line.is-dim { opacity: 0.45; }
+.gate-headline-line.is-italic { font-style: italic; }
 
 .gate-blurb {
-  color: var(--text-dim);
+  font-family: var(--sans);
+  color: rgba(255, 255, 255, 0.55);
   max-width: 42ch;
-  font-size: 15px;
+  font-size: 12.5px;
   line-height: 1.65;
 }
 
@@ -235,7 +280,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   list-style: none;
   margin: 34px 0 0;
   padding: 26px 0 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
   display: flex;
   flex-direction: column;
   gap: 13px;
@@ -247,24 +292,27 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   padding-left: 20px;
   font-size: 13.5px;
   line-height: 1.55;
-  color: var(--text-faint);
+  color: rgba(255, 255, 255, 0.55);
 }
 
+/* A plain dot, not a gold diamond — the ◆ mark stays the one place that
+   glyph and that colour appear together. */
 .gate-points li::before {
-  content: '◆';
+  content: '•';
   position: absolute;
   left: 0;
   top: 0;
-  color: var(--gold);
-  font-size: 9px;
-  line-height: 1.9;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
-.gate-points b { color: var(--text-dim); font-weight: 600; }
+.gate-points b { color: rgba(255, 255, 255, 0.85); font-weight: 600; }
 
 /* Desktop hides this: the full brand panel is already on the left, and two
    wordmarks on one screen is a mistake. It exists for the mobile breakpoint,
-   where that panel is gone. */
+   where that panel is gone — so unlike .gate-brand above, this one sits on
+   the WHITE form side, and reads accordingly: indigo text, gold mark. */
 .gate-card-brand { display: none; }
 
 .gate-form-wrap {
@@ -276,37 +324,36 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .gate-card { width: 100%; max-width: 372px; }
 
 .gate-title {
-  font-family: var(--serif);
+  font-family: var(--sans);
   font-size: 27px;
-  font-weight: 400;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   margin-bottom: 6px;
 }
 
 .gate-sub { color: var(--text-dim); margin-bottom: 26px; font-size: 13.5px; }
 
-/* Tabs: sign in / create account. */
+/* Tabs: sign in / create account. An underline indicator, not a filled
+   pill — the accent colour IS the "you are here" signal now. */
 .gate-tabs {
   display: flex;
-  gap: 2px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  padding: 3px;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
   margin-bottom: 24px;
 }
 
 .gate-tab {
   flex: 1;
-  padding: 8px 10px;
-  border-radius: 4px;
+  padding: 10px 10px;
+  border-bottom: 2.5px solid transparent;
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-dim);
-  transition: background .18s var(--ease), color .18s var(--ease);
+  color: var(--text-faint);
+  transition: color .18s var(--ease), border-color .18s var(--ease);
 }
 
-.gate-tab[aria-selected='true'] { background: var(--panel-3); color: var(--text); }
-.gate-tab:hover:not([aria-selected='true']) { color: var(--text); }
+.gate-tab[aria-selected='true'] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.gate-tab:hover:not([aria-selected='true']) { color: var(--text-dim); }
 
 .gate-alt {
   display: flex;
@@ -348,7 +395,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   transition: color .16s, border-color .16s;
 }
 
-.link-quiet:hover { color: var(--gold); border-bottom-color: var(--line-gold); }
+.link-quiet:hover { color: var(--accent); border-bottom-color: var(--accent); }
 
 /* ── 4. App shell ──────────────────────────────────────────────────────── */
 .shell {
@@ -362,6 +409,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   min-width: 0; /* lets a wide table inside a grid child actually scroll */
   display: flex;
   flex-direction: column;
+  background: var(--bg);
 }
 
 .page {
@@ -380,9 +428,9 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 }
 
 .page-title {
-  font-family: var(--serif);
+  font-family: var(--sans);
   font-size: 26px;
-  font-weight: 400;
+  font-weight: 700;
   letter-spacing: -0.015em;
 }
 
@@ -390,9 +438,14 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ── 5. Sidebar ────────────────────────────────────────────────────────── */
+/* The one surface that stays dark throughout the app — deep indigo, the
+   same colour as the gate's brand panel. Every colour reference below is
+   therefore one of the sidebar-* tokens or an explicit white/rgba(white),
+   never the generic --text/--line tokens, which now resolve to LIGHT
+   colours that would be close to invisible here. */
 .sidebar {
-  background: var(--ink-2);
-  border-right: 1px solid var(--line);
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-line);
   display: flex;
   flex-direction: column;
   position: sticky;
@@ -407,42 +460,44 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   align-items: center;
   gap: 10px;
   padding: 18px 18px 16px;
-  border-bottom: 1px solid var(--line);
-  font-family: var(--serif);
-  font-size: 17px;
+  border-bottom: 1px solid var(--sidebar-line);
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 14px;
   letter-spacing: 0.03em;
+  color: var(--sidebar-text-active);
 }
 
 .sidebar-brand i {
-  width: 24px; height: 24px;
+  width: 28px; height: 28px;
   display: grid; place-items: center;
-  border: 1px solid var(--line-gold);
-  border-radius: 5px;
+  background: var(--accent);
+  border-radius: 7px;
   color: var(--gold);
   font-style: normal;
-  font-size: 11px;
+  font-size: 12px;
   flex-shrink: 0;
 }
 
 /* Only rendered when a person belongs to more than one workspace — a plain
    select, not a custom dropdown, so it inherits the OS's own accessibility
    for free rather than reimplementing a listbox for something opened rarely. */
-.workspace-switcher { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.workspace-switcher { padding: 12px 14px; border-bottom: 1px solid var(--sidebar-line); }
 
 .workspace-switcher-label {
   font-size: 9.5px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--sidebar-text);
   margin-bottom: 6px;
 }
 
 .workspace-switcher select {
   width: 100%;
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--sidebar-line);
   border-radius: var(--radius-sm);
-  color: var(--text);
+  color: var(--sidebar-text-active);
   font-family: var(--sans);
   font-size: 12.5px;
   padding: 7px 9px;
@@ -454,9 +509,9 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 
 .nav-label {
   font-size: 9.5px;
-  letter-spacing: 0.2em;
+  letter-spacing: 0.09em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--sidebar-text);
   padding: 0 10px 7px;
   font-weight: 600;
 }
@@ -467,29 +522,20 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   gap: 10px;
   width: 100%;
   padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
+  border-radius: 8px;
+  color: var(--sidebar-text);
   text-decoration: none;
   font-size: 13.5px;
   position: relative;
   transition: background .15s var(--ease), color .15s var(--ease);
 }
 
-.nav-item:hover { background: var(--panel); color: var(--text); }
-.nav-item.is-active { background: var(--panel-2); color: var(--text); }
+.nav-item:hover { background: rgba(255, 255, 255, 0.07); color: rgba(255, 255, 255, 0.85); }
 
-/* The gold marker is the only "you are here" signal. No pill, no glow. */
-.nav-item.is-active::before {
-  content: '';
-  position: absolute;
-  left: -10px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 2px;
-  height: 17px;
-  background: var(--gold);
-  border-radius: 0 2px 2px 0;
-}
+/* The filled indigo background IS the "you are here" signal — no left bar,
+   no glow, just the same solid fill a selected control gets everywhere
+   else in this palette. */
+.nav-item.is-active { background: var(--sidebar-active-bg); color: var(--sidebar-text-active); font-weight: 600; }
 
 .nav-item .ico {
   width: 16px;
@@ -505,13 +551,13 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   font-size: 10.5px;
   padding: 1px 6px;
   border-radius: 20px;
-  background: var(--panel-3);
-  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.7);
 }
 
-.nav-count.is-alert { background: var(--clay-wash); color: var(--clay); }
+.nav-count.is-alert { background: var(--danger); color: #fff; }
 
-.sidebar-foot { border-top: 1px solid var(--line); padding: 12px 10px; }
+.sidebar-foot { border-top: 1px solid var(--sidebar-line); padding: 12px 10px; }
 
 .who {
   display: flex;
@@ -521,27 +567,27 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   border-radius: var(--radius-sm);
   width: 100%;
   text-align: left;
+  background: transparent;
 }
 
-.who:hover { background: var(--panel); }
+.who:hover { background: rgba(255, 255, 255, 0.07); }
 
 .avatar {
   width: 28px; height: 28px;
   border-radius: 50%;
-  background: var(--gold-wash);
-  border: 1px solid var(--line-gold);
-  color: var(--gold);
+  background: var(--accent);
+  color: #fff;
   display: grid; place-items: center;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   flex-shrink: 0;
   overflow: hidden;
 }
 .avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 .who-text { min-width: 0; }
-.who-name { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.who-org { font-size: 11px; color: var(--text-faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.who-name { font-size: 12.5px; color: var(--sidebar-text-active); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.who-org { font-size: 11px; color: var(--sidebar-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ── 6. Topbar ─────────────────────────────────────────────────────────── */
 .topbar {
@@ -554,8 +600,8 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   position: sticky;
   top: 0;
   z-index: 40;
-  background: rgba(9, 9, 9, 0.86);
-  backdrop-filter: blur(12px);
+  background: var(--panel);
+  box-shadow: 0 1px 3px rgba(80, 80, 160, 0.06);
 }
 
 .search { position: relative; flex: 1; max-width: 460px; }
@@ -563,16 +609,21 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .search input {
   width: 100%;
   height: 34px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
   padding: 0 12px 0 32px;
   font-size: 13px;
-  transition: border-color .16s, background .16s;
+  transition: border-color .16s, background .16s, box-shadow .16s;
 }
 
 .search input::placeholder { color: var(--text-faint); }
-.search input:focus { outline: none; border-color: var(--line-gold); background: var(--panel-2); }
+.search input:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--panel);
+  box-shadow: 0 0 0 3px var(--accent-faint);
+}
 
 .search .ico {
   position: absolute;
@@ -604,7 +655,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   top: calc(100% + 6px);
   left: 0; right: 0;
   background: var(--panel);
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--lift);
   max-height: 66vh;
@@ -636,7 +687,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   font-size: 13px;
 }
 
-.search-hit:hover, .search-hit.is-cursor { background: var(--panel-3); }
+.search-hit:hover, .search-hit.is-cursor { background: var(--accent-faint); }
 .search-hit .hit-meta { margin-left: auto; color: var(--text-faint); font-size: 11.5px; }
 
 /* Desktop's stand-in for tapping a tel: link — there is usually no dialer to
@@ -647,7 +698,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .call-popup {
   position: absolute;
   background: var(--panel);
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--lift);
   z-index: 150;
@@ -679,6 +730,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: 0 1px 3px rgba(80, 80, 160, 0.06);
   overflow: hidden;
 }
 
@@ -710,6 +762,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+  box-shadow: 0 1px 3px rgba(80, 80, 160, 0.06);
   padding: 16px 18px;
   position: relative;
   overflow: hidden;
@@ -726,19 +779,24 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .stat-value {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  font-size: 25px;
-  letter-spacing: -0.03em;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   margin-top: 8px;
   line-height: 1.1;
+  color: var(--text);
 }
 
 .stat-value.moss { color: var(--moss); }
-.stat-value.clay { color: var(--clay); }
-.stat-value.gold { color: var(--gold); }
+.stat-value.clay { color: var(--danger); }
+.stat-value.gold { color: var(--accent); }
 
 .stat-sub { font-size: 11.5px; color: var(--text-faint); margin-top: 5px; }
 
-/* A hairline of state along the top edge, rather than tinting the tile. */
+/* A rule of state along the top edge. The overdue tile earns a heavier,
+   3px version of this per the product's own colour rule — money that is
+   late is the one figure on this screen that should look different at a
+   glance, not just in its number colour. */
 .stat.accent-moss::before,
 .stat.accent-clay::before,
 .stat.accent-gold::before {
@@ -748,8 +806,8 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   height: 2px;
 }
 .stat.accent-moss::before { background: var(--moss); }
-.stat.accent-clay::before { background: var(--clay); }
-.stat.accent-gold::before { background: var(--gold); }
+.stat.accent-clay::before { height: 3px; background: var(--danger); }
+.stat.accent-gold::before { background: var(--accent); }
 
 /* ── 8. Tables ─────────────────────────────────────────────────────────── */
 /* Wide tables scroll inside their own container. The page body must never
@@ -765,15 +823,15 @@ table.data {
 
 table.data th {
   text-align: left;
-  font-size: 9.5px;
-  letter-spacing: 0.16em;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-faint);
-  font-weight: 600;
+  font-weight: 700;
   padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 2px solid var(--line);
   white-space: nowrap;
-  background: var(--panel);
+  background: var(--panel-2);
   position: sticky;
   top: 0;
   z-index: 1;
@@ -783,11 +841,15 @@ table.data td {
   padding: 12px 16px;
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
+  color: var(--text);
 }
 
 table.data tbody tr:last-child td { border-bottom: none; }
 table.data tbody tr { transition: background .12s; }
-table.data tbody tr:hover { background: var(--panel-2); }
+/* Faint alternating rows — every other row a hair off white — so a dense
+   table stays scannable without a hard border on every line. */
+table.data tbody tr:nth-child(even) { background: var(--panel-2); }
+table.data tbody tr:hover { background: var(--accent-faint); }
 table.data tr.is-clickable { cursor: pointer; }
 
 /* A voided payment stays in the ledger — it happened, it was just wrong —
@@ -798,8 +860,8 @@ table.data tr.is-voided { opacity: .5; }
 /* CSV import column mapping: a column nothing could confidently match
    defaults to "Skip this column" and stays amber until a human either
    confirms that or points it somewhere else. */
-table.data tr.map-row-unmatched td { background: var(--gold-wash); }
-table.data tr.map-row-unmatched:hover td { background: var(--gold-wash); }
+table.data tr.map-row-unmatched td { background: var(--warn-soft); }
+table.data tr.map-row-unmatched:hover td { background: var(--warn-soft); }
 
 table.data td.num, table.data th.num {
   text-align: right;
@@ -818,9 +880,9 @@ table.data td.num, table.data th.num {
 
 .field label, .label {
   display: block;
-  font-size: 10.5px;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
   color: var(--text-dim);
   font-weight: 600;
   margin-bottom: 6px;
@@ -828,31 +890,32 @@ table.data td.num, table.data th.num {
 
 .input, .select, .textarea {
   width: 100%;
-  background: var(--ink-2);
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius-sm);
+  background: var(--panel);
+  border: 1.5px solid var(--line-strong);
+  border-radius: 8px;
   padding: 9px 12px;
   font-size: 14px;
-  transition: border-color .16s, background .16s;
+  transition: border-color .16s, background .16s, box-shadow .16s;
 }
 
 .input::placeholder, .textarea::placeholder { color: var(--text-faint); }
 
 .input:focus, .select:focus, .textarea:focus {
   outline: none;
-  border-color: var(--gold);
+  border-color: var(--accent);
   background: var(--panel);
+  box-shadow: 0 0 0 3px var(--accent-faint);
 }
 
 .input:disabled, .select:disabled, .textarea:disabled { opacity: 0.5; cursor: not-allowed; }
-.input.is-error, .select.is-error { border-color: var(--clay); }
+.input.is-error, .select.is-error { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.12); }
 
 .textarea { resize: vertical; min-height: 82px; line-height: 1.6; }
 
 /* The native select arrow is bright grey on every platform; replace it. */
 .select {
   appearance: none;
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%239d988e' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%239CA3AF' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
   padding-right: 32px;
@@ -873,8 +936,8 @@ table.data td.num, table.data th.num {
 }
 
 .field-hint { font-size: 11.5px; color: var(--text-faint); margin-top: 5px; line-height: 1.5; }
-.field-hint.warn { color: var(--gold-soft); }
-.field-error { font-size: 12px; color: var(--clay); margin-top: 5px; }
+.field-hint.warn { color: var(--warn); }
+.field-error { font-size: 12px; color: var(--danger); margin-top: 5px; }
 
 .field-row { display: grid; gap: 13px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .field-row.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -892,23 +955,23 @@ table.data td.num, table.data th.num {
   appearance: none;
   width: 16px; height: 16px;
   margin: 2px 0 0;
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line-strong);
   border-radius: 4px;
-  background: var(--ink-2);
+  background: var(--panel);
   flex-shrink: 0;
   position: relative;
   cursor: pointer;
   transition: background .14s, border-color .14s;
 }
 
-.check input:checked { background: var(--gold); border-color: var(--gold); }
+.check input:checked { background: var(--accent); border-color: var(--accent); }
 
 .check input:checked::after {
   content: '';
   position: absolute;
   left: 5px; top: 1.5px;
   width: 4px; height: 8px;
-  border: solid #0b0b0b;
+  border: solid #fff;
   border-width: 0 2px 2px 0;
   transform: rotate(45deg);
 }
@@ -920,36 +983,45 @@ table.data td.num, table.data th.num {
   gap: 7px;
   height: 34px;
   padding: 0 15px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
   background: var(--panel-2);
   color: var(--text);
   font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
-  transition: background .15s var(--ease), border-color .15s var(--ease), opacity .15s;
+  transition: background .15s var(--ease), border-color .15s var(--ease), opacity .15s, box-shadow .15s var(--ease);
 }
 
-.btn:hover:not(:disabled) { background: var(--panel-3); border-color: #3a3a3a; }
+.btn:hover:not(:disabled) { background: var(--panel-3); border-color: var(--line-strong); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-/* One gold button per screen. Its scarcity is what makes it read as
+/* One indigo button per screen. Its scarcity is what makes it read as
    "this is the thing to do". */
-.btn.brass, .btn.primary {
-  background: var(--gold);
-  border-color: var(--gold);
-  color: #0b0b0b;
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
   font-weight: 600;
 }
+.btn.primary:hover:not(:disabled) { background: var(--accent-2); border-color: var(--accent-2); }
+.btn.primary:focus-visible { box-shadow: 0 0 0 3px var(--accent-faint); }
 
-.btn.brass:hover:not(:disabled),
-.btn.primary:hover:not(:disabled) { background: var(--gold-soft); border-color: var(--gold-soft); }
+/* The AI-action button — "Regenerate brief" and its like. A quieter,
+   tinted twin of primary rather than a second loud colour. */
+.btn.brass {
+  background: var(--accent-soft);
+  border: 1px solid rgba(79, 70, 229, 0.2);
+  color: var(--accent);
+  font-weight: 600;
+}
+.btn.brass:hover:not(:disabled) { background: var(--accent-faint); }
 
-.btn.ghost { background: transparent; border-color: var(--line-2); }
+.btn.ghost { background: transparent; border-color: var(--line-strong); color: var(--text-dim); }
 .btn.ghost:hover:not(:disabled) { background: var(--panel-2); }
 
-.btn.danger { border-color: rgba(205, 95, 67, 0.4); color: var(--clay); background: transparent; }
-.btn.danger:hover:not(:disabled) { background: var(--clay-wash); }
+.btn.danger { border-color: rgba(239, 68, 68, 0.4); color: var(--danger); background: transparent; }
+.btn.danger:hover:not(:disabled) { background: var(--danger-soft); }
 
 .btn.block { width: 100%; }
 .btn.lg { height: 40px; padding: 0 20px; font-size: 14px; }
@@ -957,7 +1029,7 @@ table.data td.num, table.data th.num {
 
 /* The quiet button: a link that behaves like a control. Used on every
    "Copy for WhatsApp" and every "Done" — actions that are frequent, minor,
-   and must not compete with the gold one. */
+   and must not compete with the one primary button on screen. */
 .btn-quiet {
   display: inline-flex;
   align-items: center;
@@ -965,7 +1037,7 @@ table.data td.num, table.data th.num {
   height: 27px;
   padding: 0 10px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line-strong);
   background: transparent;
   color: var(--text-dim);
   font-size: 12px;
@@ -975,13 +1047,13 @@ table.data td.num, table.data th.num {
 }
 
 .btn-quiet:hover:not(:disabled) {
-  color: var(--gold);
-  border-color: var(--line-gold);
-  background: var(--gold-wash);
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-faint);
 }
 
 .btn-quiet:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-quiet.is-done { color: var(--moss); border-color: rgba(116, 171, 132, 0.4); background: var(--moss-wash); }
+.btn-quiet.is-done { color: var(--moss); border-color: rgba(5, 150, 105, 0.35); background: var(--moss-soft); }
 
 .btn-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
@@ -999,7 +1071,8 @@ table.data td.num, table.data th.num {
   animation: spin .62s linear infinite;
 }
 
-.btn.brass.is-working::after, .btn.primary.is-working::after { border-color: #0b0b0b; border-top-color: transparent; }
+.btn.brass.is-working::after { border-color: var(--accent); border-top-color: transparent; }
+.btn.primary.is-working::after { border-color: #fff; border-top-color: transparent; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -1018,69 +1091,83 @@ table.data td.num, table.data th.num {
   white-space: nowrap;
 }
 
-.badge.available, .badge.paid, .badge.active, .badge.sent, .badge.kept,
-.badge.generated, .badge.completed, .badge.confirmed {
-  background: var(--moss-wash); color: var(--moss); border-color: rgba(116, 171, 132, 0.28);
-}
-
-.badge.overdue, .badge.broken, .badge.cancelled, .badge.failed,
-.badge.legal, .badge.final_notice, .badge.removed {
-  background: var(--clay-wash); color: var(--clay); border-color: rgba(205, 95, 67, 0.28);
-}
-
-.badge.reserved, .badge.pending, .badge.open, .badge.accrued,
-.badge.formal_notice, .badge.reminder, .badge.planning, .badge.invited, .badge.pinned {
-  background: var(--gold-wash); color: var(--gold); border-color: var(--line-gold);
-}
-
-.badge.sold, .badge.approved, .badge.signed, .badge.skipped {
-  background: var(--steel-wash); color: var(--steel); border-color: rgba(127, 158, 198, 0.28);
-}
-
-.badge.none, .badge.dismissed, .badge.archived, .badge.void, .badge.sold_out, .badge.waived {
-  background: var(--panel-3); color: var(--text-faint); border-color: var(--line-2);
-}
-
-/* SECTION 3 — credit score tiers. Excellent and Good both read as moss,
-   distinguished by the number in the badge itself rather than a fourth hue
-   this palette does not otherwise have (see creditScoreService.js's tier()). */
+/* Positive / complete states. */
+.badge.available, .badge.paid, .badge.active, .badge.kept,
+.badge.completed, .badge.confirmed, .badge.sold, .badge.approved,
 .badge.credit-excellent, .badge.credit-good {
-  background: var(--moss-wash); color: var(--moss); border-color: rgba(116, 171, 132, 0.28);
-}
-.badge.credit-fair {
-  background: var(--gold-wash); color: var(--gold); border-color: var(--line-gold);
-}
-.badge.credit-at_risk {
-  background: var(--clay-wash); color: var(--clay); border-color: rgba(205, 95, 67, 0.28);
+  background: var(--moss-soft); color: var(--moss); border-color: rgba(5, 150, 105, 0.28);
 }
 
-/* Risk chips in the morning brief. Severity is carried by a left rule rather
-   than by tinting the whole chip, so a column of eight is still readable. */
+/* Late / broken / failed states. */
+.badge.overdue, .badge.broken, .badge.cancelled, .badge.failed,
+.badge.legal, .badge.final_notice, .badge.removed, .badge.credit-at_risk {
+  background: var(--danger-soft); color: var(--danger); border-color: rgba(239, 68, 68, 0.28);
+}
+
+/* Needs-attention states — amber, not gold. reserved is included by name
+   per the product's own status-badge spec; the rest (open items, an
+   escalation still short of "legal", an unaccepted invite) read the same
+   "not wrong yet, but worth a look" way. */
+.badge.reserved, .badge.open, .badge.accrued,
+.badge.formal_notice, .badge.reminder, .badge.invited, .badge.credit-fair {
+  background: var(--warn-soft); color: var(--warn); border-color: #FDE68A;
+}
+
+/* Informational / in-progress states — a document moving through its own
+   workflow, or a post pinned for visibility. Indigo, the same accent as
+   every link and primary action, never gold. */
+.badge.generated, .badge.sent, .badge.signed, .badge.pinned {
+  background: var(--accent-soft); color: var(--accent); border-color: rgba(79, 70, 229, 0.24);
+}
+
+/* Neutral / inert states — nothing due yet, nothing decided, a record no
+   longer live. */
+.badge.none, .badge.pending, .badge.planning, .badge.dismissed, .badge.archived,
+.badge.void, .badge.sold_out, .badge.waived, .badge.skipped {
+  background: var(--panel-3); color: var(--text-faint); border-color: var(--line-strong);
+}
+.badge.waived { opacity: 0.7; }
+
+/* ── Risk severity, shared by risk-chip and any future severity badge ──── */
+.badge.high { background: var(--danger-soft); color: var(--danger); border-color: #FECACA; }
+.badge.medium { background: var(--warn-soft); color: var(--warn); border-color: #FDE68A; }
+.badge.low { background: var(--accent-soft); color: var(--accent); border-color: rgba(79, 70, 229, 0.24); }
+
+/* Buyer risk chips in the morning brief — the whole chip is coloured by
+   severity now (not just a left rule), and the whole chip is clickable:
+   see screens.js's dashboard render for the data-customer-id wiring. */
 .risk-chip {
   display: flex;
   align-items: baseline;
   gap: 7px;
-  padding: 8px 12px 8px 11px;
+  padding: 8px 12px;
   border-radius: var(--radius-sm);
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-left: 2px solid var(--line-2);
+  border: 1px solid transparent;
   font-size: 12.5px;
-  color: var(--text-dim);
   line-height: 1.45;
+  transition: transform .15s var(--ease), box-shadow .15s var(--ease);
 }
 
-.risk-chip b { color: var(--text); font-weight: 600; white-space: nowrap; }
+/* Only a chip resolved to a buyer id (see screens.js's buyerIdByName) is
+   actually clickable — one without a match just reads as a static chip. */
+.risk-chip[data-buyer] { cursor: pointer; }
+.risk-chip[data-buyer]:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.10); }
 
-.risk-chip.high   { border-left-color: var(--clay); }
-.risk-chip.medium { border-left-color: var(--gold); }
-.risk-chip.low    { border-left-color: var(--text-faint); }
-.risk-chip.high b { color: var(--clay); }
+.risk-chip b { font-weight: 600; white-space: nowrap; }
+/* The reason text — "3 missed installments... 12 days late" — is the
+   "days late, faded" half of the chip; it inherits the chip's own colour at
+   reduced opacity rather than a fourth hue. */
+.risk-chip span { opacity: 0.75; }
+
+.risk-chip.high   { background: var(--danger-soft); color: var(--danger); border-color: #FECACA; }
+.risk-chip.medium { background: var(--warn-soft); color: var(--warn); border-color: #FDE68A; }
+.risk-chip.low    { background: var(--moss-soft); color: var(--moss); border-color: #BBF7D0; }
 
 .risk-row { display: flex; flex-direction: column; gap: 7px; margin-top: 14px; }
 
 /* Anything the AI wrote is marked. Every output here is a proposal a human
-   sends, and the mark is how you tell at a glance. */
+   sends, and the mark is how you tell at a glance — indigo, not gold; gold
+   stays reserved for the ◆ mark and the brief's own left rule. */
 .tag-ai {
   display: inline-flex;
   align-items: center;
@@ -1088,9 +1175,9 @@ table.data td.num, table.data th.num {
   padding: 0 5px;
   margin-right: 6px;
   border-radius: 3px;
-  background: var(--gold-wash);
-  border: 1px solid var(--line-gold);
-  color: var(--gold);
+  background: var(--accent-soft);
+  border: 1px solid rgba(79, 70, 229, 0.24);
+  color: var(--accent);
   font-family: var(--mono);
   font-size: 9px;
   font-weight: 600;
@@ -1104,15 +1191,15 @@ table.data td.num, table.data th.num {
   height: 28px;
   padding: 0 11px;
   border-radius: 20px;
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line-strong);
   background: var(--panel);
   font-size: 12.5px;
   color: var(--text-dim);
   transition: border-color .15s, color .15s, background .15s;
 }
 
-.pill:hover { color: var(--text); border-color: #3a3a3a; }
-.pill.is-on { border-color: var(--line-gold); color: var(--gold); background: var(--gold-wash); }
+.pill:hover { color: var(--text); border-color: var(--line-strong); }
+.pill.is-on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 .filter-row { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; margin-bottom: 15px; }
 
@@ -1129,7 +1216,7 @@ table.data td.num, table.data th.num {
 .scrim {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.66);
+  background: rgba(30, 27, 75, 0.45);
   backdrop-filter: blur(2px);
   z-index: 100;
   display: grid;
@@ -1140,7 +1227,7 @@ table.data td.num, table.data th.num {
 
 .modal {
   background: var(--panel);
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--lift);
   width: 100%;
@@ -1160,9 +1247,10 @@ table.data td.num, table.data th.num {
   gap: 12px;
   padding: 16px 20px;
   border-bottom: 1px solid var(--line);
+  background: var(--panel);
 }
 
-.modal-title { font-family: var(--serif); font-size: 18px; font-weight: 400; }
+.modal-title { font-family: var(--sans); font-size: 18px; font-weight: 700; }
 .modal-body { padding: 20px; overflow-y: auto; }
 
 .modal-foot {
@@ -1171,6 +1259,7 @@ table.data td.num, table.data th.num {
   gap: 8px;
   padding: 14px 20px;
   border-top: 1px solid var(--line);
+  background: var(--panel-2);
 }
 
 .icon-btn {
@@ -1192,7 +1281,7 @@ table.data td.num, table.data th.num {
   top: 0; right: 0; bottom: 0;
   width: min(580px, 100vw);
   background: var(--panel);
-  border-left: 1px solid var(--line-2);
+  border-left: 1px solid var(--line);
   box-shadow: var(--lift);
   z-index: 100;
   display: flex;
@@ -1232,11 +1321,10 @@ table.data td.num, table.data th.num {
 }
 
 .toast {
-  background: var(--panel-2);
-  border: 1px solid var(--line-2);
-  border-left: 2px solid var(--gold);
-  border-radius: var(--radius-sm);
-  box-shadow: var(--lift-sm);
+  background: var(--accent);
+  color: #fff;
+  border-radius: 10px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   padding: 11px 14px;
   font-size: 13px;
   display: flex;
@@ -1245,9 +1333,9 @@ table.data td.num, table.data th.num {
   animation: rise .2s var(--ease);
 }
 
-.toast.ok { border-left-color: var(--moss); }
-.toast.err { border-left-color: var(--clay); }
-.toast-close { margin-left: auto; color: var(--text-faint); font-size: 15px; line-height: 1; }
+.toast.ok { background: var(--moss); }
+.toast.err { background: var(--danger); }
+.toast-close { margin-left: auto; color: rgba(255, 255, 255, 0.8); font-size: 15px; line-height: 1; }
 
 /* ── 13. Dashboard-specific ────────────────────────────────────────────── */
 /* Greeting: the first thing on the screen, and the only place the product
@@ -1255,9 +1343,9 @@ table.data td.num, table.data th.num {
 .greeting { margin-bottom: 22px; }
 
 .greeting h1 {
-  font-family: var(--serif);
+  font-family: var(--sans);
   font-size: clamp(24px, 3vw, 31px);
-  font-weight: 400;
+  font-weight: 700;
   letter-spacing: -0.02em;
 }
 
@@ -1278,26 +1366,36 @@ table.data td.num, table.data th.num {
   font-weight: 500;
 }
 
-.greeting-line.clay b { color: var(--clay); }
-.greeting-line.gold b { color: var(--gold); }
+.greeting-line.clay b { color: var(--danger); }
+.greeting-line.gold b { color: var(--accent); }
 
-/* The brief is the reason someone opens this at 7am. It gets the serif and
-   the only large body text in the product. */
+/* The brief is the reason someone opens this at 7am — the one card in the
+   product that still carries gold, as a single left rule against an
+   otherwise plain white card. Nothing else on screen uses gold at all. */
 .brief {
-  background: linear-gradient(180deg, var(--gold-wash), transparent 42%), var(--panel);
+  background: var(--panel);
   border: 1px solid var(--line);
+  border-left: 4px solid var(--gold);
   border-radius: var(--radius);
+  box-shadow: 0 1px 3px rgba(80, 80, 160, 0.06);
   padding: 22px 24px;
 }
 
 .brief-head { display: flex; align-items: center; gap: 12px; margin-bottom: 13px; flex-wrap: wrap; }
 
+/* "Morning Brief" reads in the same plain eyebrow style every other card
+   label in the app uses — the left rule above is the one flourish this
+   card gets. Gold appears in exactly two places in the whole product: that
+   rule, and the ◆ mark. Not here too. */
+
 .brief-body {
-  font-family: var(--serif);
+  font-family: var(--sans);
   font-size: 17.5px;
+  font-weight: 400;
   line-height: 1.62;
   letter-spacing: -0.005em;
   max-width: 74ch;
+  color: var(--text);
 }
 
 .brief-body.is-muted { color: var(--text-faint); font-style: italic; }
@@ -1305,31 +1403,43 @@ table.data td.num, table.data th.num {
 .brief-meta { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
 .brief-actions { display: flex; align-items: center; gap: 11px; margin-top: 18px; flex-wrap: wrap; }
 
+/* A buyer's name mentioned inline in the brief's own prose — clicking opens
+   their drawer, the same destination the chips below open. Wired in
+   screens.js's dashboard render (SECTION — buyer name clickthrough). */
+.brief-buyer-link {
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.brief-buyer-link:hover { color: var(--accent-2); }
+
 /* A project card's own name, bolder than the page-sub location line under it. */
 .project-card-title { font-size: 15px; font-weight: 600; }
 
 /* Unit mix bar. */
 .units-bar {
   display: flex;
-  height: 8px;
-  border-radius: 4px;
+  height: 10px;
+  border-radius: 999px;
   overflow: hidden;
   background: var(--panel-3);
   margin-bottom: 12px;
 }
 
 .units-bar > div { transition: width .5s var(--ease); }
-.seg-sold { background: var(--steel); }
-.seg-reserved { background: var(--gold); }
-.seg-available { background: var(--line-2); }
+.seg-sold { background: var(--accent); }
+.seg-reserved { background: var(--warn); }
+.seg-available { background: var(--line-strong); }
 
 .units-legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
 .units-legend span { display: inline-flex; align-items: center; gap: 7px; }
 
 .swatch { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
-.swatch.sold { background: var(--steel); }
-.swatch.reserved { background: var(--gold); }
-.swatch.available { background: var(--line-2); }
+.swatch.sold { background: var(--accent); }
+.swatch.reserved { background: var(--warn); }
+.swatch.available { background: var(--line-strong); }
 
 /* At-risk record card. */
 .record { padding: 14px 16px; border-bottom: 1px solid var(--line); }
@@ -1344,7 +1454,7 @@ table.data td.num, table.data th.num {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
   font-size: 15px;
-  color: var(--clay);
+  color: var(--danger);
   white-space: nowrap;
   letter-spacing: -0.02em;
 }
@@ -1358,15 +1468,16 @@ table.data td.num, table.data th.num {
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--clay);
-  background: var(--clay-wash);
-  border: 1px solid rgba(205, 95, 67, 0.28);
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid #FECACA;
   border-radius: 20px;
   padding: 2px 8px;
 }
 
 /* A promise the buyer made themselves. Broken reads louder than late,
-   because they chose the date. */
+   because they chose the date. Indigo for "open" (a neutral, informational
+   commitment on record), danger once broken. */
 .promise-tag {
   display: inline-flex;
   align-items: center;
@@ -1374,15 +1485,15 @@ table.data td.num, table.data th.num {
   font-size: 11px;
   border-radius: 20px;
   padding: 2px 9px;
-  border: 1px solid var(--line-gold);
-  background: var(--gold-wash);
-  color: var(--gold);
+  border: 1px solid rgba(79, 70, 229, 0.24);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .promise-tag.broken {
-  border-color: rgba(205, 95, 67, 0.4);
-  background: var(--clay-wash);
-  color: var(--clay);
+  border-color: #FECACA;
+  background: var(--danger-soft);
+  color: var(--danger);
   font-weight: 600;
 }
 
@@ -1392,26 +1503,26 @@ table.data td.num, table.data th.num {
   font-size: 12px;
   color: var(--text-dim);
   text-decoration: none;
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   padding: 4px 10px;
   transition: color .15s, border-color .15s, background .15s;
 }
 
-.action-link:hover { color: var(--gold); border-color: var(--line-gold); background: var(--gold-wash); }
+.action-link:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-faint); }
 
 /* AI-drafted follow-up. */
 .draft { padding: 14px 16px; border-bottom: 1px solid var(--line); }
 .draft:last-child { border-bottom: none; }
 
 .draft-text {
-  font-family: var(--serif);
+  font-family: var(--sans);
   font-size: 13.5px;
   line-height: 1.62;
   color: var(--text-dim);
-  background: var(--ink-2);
+  background: var(--panel-2);
   border: 1px solid var(--line);
-  border-left: 2px solid var(--line-gold);
+  border-left: 2px solid var(--accent);
   border-radius: var(--radius-sm);
   padding: 11px 13px;
   margin: 8px 0 10px;
@@ -1426,23 +1537,35 @@ table.data td.num, table.data th.num {
 .task-title { font-size: 13.5px; }
 .task-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
 
-/* Payment schedule row inside a drawer. */
-.sched { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
-.sched:last-child { border-bottom: none; }
+/* Payment schedule row inside a drawer. Coloured by status via a left rule
+   and a tinted background — the same treatment badges use, applied to a
+   whole row rather than a chip. */
+.sched {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; margin: 2px 0;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--line-strong);
+  background: var(--panel);
+  font-size: 13px;
+}
+.sched.paid { background: var(--moss-soft); border-left-color: var(--moss); }
+.sched.overdue { background: var(--danger-soft); border-left-color: var(--danger); }
+.sched.waived { background: var(--panel-3); border-left-color: var(--line-strong); opacity: .7; }
 
 .sched-n {
   width: 26px; height: 26px;
   display: grid; place-items: center;
   border-radius: 50%;
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--text-faint);
   flex-shrink: 0;
 }
 
-.sched.paid .sched-n { border-color: rgba(116, 171, 132, 0.4); color: var(--moss); }
-.sched.overdue .sched-n { border-color: rgba(205, 95, 67, 0.4); color: var(--clay); }
+.sched.paid .sched-n { border-color: rgba(5, 150, 105, 0.4); color: var(--moss); }
+.sched.overdue .sched-n { border-color: rgba(239, 68, 68, 0.4); color: var(--danger); }
 /* Stacked, not inline — .mono (amount) and .page-sub (due date) used to sit
    as adjacent spans with no separator in the markup, reading as
    "₦2,166,667due 13 Sep 2026". column-flex gives each its own line instead
@@ -1474,7 +1597,7 @@ table.data td.num, table.data th.num {
 .message-row.mine { align-self: flex-end; align-items: flex-end; }
 .message-row.theirs { align-self: flex-start; align-items: flex-start; }
 .message-bubble { padding: 8px 12px; border-radius: 12px; background: var(--panel-2); font-size: 13.5px; line-height: 1.4; }
-.message-row.mine .message-bubble { background: var(--gold-wash); }
+.message-row.mine .message-bubble { background: var(--accent-soft); color: var(--text); }
 
 /* Buyer portal → unit photos carousel (SECTION 6). Horizontal scroll rather
    than a slideshow — no JS state to manage, works identically on touch and
@@ -1484,10 +1607,8 @@ table.data td.num, table.data th.num {
 
 /* Buyer portal → legal documents timeline (SECTION 7). A vertical line
    through three fixed dots — pending/generated/sent all read as an outline
-   dot the same dim colour as everything merely true (CLAUDE.md's colour
-   rule); signed is the one state worth a filled gold dot, the same accent
-   this product reserves for "what the AI wrote and the one primary action
-   per screen" elsewhere. */
+   dot; signed is the one state worth a filled indigo dot, the same accent
+   this product now uses for every "arrived / in progress" state. */
 .legal-timeline { position: relative; padding-left: 22px; }
 .legal-step { position: relative; padding-bottom: 16px; }
 .legal-step:last-child { padding-bottom: 0; }
@@ -1496,9 +1617,9 @@ table.data td.num, table.data th.num {
 }
 .legal-step-dot {
   position: absolute; left: -22px; top: 3px; width: 10px; height: 10px; border-radius: 50%;
-  border: 2px solid var(--line-2); background: var(--panel);
+  border: 2px solid var(--line-strong); background: var(--panel);
 }
-.legal-step.signed .legal-step-dot { border-color: var(--gold); background: var(--gold); }
+.legal-step.signed .legal-step-dot { border-color: var(--accent); background: var(--accent); }
 
 /* Payments → Schedule: one row per buyer, expanding inline to their full
    installment list. The caret rotates via a class on the row (set in JS when
@@ -1521,7 +1642,7 @@ table.data td.sched-detail-cell {
 /* Progress meter — how much of a plan the buyer has paid. */
 .meter { height: 5px; border-radius: 3px; background: var(--panel-3); overflow: hidden; }
 .meter > i { display: block; height: 100%; background: var(--moss); border-radius: 3px; transition: width .5s var(--ease); }
-.meter.gold > i { background: var(--gold); }
+.meter.gold > i { background: var(--accent); }
 
 /* Collections chart — bars drawn in CSS, no library, no 40KB of D3 for
    twelve rectangles. */
@@ -1535,8 +1656,8 @@ table.data td.sched-detail-cell {
    above/below within .bars' own 132px. align-items: flex-end keeps every
    bar anchored to one baseline regardless of height, same as before. */
 .bar-track { height: 90px; width: 100%; display: flex; align-items: flex-end; }
-.bars .bar { width: 100%; background: var(--gold-deep); border-radius: 3px 3px 0 0; min-height: 2px; transition: height .5s var(--ease), background .15s; }
-.bars > div:hover .bar { background: var(--gold); }
+.bars .bar { width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; transition: height .5s var(--ease), background .15s; }
+.bars > div:hover .bar { background: var(--accent-2); }
 .bars .bar-label { font-family: var(--mono); font-size: 9px; color: var(--text-faint); white-space: nowrap; }
 
 /* Unit floor plan / photo thumbnails, in the media modal. */
@@ -1585,8 +1706,8 @@ table.data td.sched-detail-cell {
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(9, 9, 9, 0.72);
-  color: var(--text);
+  background: rgba(30, 27, 75, 0.72);
+  color: #fff;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.03em;
@@ -1611,8 +1732,8 @@ table.data td.sched-detail-cell {
   position: absolute;
   width: 16px; height: 16px;
   border-radius: 50%;
-  border: 2px solid var(--text-faint);
-  border-top-color: var(--gold);
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
   animation: spin .6s linear infinite;
 }
 .logo-upload.is-working .logo-upload-overlay { font-size: 0; }
@@ -1627,20 +1748,21 @@ table.data td.sched-detail-cell {
 .notice {
   padding: 11px 14px;
   border-radius: var(--radius-sm);
-  background: var(--clay-wash);
-  border: 1px solid rgba(205, 95, 67, 0.3);
-  color: var(--clay);
+  background: var(--danger-soft);
+  border: 1px solid #FECACA;
+  color: var(--danger);
   font-size: 13px;
   margin-bottom: 16px;
 }
 
-.notice.info { background: var(--steel-wash); border-color: rgba(127, 158, 198, 0.3); color: var(--steel); }
-.notice.ok { background: var(--moss-wash); border-color: rgba(116, 171, 132, 0.3); color: var(--moss); }
+.notice.info { background: var(--accent-soft); border-color: rgba(79, 70, 229, 0.24); color: var(--accent); }
+.notice.ok { background: var(--moss-soft); border-color: #BBF7D0; color: var(--moss); }
 /* A secondary, explanatory note rather than the primary message on screen. */
 .notice.compact { font-size: 12px; }
 /* Unresolved but not urgent — an unallocated credit needs a decision, not a
-   fire drill. The only gold notice, and clickable rather than merely read. */
-.notice.warn { background: var(--gold-wash); border-color: rgba(201, 164, 92, 0.35); color: var(--gold-soft); cursor: pointer; }
+   fire drill. Amber, not gold; gold stays reserved for the ◆ mark and the
+   brief's own left rule. Still the only clickable notice variant. */
+.notice.warn { background: var(--warn-soft); border-color: #FDE68A; color: var(--warn); cursor: pointer; }
 
 /* Loading placeholder. A shimmer beats a spinner for content with a known
    shape, because the page does not jump when it arrives. */
@@ -1658,8 +1780,8 @@ table.data td.sched-detail-cell {
 .muted { color: var(--text-dim); }
 .faint { color: var(--text-faint); }
 .moss { color: var(--moss); }
-.clay { color: var(--clay); }
-.gold { color: var(--gold); }
+.clay { color: var(--danger); }
+.gold { color: var(--accent); }
 .nowrap { white-space: nowrap; }
 .right { text-align: right; }
 .mt-1 { margin-top: 10px; }
@@ -1742,13 +1864,16 @@ table.data td.sched-detail-cell {
   }
 
   /* The brand panel is gone, so the wordmark moves into the card. Without this
-     a phone user saw "Welcome back" over a bare dark form with no indication of
-     which product they were signing into. */
+     a phone user saw "Welcome back" over a bare form with no indication of
+     which product they were signing into. This one sits on the WHITE card,
+     so it reads accordingly: indigo wordmark, gold mark. */
   .gate-card-brand {
     display: block;
-    font-family: var(--serif);
+    font-family: var(--sans);
+    font-weight: 700;
+    color: var(--accent);
     font-size: 16px;
-    letter-spacing: 0.04em;
+    letter-spacing: 0.02em;
     padding-bottom: 18px;
     margin-bottom: 22px;
     border-bottom: 1px solid var(--line);
@@ -1763,6 +1888,7 @@ table.data td.sched-detail-cell {
   .gate-card-brand span {
     display: block;
     font-family: var(--sans);
+    font-weight: 400;
     font-size: 12px;
     letter-spacing: 0;
     color: var(--text-faint);
@@ -1791,7 +1917,7 @@ table.data td.sched-detail-cell {
   }
 
   .sidebar.is-open { transform: none; box-shadow: var(--lift); }
-  .sidebar-scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 85; }
+  .sidebar-scrim { position: fixed; inset: 0; background: rgba(30, 27, 75, 0.5); z-index: 85; }
 
   .menu-btn { display: grid; }
   .page { padding: 20px 16px 60px; }
@@ -1837,105 +1963,6 @@ table.data td.sched-detail-cell {
      the only button most buyers ever press on this page. */
   #btn-pay { min-height: 48px; width: 100%; }
 }
-
-/* ── Buyer portal (portal.html/portal.js) ─────────────────────────────── */
-.portal-body { background: var(--ink); }
-.portal-wrap { max-width: 640px; margin: 0 auto; padding: 26px 18px 70px; }
-.portal-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 26px;
-}
-.portal-mark {
-  width: 24px;
-  height: 24px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line-gold);
-  border-radius: 5px;
-  color: var(--gold);
-  font-size: 11px;
-}
-.portal-brand { font-size: 16px; letter-spacing: .03em; }
-.currency-select {
-  margin-left: auto;
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  font-family: var(--sans);
-  padding: 5px 8px;
-}
-.fx-line { color: var(--text-faint); font-size: 11.5px; margin-top: 2px; }
-
-/* Buyer portal → Community card (SECTION 13). Replies sit indented under
-   their post, the one visual convention every threaded-comment surface
-   already uses. */
-.community-replies { padding-left: 14px; border-left: 2px solid var(--line); }
-
-/* Topbar → offline mode (SECTION 14), sales_rep only. Colour follows the
-   same state-carries-meaning rule as everywhere else in this app: clay for
-   offline/failed, dim gold for a pending sync, moss reads as "done" but
-   that state hides itself immediately (nothing left to announce). */
-.offline-banner, .sync-status {
-  font-size: 11.5px;
-  font-family: var(--sans);
-  padding: 4px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--line-2);
-  white-space: nowrap;
-}
-.offline-banner { background: var(--clay-wash); color: var(--clay); border-color: rgba(205, 95, 67, 0.28); }
-.sync-status.pending, .sync-status.syncing { background: var(--gold-wash); color: var(--gold); border-color: var(--line-gold); cursor: default; }
-.sync-status.failed { background: var(--clay-wash); color: var(--clay); border-color: rgba(205, 95, 67, 0.28); cursor: pointer; }
-.sync-status.synced { background: var(--moss-wash); color: var(--moss); border-color: rgba(116, 171, 132, 0.28); }
-.portal-skeleton-title { width: 60%; height: 26px; }
-.portal-skeleton-line-1 { width: 85%; }
-.portal-skeleton-line-2 { width: 70%; }
-.portal-footer {
-  margin-top: 44px;
-  padding-top: 18px;
-  border-top: 1px solid var(--line);
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
-
-.portal-greeting { font-size: 27px; letter-spacing: -.02em; }
-.portal-empty-body { text-align: center; padding: 44px 22px; }
-.portal-empty-body.sm { padding: 30px 20px; }
-.portal-empty-icon { font-size: 26px; opacity: .3; margin-bottom: 12px; }
-.portal-empty-title { font-size: 20px; margin-bottom: 8px; }
-
-/* SECTION 8 — sign.html's signature capture. touch-action:none stops the
-   page itself from scrolling while a finger drags across the canvas on
-   mobile, which is where most buyers actually sign. */
-.sig-canvas {
-  width: 100%;
-  max-width: 600px;
-  height: 180px;
-  border: 1px solid var(--line-2);
-  border-radius: 8px;
-  background: #fff;
-  touch-action: none;
-  cursor: crosshair;
-  display: block;
-}
-.sig-typed-input { font-family: 'Brush Script MT', cursive; font-size: 22px; }
-
-/* SECTION 2 — construction progress's latest milestone photo. Contained,
-   not cropped: a site photo's aspect ratio is part of what it shows. */
-.construction-photo { width: 100%; max-height: 320px; object-fit: cover; border-radius: 8px; display: block; }
-
-/* The Projects screen's milestone editor — five of these stacked inside
-   one modal, each with its own Save and its own photo picker. */
-.milestone-editor { padding-bottom: 16px; border-bottom: 1px solid var(--line); }
-.milestone-editor:last-child { border-bottom: none; padding-bottom: 0; }
-.milestone-photos { display: flex; flex-wrap: wrap; gap: 8px; }
-.milestone-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line-2); }
 
 /* Below this the search bar is squeezed between the hamburger and "Sign
    out" until there is no usable width left to type a search into. The text
@@ -2029,10 +2056,114 @@ table.data td.sched-detail-cell {
 }
 
 /* Printing an investor report should produce paper, not a screenshot of a
-   dark app that empties a toner cartridge. */
+   dense app that empties a toner cartridge. */
 @media print {
   .sidebar, .topbar, .page-actions, .btn, .btn-quiet, .toasts { display: none !important; }
   body { background: #fff; color: #000; }
   .card, .stat { border-color: #ccc; background: #fff; }
   .page { padding: 0; }
 }
+
+/* ── Buyer portal (portal.html/portal.js) ─────────────────────────────── */
+/* Same light theme as the operator app — white surfaces, indigo accent.
+   The one deliberate exception is .portal-mark just below: the developer's
+   own ◆ brand mark stays gold, because it represents THEIR brand on THEIR
+   buyer-facing page, not Archta's own UI chrome. */
+.portal-body { background: var(--bg); }
+.portal-wrap { max-width: 640px; margin: 0 auto; padding: 26px 18px 70px; }
+.portal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 26px;
+}
+.portal-mark {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-gold);
+  border-radius: 5px;
+  color: var(--gold);
+  font-size: 11px;
+}
+.portal-brand { font-size: 16px; font-weight: 600; letter-spacing: .01em; }
+.currency-select {
+  margin-left: auto;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-family: var(--sans);
+  padding: 5px 8px;
+}
+.currency-select option[selected] { background: var(--accent); color: #fff; }
+.fx-line { color: var(--text-faint); font-size: 11.5px; margin-top: 2px; }
+
+/* Buyer portal → Community card (SECTION 13). Replies sit indented under
+   their post, the one visual convention every threaded-comment surface
+   already uses. */
+.community-replies { padding-left: 14px; border-left: 2px solid var(--line); }
+
+/* Topbar → offline mode (SECTION 14), sales_rep only. Colour follows the
+   same state-carries-meaning rule as everywhere else in this app: danger
+   for offline/failed, amber for a pending sync, moss reads as "done" but
+   that state hides itself immediately (nothing left to announce). */
+.offline-banner, .sync-status {
+  font-size: 11.5px;
+  font-family: var(--sans);
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  white-space: nowrap;
+}
+.offline-banner { background: var(--danger-soft); color: var(--danger); border-color: #FECACA; }
+.sync-status.pending, .sync-status.syncing { background: var(--warn-soft); color: var(--warn); border-color: #FDE68A; cursor: default; }
+.sync-status.failed { background: var(--danger-soft); color: var(--danger); border-color: #FECACA; cursor: pointer; }
+.sync-status.synced { background: var(--moss-soft); color: var(--moss); border-color: #BBF7D0; }
+.portal-skeleton-title { width: 60%; height: 26px; }
+.portal-skeleton-line-1 { width: 85%; }
+.portal-skeleton-line-2 { width: 70%; }
+.portal-footer {
+  margin-top: 44px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.portal-greeting { font-family: var(--sans); font-weight: 700; font-size: 27px; letter-spacing: -.02em; }
+.portal-empty-body { text-align: center; padding: 44px 22px; }
+.portal-empty-body.sm { padding: 30px 20px; }
+.portal-empty-icon { font-size: 26px; opacity: .3; margin-bottom: 12px; }
+.portal-empty-title { font-size: 20px; margin-bottom: 8px; }
+
+/* SECTION 8 — sign.html's signature capture. touch-action:none stops the
+   page itself from scrolling while a finger drags across the canvas on
+   mobile, which is where most buyers actually sign. */
+.sig-canvas {
+  width: 100%;
+  max-width: 600px;
+  height: 180px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #fff;
+  touch-action: none;
+  cursor: crosshair;
+  display: block;
+}
+.sig-typed-input { font-family: 'Brush Script MT', cursive; font-size: 22px; }
+
+/* SECTION 2 — construction progress's latest milestone photo. Contained,
+   not cropped: a site photo's aspect ratio is part of what it shows. */
+.construction-photo { width: 100%; max-height: 320px; object-fit: cover; border-radius: 8px; display: block; }
+
+/* The Projects screen's milestone editor — five of these stacked inside
+   one modal, each with its own Save and its own photo picker. */
+.milestone-editor { padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.milestone-editor:last-child { border-bottom: none; padding-bottom: 0; }
+.milestone-photos { display: flex; flex-wrap: wrap; gap: 8px; }
+.milestone-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line-strong); }

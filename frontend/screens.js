@@ -421,6 +421,20 @@
       var drafts = (brief && brief.payload && brief.payload.follow_ups) || [];
       var risks = (brief && brief.payload && brief.payload.risks) || [];
 
+      // Buyer-name clickthrough in the brief: the brief's own payload
+      // (risks/follow_ups) carries customer_name but no customer_id, and
+      // this is a visual-only pass with no backend change in scope — so the
+      // id comes from atRisk, the one already-fetched list that has both,
+      // keyed by name. A buyer the brief mentions who isn't in today's
+      // at-risk list (or when the caller can't see at-risk at all) just
+      // doesn't become clickable — no extra request, no guessing.
+      var buyerIdByName = {};
+      if (canSeeAtRisk) {
+        atRisk.forEach(function (c) {
+          if (c.customer && c.customer.full_name && c.customer.id) buyerIdByName[c.customer.full_name] = c.customer.id;
+        });
+      }
+
       var lines = [];
       if (canSeeAtRisk && atRisk.length) lines.push('<span class="greeting-line clay"><b>' + atRisk.length + '</b> ' + (atRisk.length === 1 ? 'buyer needs' : 'buyers need') + ' chasing</span>');
       if (d.overdue.count) lines.push('<span class="greeting-line clay"><b>' + nairaShort(d.overdue.amount) + '</b> overdue</span>');
@@ -473,7 +487,9 @@
                   : '') + '</span>' +
               '</div>' +
               '<p class="brief-body' + (brief ? '' : ' is-muted') + '" id="brief-summary">' +
-                esc(brief ? brief.summary : 'No brief yet. The first one is written automatically at 7:00 AM Lagos time, or you can generate it now.') +
+                (brief
+                  ? linkifyBuyerNames(brief.summary, buyerIdByName)
+                  : esc('No brief yet. The first one is written automatically at 7:00 AM Lagos time, or you can generate it now.')) +
               '</p>' +
 
               // A degraded morning is stated, not disguised. Without this a
@@ -528,7 +544,13 @@
 
               (risks.length
                 ? '<div class="risk-row">' + risks.slice(0, 6).map(function (r) {
-                    return '<div class="risk-chip ' + esc(r.severity) + '"><b>' + esc(r.customer_name) + '</b><span>' + esc(r.reason) + '</span></div>';
+                    var buyerId = buyerIdByName[r.customer_name];
+                    // data-buyer is what wireRiskRows(view) below already
+                    // listens for — the same attribute the At-Risk card's
+                    // own "Open" button uses — so a chip with a resolved id
+                    // opens the buyer drawer for free, no new wiring needed.
+                    return '<div class="risk-chip ' + esc(r.severity) + '"' + (buyerId ? ' data-buyer="' + esc(buyerId) + '"' : '') + '>' +
+                      '<b>' + esc(r.customer_name) + '</b><span>' + esc(r.reason) + '</span></div>';
                   }).join('') + '</div>'
                 : '') +
               '<div class="brief-actions">' +
@@ -670,6 +692,27 @@
         '<span><i class="swatch available"></i>Available ' + units.available + '</span>' +
         '<span class="faint">' + R.plural(total, 'unit') + '</span>' +
       '</div>';
+  }
+
+  // Wraps every occurrence of a known buyer name in `text` with a clickable
+  // span carrying data-buyer — picked up by the same wireRiskRows/[data-buyer]
+  // wiring the At-Risk card already uses. Longest names first, so "Chidi
+  // Okafor" matches before a shorter name that happens to be a substring of
+  // it. Always returns escaped, safe-to-insert HTML, even with an empty map.
+  function linkifyBuyerNames(text, nameMap) {
+    var names = Object.keys(nameMap).filter(Boolean).sort(function (a, b) { return b.length - a.length; });
+    if (!names.length) return esc(text);
+    var pattern = new RegExp('(' + names.map(function (n) {
+      return n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }).join('|') + ')', 'g');
+    var out = '', lastIndex = 0, match;
+    while ((match = pattern.exec(text))) {
+      out += esc(text.slice(lastIndex, match.index));
+      out += '<span class="brief-buyer-link" data-buyer="' + esc(nameMap[match[0]]) + '">' + esc(match[0]) + '</span>';
+      lastIndex = match.index + match[0].length;
+    }
+    out += esc(text.slice(lastIndex));
+    return out;
   }
 
   function riskRow(c) {

@@ -8,8 +8,9 @@
   <title>Archta — Real Estate Intelligence</title>
 
   <!-- Favicon as an inline SVG data URI: no extra file, no extra request, and
-       no 404 in the console. The gold lozenge is the same mark as the sidebar. -->
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23090909'/%3E%3Cpath d='M16 7l7 9-7 9-7-9z' fill='%23c9a45c'/%3E%3C/svg%3E">
+       no 404 in the console. The gold diamond on an indigo square is the same
+       brand mark as the sidebar and the gate. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234F46E5'/%3E%3Cpath d='M16 7l7 9-7 9-7-9z' fill='%23c9a45c'/%3E%3C/svg%3E">
   <link rel="apple-touch-icon" href="./apple-touch-icon.png">
 
   <!-- This URL gets pasted into WhatsApp constantly. Without these it previews
@@ -28,17 +29,17 @@
   <!-- Placeholder — archta.io is not live yet. Update once it is. -->
   <meta property="og:url" content="https://archta.io">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="theme-color" content="#0A5C42">
+  <meta name="theme-color" content="#4F46E5">
 
-  <!-- Fraunces is still live: realestate.css's --serif custom property
-       (line 70) is built on it and is used by the .serif class plus a dozen
-       heading/title selectors across this shell (.gate-mark, .gate-headline,
-       .modal-title, and others) — every editorial-serif heading in the app,
-       per CLAUDE.md's design system. portal.html imports it separately for
-       the same reason. Confirmed still referenced; not removed. -->
+  <!-- Inter carries every UI surface now (realestate.css's --sans). Playfair
+       Display is loaded for exactly one element in the whole product — the
+       four-line tagline on the gate's brand panel (.gate-headline-line) —
+       nothing else references it. IBM Plex Mono is untouched: every money
+       figure in the app still renders in it. portal.html imports the same
+       two (no Playfair Display — the portal never shows the tagline). -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400&family=Archivo:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=Playfair+Display:ital,wght@0,900;1,900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./realestate.css">
 
   <!-- Sets window.__API_BASE__. A separate file rather than an inline block
@@ -61,7 +62,15 @@
     <div class="gate-mark"><i>◆</i> ARCHTA</div>
 
     <div>
-      <h1 class="gate-headline">Every naira, <em>accounted for.</em></h1>
+      <!-- Four independently-styled lines — not achievable with one <em> run
+           inside a single heading — so this is the one disclosed HTML change
+           in an otherwise CSS-only redesign. -->
+      <h1 class="gate-headline">
+        <span class="gate-headline-line">Every</span>
+        <span class="gate-headline-line is-dim">naira,</span>
+        <span class="gate-headline-line is-italic">accounted</span>
+        <span class="gate-headline-line">for.</span>
+      </h1>
       <p class="gate-blurb">
         Installment sales, allocations and collections for property developers —
         with a brief on your desk at 7am telling you who has fallen behind,
