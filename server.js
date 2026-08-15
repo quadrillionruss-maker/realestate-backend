@@ -24,6 +24,7 @@ const authRoutes = require('./src/routes/auth');
 const portalRoutes = require('./src/routes/portal');
 const signRoutes = require('./src/routes/sign');
 const webhookRoutes = require('./src/routes/webhooks');
+const adminRoutes = require('./src/routes/admin');
 
 const app = express();
 
@@ -188,6 +189,14 @@ app.use('/api/portal', portalRoutes);
 // not a staff token.
 app.use('/api/sign', signRoutes);
 
+// ── Platform admin ───────────────────────────────────────────────────────
+// Deliberately outside `authenticate`/`orgContext` — this is not a staff
+// session or a buyer link, it is a single shared operator secret with
+// visibility across every workspace at once. Gated by its own
+// Authorization: Bearer <ADMIN_SECRET> check inside routes/admin.js, and
+// 503s entirely when ADMIN_SECRET is unset (see env.js).
+app.use('/api/admin', adminRoutes);
+
 // ── API ────────────────────────────────────────────────────────────────────
 // authenticate populates req.user; orgContext (inside reRoutes) turns that
 // into req.orgId, which every query filters on.
@@ -200,7 +209,16 @@ app.use('/api/re', authenticate, reRoutes);
 // SERVE_FRONTEND=false there if you would rather this process not serve it.
 // Mounted after /api/* so it can never shadow an endpoint.
 if (env.serveFrontend) {
-  app.use(express.static(require('path').join(__dirname, 'frontend'), { extensions: ['html'] }));
+  const path = require('path');
+  // Explicit, ahead of the static mount below: frontend/admin.html is a
+  // deliberately standalone page (its own HTML/CSS/JS, no shared files with
+  // the operator app or the buyer portal — see that file's own header), so
+  // it gets its own named route rather than relying on the static
+  // middleware's extension-guessing to find it at the right path.
+  app.get('/admin', (req, res) => {
+    res.sendFile(path.join(__dirname, 'frontend', 'admin.html'));
+  });
+  app.use(express.static(path.join(__dirname, 'frontend'), { extensions: ['html'] }));
 }
 
 app.use(notFound);
@@ -227,6 +245,12 @@ const server = app.listen(env.port, () => {
   console.log(`  ↳  Webhook:     ${baseUrl}/api/webhooks/paystack`);
   if (env.serveFrontend) {
     console.log(`  ↳  App:         ${baseUrl}/`);
+  }
+  // TASK 3 AUDIT FIX — env.adminSecretIsWeak also disables the feature
+  // (routes/admin.js 503s exactly as if adminSecret were unset); the boot
+  // banner would otherwise advertise a URL that never actually works.
+  if (env.serveFrontend && env.adminSecret && !env.adminSecretIsWeak) {
+    console.log(`  ↳  Admin:       ${baseUrl}/admin`);
   }
   console.log('');
 });

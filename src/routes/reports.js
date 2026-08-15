@@ -12,7 +12,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { supabaseAdmin } = require('../middleware/orgContext');
-const { requirePermission } = require('../middleware/rbac');
+const { requirePermission, assertPermission } = require('../middleware/rbac');
 const { lagosToday } = require('../services/overdueService');
 const { toCsv } = require('../utils/csv');
 const { audit } = require('../services/auditService');
@@ -365,6 +365,197 @@ const EXPORTS = {
       ['Escalation', (r) => r.re_installment_plans?.re_reservations?.escalation_stage || ''],
     ],
   },
+
+  // TASK 3 AUDIT FIX (Important #11) — the six newer feature areas had no
+  // export coverage at all: a compliance request for "everything about
+  // this workspace" silently missed hardship, legal, financing, handover/
+  // snagging, contractor and community data. `permission` on a spec is an
+  // ADDITIONAL gate the route below checks beyond reports.export — these
+  // six read data whose OWN reading permission (hardship.review, legal.read,
+  // etc.) is not uniformly DIRECTORS-level the way reports.export itself is
+  // (contractors.manage is OWNER only), so exporting must not grant access
+  // wider than the feature's own screen already does.
+  hardship: {
+    filename: 'hardship-requests',
+    permission: 'hardship.review',
+    async load(orgId) {
+      const { data, error } = await supabaseAdmin
+        .from('re_hardship_requests')
+        .select(`
+          status, pause_months, reason, requested_by_portal, reviewed_at, applied_at, created_at,
+          re_customers(full_name, phone),
+          re_reservations(re_units(unit_number, re_projects(name)))
+        `)
+        .eq('organization_id', orgId)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    columns: [
+      ['Buyer', (r) => r.re_customers?.full_name || ''],
+      ['Phone', (r) => r.re_customers?.phone || ''],
+      ['Project', (r) => r.re_reservations?.re_units?.re_projects?.name || ''],
+      ['Unit', (r) => r.re_reservations?.re_units?.unit_number || ''],
+      ['Status', 'status'],
+      ['Pause (months)', 'pause_months'],
+      ['Reason', 'reason'],
+      ['Requested from portal', (r) => (r.requested_by_portal ? 'Yes' : 'No')],
+      ['Reviewed at', (r) => String(r.reviewed_at || '').slice(0, 10)],
+      ['Applied at', (r) => String(r.applied_at || '').slice(0, 10)],
+      ['Requested at', (r) => String(r.created_at || '').slice(0, 10)],
+    ],
+  },
+
+  legal_cases: {
+    filename: 'legal-cases',
+    permission: 'legal.read',
+    async load(orgId) {
+      const { data, error } = await supabaseAdmin
+        .from('re_legal_cases')
+        .select(`
+          status, lawyer_name, lawyer_phone, demand_letter_sent_at,
+          settlement_amount, settlement_date, notes, created_at,
+          re_customers(full_name, phone),
+          re_reservations(re_units(unit_number, re_projects(name)))
+        `)
+        .eq('organization_id', orgId)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    columns: [
+      ['Buyer', (r) => r.re_customers?.full_name || ''],
+      ['Phone', (r) => r.re_customers?.phone || ''],
+      ['Project', (r) => r.re_reservations?.re_units?.re_projects?.name || ''],
+      ['Unit', (r) => r.re_reservations?.re_units?.unit_number || ''],
+      ['Status', 'status'],
+      ['Lawyer', (r) => r.lawyer_name || ''],
+      ['Lawyer phone', (r) => r.lawyer_phone || ''],
+      ['Demand letter sent', (r) => String(r.demand_letter_sent_at || '').slice(0, 10)],
+      ['Settlement amount', (r) => r.settlement_amount ?? ''],
+      ['Settlement date', (r) => r.settlement_date || ''],
+      ['Notes', (r) => r.notes || ''],
+      ['Opened at', (r) => String(r.created_at || '').slice(0, 10)],
+    ],
+  },
+
+  financing_requests: {
+    filename: 'financing-requests',
+    permission: 'financing.read',
+    async load(orgId) {
+      const { data, error } = await supabaseAdmin
+        .from('re_financing_requests')
+        .select(`
+          bank_name, amount_requested, status, submitted_at, bank_reference, notes, created_at,
+          re_customers(full_name, phone),
+          re_reservations(re_units(unit_number, re_projects(name)))
+        `)
+        .eq('organization_id', orgId)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    columns: [
+      ['Buyer', (r) => r.re_customers?.full_name || ''],
+      ['Phone', (r) => r.re_customers?.phone || ''],
+      ['Project', (r) => r.re_reservations?.re_units?.re_projects?.name || ''],
+      ['Unit', (r) => r.re_reservations?.re_units?.unit_number || ''],
+      ['Bank', 'bank_name'],
+      ['Amount requested', 'amount_requested'],
+      ['Status', 'status'],
+      ['Bank reference', (r) => r.bank_reference || ''],
+      ['Submitted at', (r) => String(r.submitted_at || '').slice(0, 10)],
+      ['Notes', (r) => r.notes || ''],
+      ['Requested at', (r) => String(r.created_at || '').slice(0, 10)],
+    ],
+  },
+
+  handover: {
+    filename: 'handover-checklists',
+    permission: 'handover.manage',
+    async load(orgId) {
+      const { data, error } = await supabaseAdmin
+        .from('re_handover_checklists')
+        .select(`
+          status, handover_date, keys_handed, created_at,
+          re_reservations(re_customers(full_name, phone), re_units(unit_number, re_projects(name))),
+          re_snagging_items(status)
+        `)
+        .eq('organization_id', orgId)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    columns: [
+      ['Buyer', (r) => r.re_reservations?.re_customers?.full_name || ''],
+      ['Phone', (r) => r.re_reservations?.re_customers?.phone || ''],
+      ['Project', (r) => r.re_reservations?.re_units?.re_projects?.name || ''],
+      ['Unit', (r) => r.re_reservations?.re_units?.unit_number || ''],
+      ['Status', 'status'],
+      ['Handover date', (r) => r.handover_date || ''],
+      ['Keys handed', (r) => (r.keys_handed ? 'Yes' : 'No')],
+      ['Snagging items', (r) => (r.re_snagging_items || []).length],
+      ['Snagging items open', (r) => (r.re_snagging_items || []).filter((s) => s.status === 'open').length],
+      ['Created at', (r) => String(r.created_at || '').slice(0, 10)],
+    ],
+  },
+
+  contractor_payments: {
+    filename: 'contractor-payments',
+    permission: 'contractors.manage',
+    async load(orgId) {
+      const { data, error } = await supabaseAdmin
+        .from('re_contractor_payments')
+        .select(`
+          amount, due_date, paid_date, status, description, created_at,
+          re_contractors(name, type),
+          re_projects(name)
+        `)
+        .eq('organization_id', orgId)
+        .order('due_date', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    columns: [
+      ['Contractor', (r) => r.re_contractors?.name || ''],
+      ['Trade', (r) => r.re_contractors?.type || ''],
+      ['Project', (r) => r.re_projects?.name || ''],
+      ['Amount', 'amount'],
+      ['Due date', 'due_date'],
+      ['Paid date', (r) => r.paid_date || ''],
+      ['Status', 'status'],
+      ['Description', (r) => r.description || ''],
+      ['Created at', (r) => String(r.created_at || '').slice(0, 10)],
+    ],
+  },
+
+  community: {
+    filename: 'community-posts',
+    permission: 'community.moderate',
+    async load(orgId) {
+      const { data, error } = await supabaseAdmin
+        .from('re_community_posts')
+        .select(`
+          content, pinned, moderated, created_at,
+          re_customers(full_name),
+          re_projects(name),
+          re_community_replies(id)
+        `)
+        .eq('organization_id', orgId)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      return data || [];
+    },
+    columns: [
+      ['Author', (r) => r.re_customers?.full_name || ''],
+      ['Project', (r) => r.re_projects?.name || ''],
+      ['Content', 'content'],
+      ['Pinned', (r) => (r.pinned ? 'Yes' : 'No')],
+      ['Moderated', (r) => (r.moderated ? 'Yes' : 'No')],
+      ['Replies', (r) => (r.re_community_replies || []).length],
+      ['Posted at', (r) => String(r.created_at || '').slice(0, 10)],
+    ],
+  },
 };
 
 const reservationOf = (payment) =>
@@ -390,6 +581,13 @@ router.get('/export/:kind', exportLimiter, requirePermission('reports.export'), 
         error: `Nothing to export called "${req.params.kind}". Try: ${Object.keys(EXPORTS).join(', ')}`,
       });
     }
+    // TASK 3 AUDIT FIX (Important #11) — some export kinds read data whose
+    // own permission is narrower than reports.export itself (e.g.
+    // contractors.manage is owner-only; reports.export is DIRECTORS) —
+    // checked here, per kind, rather than only at the router.get gate above,
+    // exactly the "depends on the request, not just the path" pattern
+    // src/middleware/rbac.js's own comment describes assertPermission for.
+    if (spec.permission && !assertPermission(req, res, spec.permission)) return;
 
     const rows = await spec.load(req.orgId);
     const stamp = new Date().toISOString().slice(0, 10);

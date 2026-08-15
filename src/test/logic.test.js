@@ -822,6 +822,7 @@ test('sanitizeStateForModel strips name, phone and email from every row before i
 
 test('resolveRefs turns the model\'s ref-only response back into one with real names', () => {
   const nameByRef = new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo'], ['BUYER_2', 'Mr Bello']]);
+  const idByRef = new Map([['BUYER_1', 'cust-1'], ['BUYER_2', 'cust-2']]);
   const modelResponse = {
     summary: 'BUYER_1 is 40 days behind; BUYER_2 is current.',
     risks: [{ customer_ref: 'BUYER_1', reason: 'missed two installments', severity: 'high' }],
@@ -835,11 +836,13 @@ test('resolveRefs turns the model\'s ref-only response back into one with real n
     recommendations: [{ title: 'Call BUYER_1 about the missed installment', reservation_id: 'r1' }],
   };
 
-  const resolved = resolveRefs(modelResponse, nameByRef);
+  const resolved = resolveRefs(modelResponse, nameByRef, idByRef);
 
   assert.strictEqual(resolved.risks[0].customer_name, 'Mrs Adeyemi Okonkwo');
+  assert.strictEqual(resolved.risks[0].customer_id, 'cust-1', 'customer_id travels alongside customer_name for the frontend to link to');
   assert.ok(!('customer_ref' in resolved.risks[0]), 'the raw ref must not leak into the stored brief');
   assert.strictEqual(resolved.follow_ups[0].customer_name, 'Mrs Adeyemi Okonkwo');
+  assert.strictEqual(resolved.follow_ups[0].customer_id, 'cust-1');
   assert.match(resolved.follow_ups[0].whatsapp_draft, /Dear Mrs Adeyemi Okonkwo,/);
   assert.match(resolved.follow_ups[0].email_subject, /Mrs Adeyemi Okonkwo/);
   assert.match(resolved.follow_ups[0].email_draft, /Dear Mrs Adeyemi Okonkwo,/);
@@ -853,11 +856,13 @@ test('resolveRefs turns the model\'s ref-only response back into one with real n
 
 test('resolveRefs falls back to a safe phrase for a ref the model invents or drops', () => {
   const nameByRef = new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo']]);
+  const idByRef = new Map([['BUYER_1', 'cust-1']]);
   const resolved = resolveRefs({
     risks: [{ customer_ref: 'BUYER_9', reason: 'unrecognized ref', severity: 'low' }],
     follow_ups: [], recommendations: [], summary: '',
-  }, nameByRef);
+  }, nameByRef, idByRef);
   assert.strictEqual(resolved.risks[0].customer_name, 'this buyer');
+  assert.strictEqual(resolved.risks[0].customer_id, null, 'an unrecognized ref must not resolve to some OTHER buyer\'s id');
 });
 
 // ── Rental tenancies ─────────────────────────────────────────────────────
@@ -1741,19 +1746,50 @@ test('computeFromHistory scores a buyer with no history at all as a perfect 100'
   assert.strictEqual(breakdown.default_history.points, WEIGHTS.defaults);
 });
 
-test('computeFromHistory: payment consistency is on-time paid ÷ everything that has actually come due', () => {
+test('computeFromHistory: payment consistency is paid ÷ (paid + overdue + pending past due)', () => {
+  // TASK 2.15 — the "future" pending row is 2099, not a date inside this
+  // fixture's other rows' 2026 run, on purpose: isPastDue() now actually
+  // reads this row's date (the bug fix below), so a date that was future
+  // when this fixture was written but has since become the past would
+  // silently pull that row into the past-due bucket and break this test
+  // out from under whoever runs it later.
   const rows = [
-    schedRow('paid', '2026-01-01', '2026-01-01'),   // on time
-    schedRow('paid', '2026-02-01', '2026-02-05'),    // paid, but after due_date — a default event
-    schedRow('overdue', '2026-03-01', null),          // currently overdue — due, and a default event
-    schedRow('pending', '2026-04-01', null),          // not yet due — counts toward neither side
+    schedRow('paid', '2026-01-01', '2026-01-01'),   // on time — paid, counts toward the numerator
+    schedRow('paid', '2026-02-01', '2026-02-05'),    // paid late — STILL counts toward the numerator (it's paid), but is still a default event
+    schedRow('overdue', '2026-03-01', null),          // currently overdue — due, unresolved, a default event
+    schedRow('pending', '2099-01-01', null),          // genuinely not yet due — counts toward neither side
   ];
   const { breakdown } = computeFromHistory({ reservations: [reservation('none', rows)], promises: [] });
-  assert.strictEqual(breakdown.payment_consistency.total_due, 3);
-  assert.strictEqual(breakdown.payment_consistency.on_time, 1);
-  // round(40 * 1/3) = 13
-  assert.strictEqual(breakdown.payment_consistency.points, Math.round(WEIGHTS.consistency * (1 / 3)));
+  assert.strictEqual(breakdown.payment_consistency.total_due, 3, 'denominator is paid + overdue, the not-yet-due pending row excluded');
+  assert.strictEqual(breakdown.payment_consistency.on_time, 2, 'numerator is every PAID row, including the one paid late');
+  // round(40 * 2/3) = 27
+  assert.strictEqual(breakdown.payment_consistency.points, Math.round(WEIGHTS.consistency * (2 / 3)));
+  // The late-paid row and the overdue row are still each a default event —
+  // "paid" and "was ever late" are tracked separately; this dimension
+  // getting more lenient about eventual payment does not erase the lateness.
   assert.strictEqual(breakdown.default_history.default_events, 2);
+});
+
+test('computeFromHistory: a pending row past its due date counts as due, even though the sweep has not marked it overdue yet', () => {
+  // TASK 2.15 — the actual bug: markOverdue only runs once (twice) a day, so
+  // there is always a window where an installment's due_date has passed but
+  // its status column still reads 'pending'. The old formula only ever
+  // looked at status, so a buyer sitting in that window scored as if
+  // nothing were wrong at all — this is what closes that gap.
+  const rows = [schedRow('pending', '2020-01-01', null)]; // due date is unambiguously in the past
+  const { breakdown } = computeFromHistory({ reservations: [reservation('none', rows)], promises: [] });
+  assert.strictEqual(breakdown.payment_consistency.total_due, 1, 'a pending-but-past-due row must count as due');
+  assert.strictEqual(breakdown.payment_consistency.on_time, 0);
+  assert.strictEqual(breakdown.payment_consistency.points, 0);
+  assert.strictEqual(breakdown.default_history.default_events, 1, 'and as a default event, the same as an overdue row');
+});
+
+test('computeFromHistory: a buyer with 16 overdue installments against 8 paid scores below 60', () => {
+  var rows = [];
+  for (var i = 0; i < 8; i++) rows.push(schedRow('paid', '2026-01-01', '2026-01-01'));
+  for (var j = 0; j < 16; j++) rows.push(schedRow('overdue', '2026-02-01', null));
+  const { score } = computeFromHistory({ reservations: [reservation('legal', rows)], promises: [] });
+  assert.ok(score < 60, `expected a score below 60 for 16 overdue against 8 paid, got ${score}`);
 });
 
 test('computeFromHistory: promise reliability ignores open and cancelled promises', () => {

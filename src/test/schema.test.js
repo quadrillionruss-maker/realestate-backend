@@ -34,7 +34,7 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -69,7 +69,7 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -86,7 +86,7 @@ function check(name, cond, detail) {
     'parent_organizations', 're_construction_milestones', 're_customer_referrals', 're_forecasts', 're_plan_recommendations', 're_document_templates',
     're_agent_actions', 're_market_intel_reports', 're_activities', 're_hardship_requests', 're_messages', 're_legal_cases', 're_financing_requests',
     're_handover_checklists', 're_snagging_items', 're_contractors', 're_contractor_payments',
-    're_community_posts', 're_community_replies', 're_project_health'];
+    're_community_posts', 're_community_replies', 're_project_health', 're_cron_runs'];
 
   for (const t of granted) {
     const [{ ok }] = await q(
@@ -122,7 +122,7 @@ function check(name, cond, detail) {
     'parent_organizations', 're_construction_milestones', 're_customer_referrals', 're_forecasts', 're_plan_recommendations', 're_document_templates',
     're_agent_actions', 're_market_intel_reports', 're_activities', 're_hardship_requests', 're_messages', 're_legal_cases',
     're_financing_requests', 're_handover_checklists', 're_snagging_items', 're_contractors', 're_contractor_payments',
-    're_community_posts', 're_community_replies', 're_project_health',
+    're_community_posts', 're_community_replies', 're_project_health', 're_cron_runs', 're_admin_actions',
   ];
   for (const t of expected) {
     check(`table ${t} exists`, tables.includes(t), `have: ${tables.join(', ')}`);
@@ -2084,6 +2084,78 @@ function check(name, cond, detail) {
       [userId, projectId]);
   } catch (err) { outOfRangeScoreRefused = /check/i.test(err.message); }
   check('health_score is constrained to 0-100', outOfRangeScoreRefused);
+
+  // ── Admin dashboard (migrations/039) ─────────────────────────────────────
+  const cronCols = await colsOf('re_cron_runs');
+  check('re_cron_runs has the columns the app selects',
+    ['job_name', 'started_at', 'finished_at', 'orgs_processed', 'errors', 'created_at']
+      .every((c) => cronCols.includes(c)), cronCols.join(', '));
+
+  const [{ id: cronRunId }] = await q(
+    `insert into re_cron_runs (job_name) values ('daily_brief') returning id`);
+  check('a cron run round-trips and starts unfinished', !!cronRunId);
+
+  const [{ finished_at: stillRunning }] = await q(
+    `select finished_at from re_cron_runs where id = $1`, [cronRunId]);
+  check('a fresh cron run has no finished_at', stillRunning === null);
+
+  await q(`update re_cron_runs set finished_at = now(), orgs_processed = 3 where id = $1`, [cronRunId]);
+  const [{ orgs_processed: orgsProcessed }] = await q(
+    `select orgs_processed from re_cron_runs where id = $1`, [cronRunId]);
+  check('a cron run records how many orgs it processed once finished', orgsProcessed === 3);
+
+  // admin_wipe_organization — exercised against the SAME fixture org every
+  // assertion above this point has been building up (userId), deliberately
+  // last: nothing in this file reads that data again after this point, and
+  // this is the one function in the whole product whose entire job is
+  // deleting rows a normal soft-delete pass would never touch (re_audit_log
+  // included) — see migrations/039_admin.sql's own header for why.
+  const [{ 'count': projectsBefore }] = await q(
+    `select count(*)::int from re_projects where organization_id = $1`, [userId]);
+  check('fixture org has projects before the wipe (sanity check)', projectsBefore > 0);
+
+  const [{ admin_wipe_organization: wipeCounts }] = await q(
+    `select admin_wipe_organization($1) as admin_wipe_organization`, [userId]);
+  check('admin_wipe_organization returns a count per table', wipeCounts && typeof wipeCounts === 'object');
+
+  const [{ 'count': projectsAfter }] = await q(
+    `select count(*)::int from re_projects where organization_id = $1`, [userId]);
+  check('admin_wipe_organization actually deletes the org\'s projects', projectsAfter === 0);
+
+  const [{ 'count': auditAfter }] = await q(
+    `select count(*)::int from re_audit_log where organization_id = $1`, [userId]);
+  check('admin_wipe_organization deletes the org\'s audit log too — nothing is left to be evidence for', auditAfter === 0);
+
+  // ── re_admin_actions (migrations/040) — TASK 3 AUDIT FIX ────────────────
+  // The platform-level trace admin_wipe_organization cannot reach, since it
+  // is not scoped to any single organization_id the way every wiped table
+  // above is. Exercised AFTER the wipe above specifically to prove that:
+  // even though target_org_id here equals userId (the org just deleted by
+  // every table above), this row is untouched by that deletion.
+  const adminActionCols = await colsOf('re_admin_actions');
+  check('re_admin_actions has the columns adminService selects/inserts',
+    ['action', 'target_org_id', 'target_user_email', 'summary', 'metadata', 'created_at']
+      .every((c) => adminActionCols.includes(c)), adminActionCols.join(', '));
+
+  const [{ id: adminActionId }] = await q(
+    `insert into re_admin_actions (action, target_org_id, target_user_email, summary)
+     values ('admin.workspace_hard_deleted', $1, 'buyer@example.com', 'test trace') returning id`,
+    [userId]);
+  check('an admin action round-trips', !!adminActionId);
+
+  const [{ 'count': adminActionSurvives }] = await q(
+    `select count(*)::int from re_admin_actions where target_org_id = $1`, [userId]);
+  check('a re_admin_actions row survives admin_wipe_organization for the same org — the whole point of this table',
+    adminActionSurvives > 0);
+
+  const [{ ok: adminActionsGrant }] = await q(
+    `select has_table_privilege('service_role', 'public.re_admin_actions', 'select')
+        and has_table_privilege('service_role', 'public.re_admin_actions', 'insert') as ok`);
+  check('service_role can read and write re_admin_actions', adminActionsGrant);
+
+  const [{ noUpdate }] = await q(
+    `select not has_table_privilege('service_role', 'public.re_admin_actions', 'update') as "noUpdate"`);
+  check('re_admin_actions is append-only — even service_role cannot update a row once written', noUpdate);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

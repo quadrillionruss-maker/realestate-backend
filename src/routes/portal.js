@@ -251,4 +251,15 @@ router.delete('/community/post/:postId', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// TASK 3 AUDIT FIX (Important #13) — a buyer flagging someone ELSE's post
+// for staff review. Files a task and an audit entry; never deletes or hides
+// anything itself (moderateDelete/setPinned above remain the only actions
+// that do).
+router.post('/community/post/:postId/report', async (req, res, next) => {
+  try {
+    const data = await community.reportPost(req.customer, req.params.postId, req.body?.reason);
+    res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
 module.exports = router;

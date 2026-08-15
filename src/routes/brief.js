@@ -1,8 +1,25 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission } = require('../middleware/rbac');
 const { generateDailyBrief } = require('../services/aiBrief');
 const router = express.Router();
+
+// TASK 3 AUDIT FIX (Important #4) — every regenerate is a real, paid OpenAI
+// call (screens.js's own comment on the button: "one AI call"). Without
+// this, brief.generate had nothing but the generic 600/15min global budget
+// standing between an owner/sales_director-level account (compromised or
+// just script-happy) and hundreds of model calls in one window — the same
+// cost-abuse shape routes/reports.js's own exportLimiter already exists to
+// stop for exports. Keyed per user, not per IP, same reasoning.
+const briefGenerateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: 'Too many brief regenerations. Wait a few minutes and try again.' },
+});
 
 // Owner and Sales Director only — Collections gets an overdue-focused
 // dashboard instead (routes/dashboard.js), and Sales Executive/Documentation
@@ -38,7 +55,7 @@ router.get('/history', requirePermission('brief.read'), async (req, res, next) =
 // Regenerate now — used by the dashboard's refresh button and after recording
 // payments, when this morning's brief is already stale. Upserts on
 // (organization_id, brief_date), so today's brief is replaced, not duplicated.
-router.post('/generate', requirePermission('brief.generate'), async (req, res, next) => {
+router.post('/generate', briefGenerateLimiter, requirePermission('brief.generate'), async (req, res, next) => {
   try {
     const brief = await generateDailyBrief(req.orgId);
     res.json(brief);

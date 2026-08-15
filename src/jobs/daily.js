@@ -34,6 +34,38 @@ const marketIntelAgent = require('../services/marketIntelAgent');
 
 const SCHEDULE = env.cron.schedule;
 
+// TASK 1 — one row per run, so the admin dashboard's Health section can show
+// "last run 14 minutes ago" instead of nothing. Never lets recording itself
+// fail the job it's timing — a missed audit row is a much smaller problem
+// than an installment sweep that silently stopped running because writing
+// to re_cron_runs threw.
+async function startCronRun(jobName) {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('re_cron_runs')
+      .insert({ job_name: jobName })
+      .select('id')
+      .single();
+    if (error) throw error;
+    return data.id;
+  } catch (err) {
+    console.warn(`[re-daily] could not record start of ${jobName} run:`, err.message);
+    return null;
+  }
+}
+
+async function finishCronRun(runId, { orgsProcessed = null, errors = [] } = {}) {
+  if (!runId) return;
+  try {
+    await supabaseAdmin
+      .from('re_cron_runs')
+      .update({ finished_at: new Date().toISOString(), orgs_processed: orgsProcessed, errors })
+      .eq('id', runId);
+  } catch (err) {
+    console.warn('[re-daily] could not record finish of cron run:', err.message);
+  }
+}
+
 // One org's OpenAI call running slow (a real, ordinary state — not a rare
 // hard-down) used to delay every org queued behind it in a strictly serial
 // loop; this runs up to `limit` orgs at once instead. The file's own header
@@ -220,6 +252,28 @@ async function runEveningSweep() {
   return { flipped, promises, escalations };
 }
 
+// TASK 1 — wraps a scheduled run (not every direct call of runDailyJob/
+// runEveningSweep, which tests and smoke scripts also make) with a
+// re_cron_runs row, so the admin dashboard's Health section has something to
+// read. Recording itself never affects the job's own outcome: start/finish
+// are both best-effort (see startCronRun/finishCronRun above), and the
+// original .catch()-and-log behaviour for the job itself is unchanged —
+// this only adds the row, it does not change what happens on failure.
+async function recordedRun(jobName, fn) {
+  const runId = await startCronRun(jobName);
+  let orgsProcessed = null;
+  const errors = [];
+  try {
+    const result = await fn();
+    orgsProcessed = typeof result?.orgs === 'number' ? result.orgs : null;
+  } catch (err) {
+    errors.push(err.message);
+    throw err;
+  } finally {
+    await finishCronRun(runId, { orgsProcessed, errors });
+  }
+}
+
 let task = null;
 let eveningTask = null;
 
@@ -231,11 +285,11 @@ function start() {
   if (task) return task; // require() is cached, but guard double-registration
 
   task = cron.schedule(SCHEDULE, () => {
-    runDailyJob().catch((err) => console.error('[re-daily] job failed:', err.message));
+    recordedRun('daily_brief', runDailyJob).catch((err) => console.error('[re-daily] job failed:', err.message));
   }, { timezone: 'Africa/Lagos' });
 
   eveningTask = cron.schedule(EVENING_SCHEDULE, () => {
-    runEveningSweep().catch((err) => console.error('[re-evening] sweep failed:', err.message));
+    recordedRun('evening_sweep', runEveningSweep).catch((err) => console.error('[re-evening] sweep failed:', err.message));
   }, { timezone: 'Africa/Lagos' });
 
   console.log(`[re-daily] scheduled "${SCHEDULE}" Africa/Lagos (brief)`);

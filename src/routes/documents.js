@@ -1,9 +1,25 @@
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { generateDocument, getDownloadUrl, SIGNABLE_DOC_TYPES, getLegalTemplateHtml } = require('../services/documentService');
 const { audit } = require('../services/auditService');
 const router = express.Router();
+
+// TASK 3 AUDIT FIX (Important #6) — pdfAdapter.js renders through a real
+// headless Chromium per call (Puppeteer), CPU/memory-heavy in a way list/
+// download/status routes on this same file are not. Same reasoning and
+// shape as briefGenerateLimiter/importLimiter: nothing but the generic
+// 600/15min global budget stood between a documents.generate-level account
+// and repeatedly spinning up Chromium.
+const generateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: 'Too many document generations. Wait a few minutes and try again.' },
+});
 
 // lease_agreement joins the enum on the same footing deed_of_assignment has
 // held since v1: a real, creatable doc_type with no template yet.
@@ -109,7 +125,7 @@ router.post('/', requirePermission('documents.create'), async (req, res, next) =
 // and return a short-lived signed URL. Owner, Sales Director or
 // Documentation only — a Sales Executive can request a document above but
 // never issues one themselves.
-router.post('/:id/generate', requirePermission('documents.generate'), async (req, res, next) => {
+router.post('/:id/generate', generateLimiter, requirePermission('documents.generate'), async (req, res, next) => {
   try {
     const result = await generateDocument(req.orgId, req.params.id);
 

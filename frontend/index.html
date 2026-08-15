@@ -10,7 +10,7 @@
   <!-- Favicon as an inline SVG data URI: no extra file, no extra request, and
        no 404 in the console. The gold diamond on an indigo square is the same
        brand mark as the sidebar and the gate. -->
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234F46E5'/%3E%3Cpath d='M16 7l7 9-7 9-7-9z' fill='%23c9a45c'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231E4F63'/%3E%3Cpath d='M16 7l7 9-7 9-7-9z' fill='%23c9a45c'/%3E%3C/svg%3E">
   <link rel="apple-touch-icon" href="./apple-touch-icon.png">
 
   <!-- This URL gets pasted into WhatsApp constantly. Without these it previews
@@ -23,23 +23,31 @@
   <meta property="og:site_name" content="Archta">
   <meta property="og:title" content="Archta — Real Estate Intelligence">
   <meta property="og:description" content="Installment sales, allocations and collections for property developers — with a brief on your desk at 7am telling you who has fallen behind.">
+  <!-- TODO: og:image, og:url and server.js's own PRODUCTION_ORIGINS all
+       point at realestate-frontend-pi.vercel.app — every one of them needs
+       the same update, in the same commit, the day archta.io goes live.
+       Nothing in this repo can confirm on its own whether that Vercel URL
+       is still this deployment's real domain; verify against the actual
+       Vercel project before changing it. -->
   <meta property="og:image" content="https://realestate-frontend-pi.vercel.app/og.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <!-- Placeholder — archta.io is not live yet. Update once it is. -->
   <meta property="og:url" content="https://archta.io">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="theme-color" content="#4F46E5">
+  <meta name="theme-color" content="#1E4F63">
 
-  <!-- Inter carries every UI surface now (realestate.css's --sans). Playfair
-       Display is loaded for exactly one element in the whole product — the
-       four-line tagline on the gate's brand panel (.gate-headline-line) —
-       nothing else references it. IBM Plex Mono is untouched: every money
-       figure in the app still renders in it. portal.html imports the same
-       two (no Playfair Display — the portal never shows the tagline). -->
+  <!-- Public Sans carries every UI surface now (realestate.css's --sans) —
+       built for U.S. federal digital-records systems, the same job this
+       product does for a developer's paper trail, and not the default
+       everyone else's AI-generated dashboard also reaches for. Archivo
+       Black is loaded for headline moments only (--display): the greeting,
+       page titles, the gate — never body text. IBM Plex Mono is untouched:
+       every money figure in the app still renders in it. portal.html and
+       sign.html import the same three. -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&family=Playfair+Display:ital,wght@0,900;1,900&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Archivo+Black&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./realestate.css">
 
   <!-- Sets window.__API_BASE__. A separate file rather than an inline block
@@ -62,14 +70,15 @@
     <div class="gate-mark"><i>◆</i> ARCHTA</div>
 
     <div>
-      <!-- Four independently-styled lines — not achievable with one <em> run
-           inside a single heading — so this is the one disclosed HTML change
-           in an otherwise CSS-only redesign. -->
+      <!-- Three independently-styled lines — not achievable with one <em> run
+           inside a single heading — so this is one of the few disclosed HTML
+           changes in this pass. The middle line dims, the same device the
+           previous version of this tagline used; only the typeface, weight
+           and copy changed. -->
       <h1 class="gate-headline">
-        <span class="gate-headline-line">Every</span>
-        <span class="gate-headline-line is-dim">naira,</span>
-        <span class="gate-headline-line is-italic">accounted</span>
-        <span class="gate-headline-line">for.</span>
+        <span class="gate-headline-line">Every plot,</span>
+        <span class="gate-headline-line is-dim">every naira,</span>
+        <span class="gate-headline-line">on record.</span>
       </h1>
       <p class="gate-blurb">
         Installment sales, allocations and collections for property developers —
@@ -164,8 +173,8 @@
         <div class="field">
           <label for="reg-password">Password</label>
           <input class="input" id="reg-password" type="password" required autocomplete="new-password"
-                 placeholder="At least 8 characters">
-          <p class="field-hint">Minimum 8 characters. Longer beats complicated.</p>
+                 placeholder="At least 12 characters">
+          <p class="field-hint">Minimum 12 characters. Longer beats complicated.</p>
         </div>
 
         <p class="field-error hidden" id="reg-error" role="alert"></p>
@@ -198,7 +207,7 @@
         <div class="field">
           <label for="reset-password">New password</label>
           <input class="input" id="reset-password" type="password" required autocomplete="new-password"
-                 placeholder="At least 8 characters">
+                 placeholder="At least 12 characters">
         </div>
 
         <p class="field-error hidden" id="reset-error" role="alert"></p>

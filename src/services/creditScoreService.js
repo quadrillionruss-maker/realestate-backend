@@ -25,6 +25,7 @@
 // record" reads as "no problem on record", not as a penalty for being new.
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { STAGES, describeStage } = require('./escalationService');
+const { isPastDue } = require('./overdueService');
 
 const WEIGHTS = { consistency: 40, promises: 20, response: 20, defaults: 20 };
 
@@ -87,23 +88,46 @@ function computeFromHistory({ reservations, promises, hardshipCount = 0 }) {
       for (const row of plan.re_installment_schedule || []) {
         if (row.status === 'paid') {
           dueCount += 1;
+          onTimeCount += 1; // TASK 2.15 — the denominator now includes every paid row, not just on-time ones (see below)
           // Dates only — paid_at is a timestamp, due_date a plain date;
           // comparing the date portion is what "on time" means here, not
-          // "before midnight down to the second".
+          // "before midnight down to the second". Still tracked as a
+          // default event even though it now also counts as "paid" above —
+          // paying late is still a default, it just isn't an UNRESOLVED one.
           const paidOnDate = String(row.paid_at || '').slice(0, 10);
           const dueDate = row.due_date;
-          if (paidOnDate && dueDate && paidOnDate <= dueDate) onTimeCount += 1;
-          else defaultEvents += 1; // paid, but after its own due date
+          if (!(paidOnDate && dueDate && paidOnDate <= dueDate)) defaultEvents += 1;
         } else if (row.status === 'overdue') {
           dueCount += 1;
           defaultEvents += 1;
+        } else if (row.status === 'pending' && isPastDue(row.due_date)) {
+          // TASK 2.15 — the bug: a row whose due_date has passed the 18:00
+          // Lagos cutoff (overdueService.isPastDue, the same rule
+          // markOverdue itself sweeps by) but that sweep has not yet run
+          // against was previously invisible to this whole dimension —
+          // neither due nor paid, so a buyer could rack up days of
+          // unrecorded lateness and still show a perfect consistency score
+          // in the gap between "the payment missed its due date" and
+          // "tonight's/tomorrow's cron catches up". Counted here exactly
+          // like an 'overdue' row: due, unresolved, a default event.
+          dueCount += 1;
+          defaultEvents += 1;
         }
-        // 'pending' and 'waived' rows are neither on-time nor late — they
-        // have not (or will not) come due at all.
+        // A 'pending' row not yet past due, and a 'waived' row, are neither
+        // paid nor late — they have not (or will not) come due at all.
       }
     }
   }
 
+  // "on_time"/"total_due" are the field names financingService.js's
+  // eligibility check already reads (breakdown.payment_consistency.on_time /
+  // .total_due) — kept as-is rather than renamed, but on_time's own meaning
+  // has shifted: it is every PAID installment now (paid.count above),
+  // divided by every installment that has actually come due (paid +
+  // overdue + pending-past-due), matching the product spec's formula
+  // exactly. A late-paid installment still counts against defaultEvents
+  // above; it is simply no longer invisible to this ratio the way an
+  // unswept pending-past-due row used to be.
   const consistencyRatio = dueCount ? onTimeCount / dueCount : 1;
   const consistencyPoints = Math.round(WEIGHTS.consistency * consistencyRatio);
 

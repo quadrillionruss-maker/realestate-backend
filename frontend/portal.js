@@ -125,6 +125,18 @@
     return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-NG', { day: 'numeric', month: 'long', year: 'numeric' });
   }
 
+  // TASK 2.9/2.12 — same formatter as screens.js's formatDocType, duplicated
+  // rather than imported: this file shares no JS with the operator app by
+  // design (see this file's own header).
+  var DOC_TYPE_MINOR_WORDS = { of: 1, and: 1, the: 1 };
+  function formatDocType(type) {
+    return String(type || '').replace(/_/g, ' ').split(' ').map(function (word, i) {
+      if (!word) return word;
+      if (i > 0 && DOC_TYPE_MINOR_WORDS[word.toLowerCase()]) return word.toLowerCase();
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    }).join(' ');
+  }
+
   // "142 days left" reads faster than doing the subtraction from a date
   // stamped at the top of the same card.
   function daysUntil(dateStr) {
@@ -382,7 +394,7 @@
               account.documents.map(function (d) {
                 return '<div class="task">' +
                   '<div class="task-body"><div class="task-title">' +
-                    esc(String(d.doc_type).replace(/_/g, ' ')) + '</div>' +
+                    esc(formatDocType(d.doc_type)) + '</div>' +
                     '<div class="task-meta">' + esc(fmtDate(d.generated_at)) + '</div></div>' +
                   '<button class="btn-quiet" data-doc="' + esc(d.id) + '">Download</button>' +
                 '</div>';
@@ -499,7 +511,9 @@
             '<div class="mt-1">' + esc(p.content) + '</div>' +
             (p.customer_id === communityOwnCustomerId
               ? '<button class="btn-quiet mt-1" data-community-delete="' + esc(p.id) + '">Delete</button>'
-              : '') +
+              // TASK 3 AUDIT FIX (Important #13) — reporting is only offered on
+              // someone ELSE's post; reporting your own has no sensible meaning.
+              : '<button class="btn-quiet mt-1" data-community-report="' + esc(p.id) + '">Report</button>') +
             (p.replies.length
               ? '<div class="mt-1 community-replies">' + p.replies.map(function (r) {
                   return '<div class="mt-1"><b class="fs-12">' + esc(r.author_name) + '</b> ' +
@@ -1057,6 +1071,29 @@
         try {
           await api('/community/post/' + button.dataset.communityDelete, { method: 'DELETE' });
           await loadCommunity();
+        } catch (err) {
+          toast(err.message, 'err');
+          button.disabled = false;
+        }
+      });
+    });
+
+    // TASK 3 AUDIT FIX (Important #13) — same window.prompt pattern already
+    // used elsewhere in this file (the payment-receipt email fallback) rather
+    // than a new modal component for a single optional text field.
+    Array.prototype.forEach.call(document.querySelectorAll('[data-community-report]'), function (button) {
+      button.addEventListener('click', async function () {
+        // null (not '') specifically means Cancel — window.prompt's only way
+        // to distinguish "dismissed the dialog" from "submitted it blank".
+        var reason = window.prompt('Optional: say why you\'re reporting this post (leave blank to skip).');
+        if (reason === null) return;
+        button.disabled = true;
+        try {
+          await api('/community/post/' + button.dataset.communityReport + '/report', {
+            method: 'POST', body: JSON.stringify({ reason: reason }),
+          });
+          toast('Reported. The developer\'s team will review it.', 'ok');
+          button.textContent = 'Reported';
         } catch (err) {
           toast(err.message, 'err');
           button.disabled = false;

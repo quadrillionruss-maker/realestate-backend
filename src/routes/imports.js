@@ -23,6 +23,7 @@
 // needs before trusting a spreadsheet they last edited in 2024.
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission } = require('../middleware/rbac');
 const { parseCsvToObjects, parseAmount, parseDate } = require('../utils/csv');
@@ -31,6 +32,22 @@ const { audit } = require('../services/auditService');
 const router = express.Router();
 
 const MAX_ROWS = 1000;
+
+// TASK 3 AUDIT FIX (Important #5) — a full MAX_ROWS import does roughly nine
+// sequential Supabase calls per row (this file's own comment further down),
+// so one request can already mean ~9,000 database round trips. Nothing
+// stood between an imports.write-level account and firing that repeatedly
+// beyond the generic 600/15min global budget. Same shape and reasoning as
+// routes/reports.js's exportLimiter and routes/brief.js's
+// briefGenerateLimiter — keyed per user, not per IP.
+const importLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: 'Too many imports. Wait a few minutes and try again.' },
+});
 
 const TEMPLATES = {
   customers: {
@@ -68,7 +85,7 @@ const quote = (value) => /[",\n]/.test(String(value)) ? `"${String(value).replac
 // overrides that default for itself alone, exactly the way the customers
 // import already lets a row's own project name route it, just inverted: here
 // the dropdown wins only when a row is silent, not the other way round.
-router.post('/units', requirePermission('imports.write'), async (req, res, next) => {
+router.post('/units', importLimiter, requirePermission('imports.write'), async (req, res, next) => {
   try {
     const { project_id, csv, dry_run } = req.body || {};
     if (!project_id) return res.status(400).json({ error: 'project_id is required' });
@@ -166,7 +183,7 @@ router.post('/units', requirePermission('imports.write'), async (req, res, next)
 });
 
 // ── Buyers, with their unit, plan and payment history ─────────────────────
-router.post('/customers', requirePermission('imports.write'), async (req, res, next) => {
+router.post('/customers', importLimiter, requirePermission('imports.write'), async (req, res, next) => {
   try {
     const { csv, project_id, dry_run } = req.body || {};
     if (!csv) return res.status(400).json({ error: 'csv is required' });

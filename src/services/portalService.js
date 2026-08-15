@@ -36,6 +36,7 @@ const { contractValue } = require('./restructureService');
 const { getMilestonesForProjects, currentMilestoneSummary } = require('./constructionService');
 const { isEligible: isFinancingEligible } = require('./financingService');
 const { portalNoticeFor } = require('./projectHealthService');
+const { createSignedUrl } = require('./documentStorage');
 
 const PORTAL_AUDIENCE = 're-portal';
 
@@ -331,7 +332,7 @@ async function loadPortalAccount(customer) {
       .in('reservation_id', completedReservationIds);
 
     const checklistIds = (checklists || []).map((c) => c.id);
-    const { data: snagRows } = checklistIds.length
+    const { data: rawSnagRows } = checklistIds.length
       ? await supabaseAdmin
           .from('re_snagging_items')
           .select('id, checklist_id, description, photo_url, status, developer_response, fix_committed_date, fixed_at, created_at')
@@ -339,10 +340,19 @@ async function loadPortalAccount(customer) {
           .order('created_at', { ascending: true })
       : { data: [] };
 
+    // TASK 3 AUDIT FIX (Important #12) — photo_url is a private storage path
+    // now (handoverService.logSnag), never a directly-usable URL. This is
+    // the buyer's own portal load, so it needs the same signed-URL
+    // resolution handoverService.getChecklist already does for staff.
+    const snagRows = await Promise.all((rawSnagRows || []).map(async (row) => ({
+      ...row,
+      photo_url: row.photo_url ? await createSignedUrl(row.photo_url) : null,
+    })));
+
     for (const checklist of checklists || []) {
       checklistsByReservation.set(checklist.reservation_id, {
         ...checklist,
-        snagging_items: (snagRows || []).filter((s) => s.checklist_id === checklist.id),
+        snagging_items: snagRows.filter((s) => s.checklist_id === checklist.id),
       });
     }
   }

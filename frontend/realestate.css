@@ -1,28 +1,35 @@
 /* ══════════════════════════════════════════════════════════════════════════
    ARCHTA — Real Estate Intelligence
-   Indigo fintech. A light, white-surfaced workspace with one deep-indigo
-   sidebar anchoring it and one accent colour carrying every interactive and
-   "selected" state.
+   "Site Register." Built from the instruments of the trade this product
+   actually runs on — a surveyor's benchmark, a permit stamp, a register
+   book — instead of the generic indigo-SaaS palette every AI-generated
+   dashboard reaches for this year. Third pass on this file: the first was
+   black+gold, the second was light indigo (clean, but forgettable — see
+   this file's own git history for the honest verdict), this one keeps the
+   working structure of the second while replacing the two things that
+   actually made it forgettable: the accent itself, and the typeface.
 
    THE IDEA
-   Off-white paper (#F7F8FC, not pure white — a hair of blue keeps large
-   fields of it from glaring), white cards, one indigo accent (#4F46E5) used
-   for every primary action, active state and link. Gold is reserved for
-   exactly two things in the whole product: the ◆ mark in the wordmark, and
-   the Morning Brief card's left rule — everywhere else, colour carries
-   state the way it always has:
+   Warm limestone paper, white cards, one deep cyanotype-blueprint teal
+   (#1E4F63) carrying every primary action, link and "selected" state —
+   the same JOB indigo did, drawn from architectural drafting instead of
+   picked as "a nice blue". Gold is restored as the one rare signature,
+   carried over from every earlier version of this product because it is
+   the detail that already proved it works: the ◆ mark, and the Morning
+   Brief's stamp. Nowhere else.
 
-     accent   the one primary action per screen, links, "selected"
-     moss     money in / positive outcomes
-     warn     needs attention, not yet urgent
-     danger   overdue / broken / failed
-     dim      everything that is merely true
+     blueprint   the one working accent — every button, every link, "selected"
+     gold        rare on purpose — the mark, and the brief's stamp. Nothing else.
+     moss        money in / positive outcomes
+     warn        needs attention, not yet urgent
+     danger      overdue / broken / failed
+     dim         everything that is merely true
 
    WHAT IS DELIBERATELY ABSENT
-   No glassmorphism, no gradient-on-gradient, no neon. A developer managing
-   ₦2bn of other people's money is buying trust and legibility. Restraint is
-   the design — the sidebar's indigo and the brief's gold rule are the two
-   places this palette allows itself a flourish.
+   No glassmorphism, no gradient-on-gradient, no neon, no rounded-lg-
+   everywhere. Hairline borders and small radii do the structural work a
+   drop shadow would elsewhere — closer to a drawing on a table than a
+   floating SaaS card.
 
    STRUCTURE
      1. Tokens          8. Tables
@@ -36,64 +43,72 @@
 
 /* ── 1. Tokens ─────────────────────────────────────────────────────────── */
 :root {
-  /* Surfaces, lightest first. A hair of blue in --bg keeps a large field of
-     it from reading as stark white next to the actual white cards. */
-  --bg:        #F7F8FC;
-  --bg-2:      #F0F1F7;
-  --bg-3:      #E8EAF2;
-  --panel:     #FFFFFF;
-  --panel-2:   #F4F5FA;
-  --panel-3:   #ECEDF5;
+  /* Surfaces, lightest first. Warm limestone, not cream — deliberately not
+     the "warm cream + serif" combination that has become its own cliché. */
+  --bg:        #EEEAE2;
+  --bg-2:      #E7E2D8;
+  --bg-3:      #DFDACD;
+  --panel:     #FBF9F4;
+  --panel-2:   #F2EFE7;
+  --panel-3:   #E9E4D8;
 
-  --line:        #EAEAF2;
-  --line-strong: #D8D9E8;
+  --line:        #DFDACB;
+  --line-strong: #CBC4B0;
   --line-gold:   #E8D5A0;
 
-  --text:       #111827;
-  --text-dim:   #374151;
-  --text-faint: #9CA3AF;
+  --text:       #1D1B17;
+  --text-dim:   #4A463D;
+  --text-faint: #8B8577;
 
   /* Gold survives as exactly two things: the ◆ mark, and the brief card's
-     left rule. Never a background wash, never a general "pending" colour —
-     see badges below, which used to lean on it for that. */
+     stamp. Never a background wash, never a general "pending" colour — see
+     badges below, which now lean on warn/moss/danger/accent for that. */
   --gold:      #C9A45C;
+  --gold-deep: #8A6526;
   --gold-soft: #FEF9EE;
 
-  --accent:       #4F46E5;
-  --accent-2:     #4338CA;
-  --accent-soft:  #EEF2FF;
-  --accent-faint: #F5F7FF;
+  /* The one working accent, replacing indigo. Deep, desaturated cyanotype
+     teal — drafting-table blue, not a SaaS blue. */
+  --accent:       #1E4F63;
+  --accent-2:     #163B4B;
+  --accent-soft:  #E4EEF1;
+  --accent-faint: #EFF5F6;
 
   /* The one surface that stays dark — the sidebar and the gate's brand
-     panel, an indigo island in an otherwise white product. */
-  --sidebar-bg:          #1E1B4B;
-  --sidebar-line:        rgba(255, 255, 255, 0.07);
+     panel, the same blueprint-ink teal as the accent, deepened. */
+  --sidebar-bg:          #163B4B;
+  --sidebar-line:        rgba(255, 255, 255, 0.08);
   --sidebar-text:        rgba(255, 255, 255, 0.58);
   --sidebar-text-active: #FFFFFF;
-  --sidebar-active-bg:   #4F46E5;
+  --sidebar-active-bg:   #1E4F63;
 
-  --danger:      #EF4444;
-  --danger-soft: #FEF2F2;
-  --moss:        #059669;
-  --moss-soft:   #F0FDF4;
-  --warn:        #D97706;
-  --warn-soft:   #FFFBEB;
+  --danger:      #B23A24;
+  --danger-soft: #F7E9E4;
+  --moss:        #2F6B45;
+  --moss-soft:   #E7F1E5;
+  --warn:        #96631C;
+  --warn-soft:   #F5EDD9;
 
   --ink-inv: #FFFFFF;
 
-  /* --serif is Playfair Display now, and it is used in exactly one place:
-     the gate's tagline (see .gate-headline-line). Everything that used to
-     read Fraunces via var(--serif) — page titles, modal titles, the brief
-     body — now reads var(--sans) instead; this app is Inter end to end
-     apart from that one tagline. */
-  --serif: 'Playfair Display', Georgia, serif;
-  --sans:  'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  /* Three faces, each with one job. --display (Archivo Black) is used
+     sparingly — headline moments only (the greeting, page titles, the
+     gate), never body text. --sans (Public Sans) is everything else —
+     built for government records systems, the same job this product does
+     for a developer's paper trail, and about as far from Inter's
+     ubiquity as a legible UI face gets. --mono (IBM Plex Mono) is
+     unchanged from every earlier version — it was already right. */
+  --display: 'Archivo Black', 'Arial Black', sans-serif;
+  --serif: 'Archivo Black', 'Arial Black', sans-serif;
+  --sans:  'Public Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --mono:  'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
   --sidebar-w: 236px;
   --topbar-h: 60px;
-  --radius: 10px;
-  --radius-sm: 6px;
+  /* Smaller, more architectural radii than a default SaaS "rounded-lg" —
+     closer to a stamped permit tag than a soft app icon. */
+  --radius: 4px;
+  --radius-sm: 3px;
 
   /* A white-surfaced product still needs real shadows for anything that
      floats — there is no lighter surface to fall back on the way a dark
@@ -177,10 +192,13 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   font-weight: 600;
 }
 
-/* Kept for the one call site that still wants it (the gate tagline uses its
-   own explicit classes instead, so this is unused there) — every other
-   former .serif call site in this file was moved to var(--sans) directly. */
-.serif { font-family: var(--serif); font-weight: 400; }
+/* --serif is Archivo Black now (a single 900-weight cut, no lighter weight
+   shipped) — used by portal.js/sign.js's own empty-state titles and
+   greeting headline via this class. font-weight:900, not 400: the old
+   value was correct for Fraunces (a variable serif) and is exactly wrong
+   here, since a browser asked for a weight the loaded face doesn't have
+   either falls back out of the font stack or fakes a synthetic thin cut. */
+.serif { font-family: var(--serif); text-transform: uppercase; font-weight: 900; }
 
 /* ── 3. Auth gate ──────────────────────────────────────────────────────── */
 .gate {
@@ -213,7 +231,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   position: absolute;
   inset: -30% -40% auto -20%;
   height: 80%;
-  background: radial-gradient(60% 60% at 30% 30%, rgba(79, 70, 229, 0.28), transparent 70%);
+  background: radial-gradient(60% 60% at 30% 30%, rgba(30, 79, 99, 0.28), transparent 70%);
   pointer-events: none;
 }
 
@@ -223,10 +241,11 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   display: inline-flex;
   align-items: center;
   gap: 11px;
-  font-family: var(--sans);
-  font-weight: 700;
-  font-size: 14px;
-  letter-spacing: 0.03em;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.14em;
   color: var(--sidebar-text-active);
 }
 
@@ -244,26 +263,26 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   flex-shrink: 0;
 }
 
-/* The tagline — Playfair Display, stacked, four lines, the one place in the
-   whole product this typeface appears. Each line is its own element rather
-   than inline markup (<em>, etc.) because each carries an independent
-   colour/weight/style treatment "Every" plain, "naira," dimmed, "accounted"
-   italic, "for." plain — a single run of text with one <em> could not
-   express that. */
+/* The tagline — Archivo Black, stacked, stencilled caps, the same display
+   face as every other headline moment in the product now (greeting,
+   page-title, gate-title). Each line is its own element so the middle one
+   can be dimmed independently — the same device the indigo version used
+   for its own tagline, kept because the STRUCTURE still earns its place;
+   only the typeface and the copy changed. */
 .gate-headline {
   display: flex;
   flex-direction: column;
-  font-family: 'Playfair Display', Georgia, serif;
-  font-size: 38px;
+  font-family: var(--display);
+  text-transform: uppercase;
+  font-size: 34px;
   font-weight: 900;
-  letter-spacing: -1.5px;
-  line-height: 0.95;
+  letter-spacing: -0.5px;
+  line-height: 1.05;
   margin: 0 0 18px;
 }
 
 .gate-headline-line { color: var(--sidebar-text-active); font-weight: 900; }
-.gate-headline-line.is-dim { opacity: 0.45; }
-.gate-headline-line.is-italic { font-style: italic; }
+.gate-headline-line.is-dim { opacity: 0.5; }
 
 .gate-blurb {
   font-family: var(--sans);
@@ -324,9 +343,10 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .gate-card { width: 100%; max-width: 372px; }
 
 .gate-title {
-  font-family: var(--sans);
-  font-size: 27px;
-  font-weight: 700;
+  font-family: var(--display);
+  text-transform: uppercase;
+  font-size: 22px;
+  font-weight: 900;
   letter-spacing: -0.01em;
   margin-bottom: 6px;
 }
@@ -428,10 +448,11 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 }
 
 .page-title {
-  font-family: var(--sans);
-  font-size: 26px;
-  font-weight: 700;
-  letter-spacing: -0.015em;
+  font-family: var(--display);
+  text-transform: uppercase;
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: -0.01em;
 }
 
 .page-sub { color: var(--text-dim); font-size: 13px; margin-top: 3px; }
@@ -461,10 +482,11 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   gap: 10px;
   padding: 18px 18px 16px;
   border-bottom: 1px solid var(--sidebar-line);
-  font-family: var(--sans);
-  font-weight: 700;
-  font-size: 14px;
-  letter-spacing: 0.03em;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.14em;
   color: var(--sidebar-text-active);
 }
 
@@ -793,12 +815,13 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 
 .stat-sub { font-size: 11.5px; color: var(--text-faint); margin-top: 5px; }
 
-/* A rule of state along the top edge. The overdue tile earns a heavier,
-   3px version of this per the product's own colour rule — money that is
-   late is the one figure on this screen that should look different at a
-   glance, not just in its number colour. */
+/* A rule of state along the top edge — for a POSITIVE or highlighted
+   figure. The overdue tile deliberately has no border of its own: its
+   amount is already red (.stat-value.clay below), and a red border on top
+   of red text is double-signalling the same one fact. accent-clay/tone:
+   'clay' still gets applied to the tile (screens.js keeps naming it), it
+   simply paints nothing extra any more. */
 .stat.accent-moss::before,
-.stat.accent-clay::before,
 .stat.accent-gold::before {
   content: '';
   position: absolute;
@@ -806,7 +829,6 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   height: 2px;
 }
 .stat.accent-moss::before { background: var(--moss); }
-.stat.accent-clay::before { height: 3px; background: var(--danger); }
 .stat.accent-gold::before { background: var(--accent); }
 
 /* ── 8. Tables ─────────────────────────────────────────────────────────── */
@@ -1011,7 +1033,7 @@ table.data td.num, table.data th.num {
    tinted twin of primary rather than a second loud colour. */
 .btn.brass {
   background: var(--accent-soft);
-  border: 1px solid rgba(79, 70, 229, 0.2);
+  border: 1px solid rgba(30, 79, 99, 0.2);
   color: var(--accent);
   font-weight: 600;
 }
@@ -1077,12 +1099,14 @@ table.data td.num, table.data th.num {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── 10. Badges, chips, tags ───────────────────────────────────────────── */
+/* Square permit tags, not rounded pills — closer to a stamped status mark
+   than a soft SaaS chip. */
 .badge {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   padding: 2px 8px;
-  border-radius: 20px;
+  border-radius: 2px;
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -1117,7 +1141,7 @@ table.data td.num, table.data th.num {
    workflow, or a post pinned for visibility. Indigo, the same accent as
    every link and primary action, never gold. */
 .badge.generated, .badge.sent, .badge.signed, .badge.pinned {
-  background: var(--accent-soft); color: var(--accent); border-color: rgba(79, 70, 229, 0.24);
+  background: var(--accent-soft); color: var(--accent); border-color: rgba(30, 79, 99, 0.24);
 }
 
 /* Neutral / inert states — nothing due yet, nothing decided, a record no
@@ -1131,7 +1155,7 @@ table.data td.num, table.data th.num {
 /* ── Risk severity, shared by risk-chip and any future severity badge ──── */
 .badge.high { background: var(--danger-soft); color: var(--danger); border-color: #FECACA; }
 .badge.medium { background: var(--warn-soft); color: var(--warn); border-color: #FDE68A; }
-.badge.low { background: var(--accent-soft); color: var(--accent); border-color: rgba(79, 70, 229, 0.24); }
+.badge.low { background: var(--accent-soft); color: var(--accent); border-color: rgba(30, 79, 99, 0.24); }
 
 /* Buyer risk chips in the morning brief — the whole chip is coloured by
    severity now (not just a left rule), and the whole chip is clickable:
@@ -1176,7 +1200,7 @@ table.data td.num, table.data th.num {
   margin-right: 6px;
   border-radius: 3px;
   background: var(--accent-soft);
-  border: 1px solid rgba(79, 70, 229, 0.24);
+  border: 1px solid rgba(30, 79, 99, 0.24);
   color: var(--accent);
   font-family: var(--mono);
   font-size: 9px;
@@ -1250,7 +1274,7 @@ table.data td.num, table.data th.num {
   background: var(--panel);
 }
 
-.modal-title { font-family: var(--sans); font-size: 18px; font-weight: 700; }
+.modal-title { font-family: var(--display); text-transform: uppercase; font-size: 16px; font-weight: 900; }
 .modal-body { padding: 20px; overflow-y: auto; }
 
 .modal-foot {
@@ -1343,10 +1367,11 @@ table.data td.num, table.data th.num {
 .greeting { margin-bottom: 22px; }
 
 .greeting h1 {
-  font-family: var(--sans);
-  font-size: clamp(24px, 3vw, 31px);
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  font-family: var(--display);
+  text-transform: uppercase;
+  font-size: clamp(20px, 2.6vw, 26px);
+  font-weight: 900;
+  letter-spacing: -0.01em;
 }
 
 .greeting-lines { margin-top: 9px; display: flex; flex-wrap: wrap; gap: 6px 18px; }
@@ -1461,6 +1486,10 @@ table.data td.num, table.data th.num {
 
 .record-flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
 
+/* TASK 2.24 — graduated by how late, not a flat red for "1 day" and "3
+   years" alike. Amber up to a month late (still recoverable with one call);
+   red past that; bold red past a year, where recovering the debt at all is
+   in question, not just the tone of the next message. */
 .late-tag {
   display: inline-flex;
   align-items: center;
@@ -1468,24 +1497,26 @@ table.data td.num, table.data th.num {
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--danger);
-  background: var(--danger-soft);
-  border: 1px solid #FECACA;
-  border-radius: 20px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid #FDE68A;
+  border-radius: 2px;
   padding: 2px 8px;
 }
+.late-tag.danger { color: var(--danger); background: var(--danger-soft); border-color: #FECACA; }
+.late-tag.severe { color: var(--danger); background: var(--danger-soft); border-color: #FECACA; font-weight: 700; }
 
 /* A promise the buyer made themselves. Broken reads louder than late,
-   because they chose the date. Indigo for "open" (a neutral, informational
+   because they chose the date. Accent for "open" (a neutral, informational
    commitment on record), danger once broken. */
 .promise-tag {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 11px;
-  border-radius: 20px;
+  border-radius: 2px;
   padding: 2px 9px;
-  border: 1px solid rgba(79, 70, 229, 0.24);
+  border: 1px solid rgba(30, 79, 99, 0.28);
   background: var(--accent-soft);
   color: var(--accent);
 }
@@ -1642,7 +1673,7 @@ table.data td.sched-detail-cell {
 /* Progress meter — how much of a plan the buyer has paid. */
 .meter { height: 5px; border-radius: 3px; background: var(--panel-3); overflow: hidden; }
 .meter > i { display: block; height: 100%; background: var(--moss); border-radius: 3px; transition: width .5s var(--ease); }
-.meter.gold > i { background: var(--accent); }
+.meter.accent > i { background: var(--accent); }
 
 /* Collections chart — bars drawn in CSS, no library, no 40KB of D3 for
    twelve rectangles. */
@@ -1755,7 +1786,7 @@ table.data td.sched-detail-cell {
   margin-bottom: 16px;
 }
 
-.notice.info { background: var(--accent-soft); border-color: rgba(79, 70, 229, 0.24); color: var(--accent); }
+.notice.info { background: var(--accent-soft); border-color: rgba(30, 79, 99, 0.24); color: var(--accent); }
 .notice.ok { background: var(--moss-soft); border-color: #BBF7D0; color: var(--moss); }
 /* A secondary, explanatory note rather than the primary message on screen. */
 .notice.compact { font-size: 12px; }
@@ -1869,11 +1900,12 @@ table.data td.sched-detail-cell {
      so it reads accordingly: indigo wordmark, gold mark. */
   .gate-card-brand {
     display: block;
-    font-family: var(--sans);
-    font-weight: 700;
+    font-family: var(--mono);
+    text-transform: uppercase;
+    font-weight: 600;
     color: var(--accent);
-    font-size: 16px;
-    letter-spacing: 0.02em;
+    font-size: 13px;
+    letter-spacing: 0.12em;
     padding-bottom: 18px;
     margin-bottom: 22px;
     border-bottom: 1px solid var(--line);
@@ -2135,7 +2167,7 @@ table.data td.sched-detail-cell {
   color: var(--text-faint);
 }
 
-.portal-greeting { font-family: var(--sans); font-weight: 700; font-size: 27px; letter-spacing: -.02em; }
+.portal-greeting { font-family: var(--display); text-transform: uppercase; font-weight: 900; font-size: 23px; letter-spacing: -.01em; }
 .portal-empty-body { text-align: center; padding: 44px 22px; }
 .portal-empty-body.sm { padding: 30px 20px; }
 .portal-empty-icon { font-size: 26px; opacity: .3; margin-bottom: 12px; }

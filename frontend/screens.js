@@ -23,6 +23,21 @@
   var esc = R.esc, naira = R.naira, nairaShort = R.nairaShort, fmtDate = R.fmtDate;
   var api = R.api, badge = R.badge, table = R.table, toast = R.toast;
 
+  // TASK 2.9/2.12 — "deed_of_assignment" read as-is once the underscores were
+  // swapped for spaces. Proper title case, except linking words ("of", "and",
+  // "the") after the first position, which stay lowercase — "Deed of
+  // Assignment", not "Deed Of Assignment". A formula rather than a fixed
+  // lookup table so a doc_type added later formats correctly with no code
+  // change here.
+  var DOC_TYPE_MINOR_WORDS = { of: 1, and: 1, the: 1 };
+  function formatDocType(type) {
+    return String(type || '').replace(/_/g, ' ').split(' ').map(function (word, i) {
+      if (!word) return word;
+      if (i > 0 && DOC_TYPE_MINOR_WORDS[word.toLowerCase()]) return word.toLowerCase();
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    }).join(' ');
+  }
+
   // Remembers the project filter across screens, so choosing "Lekki Gardens"
   // on the dashboard does not reset when you go and look at the units.
   //
@@ -31,8 +46,12 @@
   // officer would hand the second person a dashboard silently scoped to the
   // first person's project. realestate.js calls the hook below from signOut().
   var projectFilter = null;
+  // TASK 2.3 — whether the dashboard's "Drafted follow-ups" card is showing
+  // every draft or just the first 5. Same module-level pattern as
+  // projectFilter above, and cleared alongside it for the same reason.
+  var showAllDrafts = false;
 
-  R.resetScreenState = function () { projectFilter = null; expandedScheduleBuyerId = null; };
+  R.resetScreenState = function () { projectFilter = null; expandedScheduleBuyerId = null; showAllDrafts = false; };
 
   // Mirrors src/services/installmentService.js addMonthsUTC exactly: a lease
   // starting 31 Jan renews to 28/29 Feb, not 3 March, which is what native
@@ -421,19 +440,16 @@
       var drafts = (brief && brief.payload && brief.payload.follow_ups) || [];
       var risks = (brief && brief.payload && brief.payload.risks) || [];
 
-      // Buyer-name clickthrough in the brief: the brief's own payload
-      // (risks/follow_ups) carries customer_name but no customer_id, and
-      // this is a visual-only pass with no backend change in scope — so the
-      // id comes from atRisk, the one already-fetched list that has both,
-      // keyed by name. A buyer the brief mentions who isn't in today's
-      // at-risk list (or when the caller can't see at-risk at all) just
-      // doesn't become clickable — no extra request, no guessing.
+      // TASK 2.5 — buyer-name clickthrough in the brief. aiBrief.js now
+      // attaches customer_id alongside customer_name on every risks/
+      // follow_ups entry (aiBrief.js's resolveRefs/buildFallbackBrief), so
+      // this is a direct lookup rather than a guess against a separately-
+      // loaded list — covers every buyer the brief actually mentions, not
+      // just ones that also happen to be in today's at-risk view.
       var buyerIdByName = {};
-      if (canSeeAtRisk) {
-        atRisk.forEach(function (c) {
-          if (c.customer && c.customer.full_name && c.customer.id) buyerIdByName[c.customer.full_name] = c.customer.id;
-        });
-      }
+      risks.concat(drafts).forEach(function (r) {
+        if (r.customer_name && r.customer_id) buyerIdByName[r.customer_name] = r.customer_id;
+      });
 
       var lines = [];
       if (canSeeAtRisk && atRisk.length) lines.push('<span class="greeting-line clay"><b>' + atRisk.length + '</b> ' + (atRisk.length === 1 ? 'buyer needs' : 'buyers need') + ' chasing</span>');
@@ -537,7 +553,7 @@
                 ? '<div class="notice warn mt-1 mb-0">' +
                     '<b>Unsigned documents</b><br>' +
                     brief.payload.high_priority_documents.map(function (d) {
-                      return esc(d.customer_name) + ' — ' + esc(String(d.doc_type).replace(/_/g, ' ')) + ', ' + d.days_unsigned + ' days unsigned';
+                      return esc(d.customer_name) + ' — ' + esc(formatDocType(d.doc_type)) + ', ' + d.days_unsigned + ' days unsigned';
                     }).join('<br>') +
                   '</div>'
                 : '') +
@@ -601,9 +617,21 @@
           '<div>' +
             (canSeeBrief
               ? card('Drafted follow-ups', drafts.length
-                  ? drafts.slice(0, 5).map(draftRow).join('')
+                  ? (showAllDrafts ? drafts : drafts.slice(0, 5)).map(draftRow).join('')
                   : R.emptyState('Nothing to chase today'),
-                  { flush: true })
+                  {
+                    flush: true,
+                    // Expands in place rather than navigating — there is no
+                    // standalone "all drafts" screen the way #/at-risk exists
+                    // for the At risk card, so "See all" toggles the same
+                    // module-level flag projectFilter already uses and
+                    // reloads, same pattern, different variable.
+                    actions: drafts.length > 5
+                      ? (showAllDrafts
+                          ? '<button class="btn-quiet" id="btn-drafts-collapse">Show fewer</button>'
+                          : '<button class="btn-quiet" id="btn-drafts-see-all">See all ' + drafts.length + '</button>')
+                      : '',
+                  })
               : '') +
 
             card('Tasks', tasks.length
@@ -619,6 +647,9 @@
           R.reload();
         });
       });
+
+      R.onClick(view, '#btn-drafts-see-all', function () { showAllDrafts = true; R.reload(); });
+      R.onClick(view, '#btn-drafts-collapse', function () { showAllDrafts = false; R.reload(); });
 
       // R.onClick disables the button for the duration, which is the debounce:
       // a frustrated developer cannot queue twenty model calls by clicking
@@ -726,7 +757,14 @@
       R.plural(c.overdue_count, 'missed payment')].filter(Boolean).map(esc).join(' · ');
 
     var flags = '';
-    if (c.days_late) flags += '<span class="late-tag">' + R.plural(c.days_late, 'day') + ' late</span>';
+    // TASK 2.24 — graduated by how late: 1-30 days reads as amber (the
+    // .late-tag base style), 31-365 as red, 365+ as bold red. The LEGAL
+    // escalation badge just below stays red regardless of day count — that
+    // one signals a stage, not a duration, and the two must not be confused.
+    if (c.days_late) {
+      var lateClass = c.days_late > 365 ? 'late-tag severe' : c.days_late > 30 ? 'late-tag danger' : 'late-tag';
+      flags += '<span class="' + lateClass + '">' + R.plural(c.days_late, 'day') + ' late</span>';
+    }
     if (c.escalation && c.escalation.stage !== 'none') flags += badge(c.escalation.stage);
     if (c.promise) {
       flags += '<span class="promise-tag' + (c.promise.status === 'broken' ? ' broken' : '') + '">' +
@@ -848,7 +886,7 @@
 
   function draftRow(draft, i) {
     return '<div class="draft">' +
-      '<div class="record-name"><span class="tag-ai">AI</span>' + esc(draft.customer_name) + '</div>' +
+      '<div class="record-name"><span class="tag-ai">Auto</span>' + esc(draft.customer_name) + '</div>' +
       '<div class="draft-text" data-draft="' + i + '">' + esc(draft.whatsapp_draft) + '</div>' +
       (draft.email_draft ? '<div class="draft-text hidden" data-draft-email="' + i + '">' + esc(draft.email_draft) + '</div>' : '') +
       '<div class="btn-row">' +
@@ -899,16 +937,24 @@
 
     return '<div class="task">' +
       '<div class="task-body">' +
-        '<div class="task-title">' + (t.source === 'ai' ? '<span class="tag-ai">AI</span>' : '') + esc(t.title) + '</div>' +
+        '<div class="task-title">' + (t.source === 'ai' ? '<span class="tag-ai">Auto</span>' : '') + esc(t.title) + '</div>' +
         (meta ? '<div class="task-meta">' + meta + '</div>' : '') +
       '</div>' +
-      '<button class="btn-quiet" data-done="' + esc(t.id) + '">Done</button>' +
+      '<div class="btn-row">' +
+        '<button class="btn-quiet" data-done="' + esc(t.id) + '">Done</button>' +
+        '<button class="btn-quiet" data-dismiss="' + esc(t.id) + '">Dismiss</button>' +
+      '</div>' +
     '</div>';
   }
 
   function wireTasks(root) {
     R.onClick(root, '[data-done]', async function (button) {
       await api.patch('/tasks/' + button.dataset.done + '/status', { status: 'done' });
+      R.refreshCounts();
+      await R.reload();
+    });
+    R.onClick(root, '[data-dismiss]', async function (button) {
+      await api.patch('/tasks/' + button.dataset.dismiss + '/status', { status: 'dismissed' });
       R.refreshCounts();
       await R.reload();
     });
@@ -998,7 +1044,7 @@
 
   function doneTaskRow(t) {
     return '<div class="task"><div class="task-body">' +
-      '<div class="task-title muted">' + (t.source === 'ai' ? '<span class="tag-ai">AI</span>' : '') + esc(t.title) + '</div>' +
+      '<div class="task-title muted">' + (t.source === 'ai' ? '<span class="tag-ai">Auto</span>' : '') + esc(t.title) + '</div>' +
       '<div class="task-meta">' + esc(fmtDate(t.created_at)) + '</div>' +
     '</div></div>';
   }
@@ -1071,7 +1117,7 @@
           '<div class="page-sub">' + esc(p.location || 'No location set') + '</div></div>' +
           badge(p.status) +
         '</div>' +
-        '<div class="mt-2"><div class="meter gold"><i data-w="' + pct + '"></i></div>' +
+        '<div class="mt-2"><div class="meter accent"><i data-w="' + pct + '"></i></div>' +
           '<div class="units-legend mt-1 fs-11-5">' +
             '<span>' + (p.units_sold || 0) + ' sold</span>' +
             '<span>' + (p.units_reserved || 0) + ' reserved</span>' +
@@ -4079,14 +4125,14 @@
             // re-issues and re-sends one — documentService.generateDocument).
             var signable = ['deed_of_assignment', 'subscriber_agreement', 'power_of_attorney'].indexOf(d.doc_type) !== -1;
             return '<tr>' +
-              '<td class="cell-primary">' + esc(String(d.doc_type).replace(/_/g, ' ')) +
+              '<td class="cell-primary">' + esc(formatDocType(d.doc_type)) +
                 '<div class="cell-meta">' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</div></td>' +
               '<td class="muted hide-mobile">' + esc(unit.unit_number || '—') + '</td>' +
               '<td>' + badge(d.status) + '</td>' +
               '<td class="muted hide-mobile">' + esc(d.generated_at ? fmtDate(d.generated_at) : '—') + '</td>' +
               '<td class="right nowrap">' +
                 (d.status === 'generated' || d.status === 'signed'
-                  ? '<button class="btn-quiet" data-download="' + esc(d.id) + '">Download</button>'
+                  ? '<button class="btn-quiet" data-download="' + esc(d.id) + '">Preview</button>'
                   : '<button class="btn-quiet" data-generate="' + esc(d.id) + '">Generate</button>') +
                 (signable && d.status === 'generated'
                   ? ' <button class="btn-quiet" data-generate="' + esc(d.id) + '">Resend link</button>'
@@ -4923,13 +4969,14 @@
       var tab = query.tab || 'workspace';
 
       var tabs = '<div class="filter-row">' +
-        [['workspace', 'Workspace'], ['team', 'Team & reps'], ['templates', 'Document templates'],
+        [['workspace', 'Workspace'], ['team', 'Team & reps'], ['notifications', 'Notifications'], ['templates', 'Document templates'],
           ['activity', 'Activity log'], ['bin', 'Bin']].map(function (t) {
           return '<a class="pill' + (tab === t[0] ? ' is-on' : '') + '" href="#/settings?tab=' + t[0] + '">' + t[1] + '</a>';
         }).join('') + '</div>';
 
       if (tab === 'activity') return activityTab(view, tabs);
       if (tab === 'team') return teamTab(view, tabs);
+      if (tab === 'notifications') return notificationsTab(view, tabs);
       if (tab === 'templates') return templatesTab(view, tabs);
       if (tab === 'bin') return binTab(view, tabs, query.of || 'customers');
       return workspaceTab(view, tabs);
@@ -4967,7 +5014,7 @@
     var select = R.el('tpl-select');
     select.innerHTML = templates.map(function (t) {
       return '<option value="' + t.doc_type + '">' +
-        t.doc_type.replace(/_/g, ' ') + (t.is_custom ? ' (customized)' : ' (default)') + '</option>';
+        formatDocType(t.doc_type) + (t.is_custom ? ' (customized)' : ' (default)') + '</option>';
     }).join('');
 
     function renderCurrent() {
@@ -5024,7 +5071,7 @@
 
           card('Payments — Paystack',
             (R.can('settings.write')
-              ? '<p class="field-hint mb-2">Optional. Without your own Paystack account, card payments settle into Archta\'s default account and are forwarded to you. Add your own keys to receive them directly.</p>' +
+              ? '<p class="field-hint mb-2">Without your own Paystack keys, buyers cannot pay online. Add your Paystack public and secret keys so payments go directly into your account.</p>' +
                 '<form id="form-paystack">' +
                   '<div class="field"><label for="s-pk-public">Public key</label>' +
                     '<input class="input" id="s-pk-public" name="paystack_public_key" value="' + esc(settings.paystack_public_key || '') + '" placeholder="pk_live_…"></div>' +
@@ -5063,6 +5110,94 @@
         '</div>' +
 
         '<div>' +
+          // SECTION 5/9 — no platform-wide fallback the way Email/SMS have
+          // one (see notificationService.resolveWhatsAppCredentials) — a
+          // workspace without its own Meta Business account simply has no
+          // WhatsApp send capability yet, which is why there is no "Not
+          // configured, sends from the default" wording here.
+          card('WhatsApp',
+            (R.can('settings.write')
+              ? '<p class="field-hint mb-2">From a Meta Business app with WhatsApp Cloud API enabled. Powers referral notifications and the WhatsApp mini app — a buyer messaging this number can check their balance, see their next payment, pay online or get their receipt automatically.</p>' +
+                '<p class="field-hint mb-2">Webhook URL for the Meta App dashboard: <code>' + esc((window.__API_BASE__ || '') + '/webhooks/whatsapp') + '</code></p>' +
+                '<form id="form-whatsapp">' +
+                  '<div class="field"><label for="s-wa-phone">Phone number ID</label>' +
+                    '<input class="input" id="s-wa-phone" name="whatsapp_phone_number_id" value="' + esc(settings.whatsapp_phone_number_id || '') + '"></div>' +
+                  '<div class="field"><label for="s-wa-business">Business account ID</label>' +
+                    '<input class="input" id="s-wa-business" name="whatsapp_business_account_id" value="' + esc(settings.whatsapp_business_account_id || '') + '"></div>' +
+                  '<div class="field"><label for="s-wa-token">Access token</label>' +
+                    '<input class="input" id="s-wa-token" name="whatsapp_token" type="password" autocomplete="off" placeholder="' +
+                      (settings.whatsapp_configured ? 'Configured, ending in ' + esc(settings.whatsapp_token_last4) + ' — leave blank to keep' : 'EAAG…') + '">' +
+                    '<p class="field-hint">Never shown again once saved. Leave blank to keep the current token.</p></div>' +
+                  '<button class="btn primary mt-1" type="submit">Save</button>' +
+                '</form>'
+              : '<p class="muted">' +
+                (settings.whatsapp_configured
+                  ? 'Configured.'
+                  : 'Not configured — referral notifications will not reach buyers over WhatsApp.') +
+                ' Only the workspace owner can change this.</p>')) +
+        '</div>' +
+      '</div>';
+
+    guardedSubmit(R.qs('#form-org', view), async function (form) {
+      await api.put('/settings', R.values(form));
+      toast('Company details saved.', 'ok');
+    });
+
+    // Owner-only cards — absent from the DOM entirely for anyone else, so
+    // these two forms only exist to wire up when they were actually rendered.
+    var paystackForm = R.qs('#form-paystack', view);
+    if (paystackForm) {
+      guardedSubmit(paystackForm, async function (form) {
+        var v = R.values(form);
+        var payload = { paystack_public_key: v.paystack_public_key || null };
+        // Blank means "leave the saved key alone" — the field never shows the
+        // real value again once set, so blank cannot mean "clear it".
+        if (v.paystack_secret_key) payload.paystack_secret_key = v.paystack_secret_key;
+        await api.put('/settings/paystack', payload);
+        toast('Paystack settings saved.', 'ok');
+        R.reload();
+      });
+    }
+
+    guardedSubmit(R.qs('#form-referrals', view), async function (form) {
+      await api.put('/settings', R.values(form));
+      toast('Referral reward saved.', 'ok');
+    });
+
+    R.onClick(view, '#btn-test-paystack', async function () {
+      var secretKey = R.qs('#s-pk-secret', view).value.trim();
+      if (!secretKey) { toast('Enter a secret key to test first.', 'err'); return; }
+      var result = await api.post('/settings/paystack/test', { secret_key: secretKey });
+      toast(result.valid ? 'Paystack key is valid.' : (result.reason || 'Paystack rejected this key.'), result.valid ? 'ok' : 'err');
+    });
+
+    var whatsappForm = R.qs('#form-whatsapp', view);
+    if (whatsappForm) {
+      guardedSubmit(whatsappForm, async function (form) {
+        var v = R.values(form);
+        var payload = {
+          whatsapp_phone_number_id: v.whatsapp_phone_number_id || null,
+          whatsapp_business_account_id: v.whatsapp_business_account_id || null,
+        };
+        if (v.whatsapp_token) payload.whatsapp_token = v.whatsapp_token;
+        await api.put('/settings/whatsapp', payload);
+        toast('WhatsApp settings saved.', 'ok');
+        R.reload();
+      });
+    }
+  }
+
+  // TASK 2.11 — split out of workspaceTab: escalation email, reply-to,
+  // receipt/alert toggles, and the two provider cards (Resend, Termii) that
+  // used to live on the Workspace tab. Every field, every endpoint and every
+  // test button here is unchanged from workspaceTab's own — this is a move,
+  // not a rebuild, since all of it already worked.
+  async function notificationsTab(view, tabs) {
+    var settings = await api('/settings');
+
+    view.innerHTML = head('Settings', 'Who gets told what, and which of your own providers send it.') + tabs +
+      '<div class="grid cols-2">' +
+        '<div>' +
           card('Notifications', '<form id="form-notify">' +
             '<div class="field"><label for="s-md">Escalation email</label>' +
               '<input class="input" id="s-md" name="notify_md_email" type="email" value="' + esc(settings.notify_md_email || '') + '" placeholder="md@company.com">' +
@@ -5083,7 +5218,9 @@
               '<p class="field-hint">Percent. Applied to a new sales rep unless you set theirs individually.</p></div>' +
             '<button class="btn primary mt-1" type="submit">Save preferences</button>' +
           '</form>') +
+        '</div>' +
 
+        '<div>' +
           card('Email',
             (R.can('settings.write')
               ? '<p class="field-hint mb-2">Optional. Without this, receipts, portal links and alerts still send — they just arrive from Archta rather than your own domain.</p>' +
@@ -5130,71 +5267,12 @@
                   ? 'Configured, sender ID ' + esc(settings.termii_sender_id || '—') + '.'
                   : 'Not configured — texts send from Archta\'s default sender ID.') +
                 ' Only the workspace owner can change this.</p>')) +
-
-          // SECTION 5/9 — no platform-wide fallback the way Email/SMS have
-          // one (see notificationService.resolveWhatsAppCredentials) — a
-          // workspace without its own Meta Business account simply has no
-          // WhatsApp send capability yet, which is why there is no "Not
-          // configured, sends from the default" wording here.
-          card('WhatsApp',
-            (R.can('settings.write')
-              ? '<p class="field-hint mb-2">From a Meta Business app with WhatsApp Cloud API enabled. Powers referral notifications and the WhatsApp mini app — a buyer messaging this number can check their balance, see their next payment, pay online or get their receipt automatically.</p>' +
-                '<p class="field-hint mb-2">Webhook URL for the Meta App dashboard: <code>' + esc((window.__API_BASE__ || '') + '/webhooks/whatsapp') + '</code></p>' +
-                '<form id="form-whatsapp">' +
-                  '<div class="field"><label for="s-wa-phone">Phone number ID</label>' +
-                    '<input class="input" id="s-wa-phone" name="whatsapp_phone_number_id" value="' + esc(settings.whatsapp_phone_number_id || '') + '"></div>' +
-                  '<div class="field"><label for="s-wa-business">Business account ID</label>' +
-                    '<input class="input" id="s-wa-business" name="whatsapp_business_account_id" value="' + esc(settings.whatsapp_business_account_id || '') + '"></div>' +
-                  '<div class="field"><label for="s-wa-token">Access token</label>' +
-                    '<input class="input" id="s-wa-token" name="whatsapp_token" type="password" autocomplete="off" placeholder="' +
-                      (settings.whatsapp_configured ? 'Configured, ending in ' + esc(settings.whatsapp_token_last4) + ' — leave blank to keep' : 'EAAG…') + '">' +
-                    '<p class="field-hint">Never shown again once saved. Leave blank to keep the current token.</p></div>' +
-                  '<button class="btn primary mt-1" type="submit">Save</button>' +
-                '</form>'
-              : '<p class="muted">' +
-                (settings.whatsapp_configured
-                  ? 'Configured.'
-                  : 'Not configured — referral notifications will not reach buyers over WhatsApp.') +
-                ' Only the workspace owner can change this.</p>')) +
         '</div>' +
       '</div>';
-
-    guardedSubmit(R.qs('#form-org', view), async function (form) {
-      await api.put('/settings', R.values(form));
-      toast('Company details saved.', 'ok');
-    });
 
     guardedSubmit(R.qs('#form-notify', view), async function (form) {
       await api.put('/settings', R.values(form));
       toast('Preferences saved.', 'ok');
-    });
-
-    // Owner-only cards — absent from the DOM entirely for anyone else, so
-    // these two forms only exist to wire up when they were actually rendered.
-    var paystackForm = R.qs('#form-paystack', view);
-    if (paystackForm) {
-      guardedSubmit(paystackForm, async function (form) {
-        var v = R.values(form);
-        var payload = { paystack_public_key: v.paystack_public_key || null };
-        // Blank means "leave the saved key alone" — the field never shows the
-        // real value again once set, so blank cannot mean "clear it".
-        if (v.paystack_secret_key) payload.paystack_secret_key = v.paystack_secret_key;
-        await api.put('/settings/paystack', payload);
-        toast('Paystack settings saved.', 'ok');
-        R.reload();
-      });
-    }
-
-    guardedSubmit(R.qs('#form-referrals', view), async function (form) {
-      await api.put('/settings', R.values(form));
-      toast('Referral reward saved.', 'ok');
-    });
-
-    R.onClick(view, '#btn-test-paystack', async function () {
-      var secretKey = R.qs('#s-pk-secret', view).value.trim();
-      if (!secretKey) { toast('Enter a secret key to test first.', 'err'); return; }
-      var result = await api.post('/settings/paystack/test', { secret_key: secretKey });
-      toast(result.valid ? 'Paystack key is valid.' : (result.reason || 'Paystack rejected this key.'), result.valid ? 'ok' : 'err');
     });
 
     var emailForm = R.qs('#form-email', view);
@@ -5238,21 +5316,6 @@
       var result = await api.post('/settings/termii/test', { termii_api_key: apiKey, termii_sender_id: senderId, to: to });
       toast(result.valid ? 'Test text sent — check your phone.' : (result.reason || 'Could not send the test text.'), result.valid ? 'ok' : 'err');
     });
-
-    var whatsappForm = R.qs('#form-whatsapp', view);
-    if (whatsappForm) {
-      guardedSubmit(whatsappForm, async function (form) {
-        var v = R.values(form);
-        var payload = {
-          whatsapp_phone_number_id: v.whatsapp_phone_number_id || null,
-          whatsapp_business_account_id: v.whatsapp_business_account_id || null,
-        };
-        if (v.whatsapp_token) payload.whatsapp_token = v.whatsapp_token;
-        await api.put('/settings/whatsapp', payload);
-        toast('WhatsApp settings saved.', 'ok');
-        R.reload();
-      });
-    }
   }
 
   // Same disable-and-spin protection R.onClick already gives every button —
@@ -5665,7 +5728,7 @@
     // picked per kind rather than guessed at generically.
     var labelOf = function (row) {
       return row.full_name || row.name || (row.unit_number ? 'Unit ' + row.unit_number : null)
-        || row.title || (row.doc_type ? String(row.doc_type).replace(/_/g, ' ') : null)
+        || row.title || (row.doc_type ? formatDocType(row.doc_type) : null)
         || String(row.id).slice(0, 8);
     };
 

@@ -39,6 +39,15 @@ var APP_SHELL = [
   './realestate.js',
   './offline-queue.js',
   './screens.js',
+  // TASK 2.17 — the buyer's two standalone pages share this same cache
+  // (they load realestate.css, already listed above) but weren't
+  // themselves precached, so opening one straight from a cold cache miss
+  // (no signal, a link opened from an old WhatsApp message) failed exactly
+  // where the operator app's own shell already worked.
+  './portal.html',
+  './portal.js',
+  './sign.html',
+  './sign.js',
 ];
 
 // Only a Sales Executive's own three lists (CLAUDE.md's role model: "THEIR

@@ -18,6 +18,12 @@ const BUCKET = env.storage.documentsBucket;
 const SIGNED_URL_TTL_SECONDS = 3600;
 
 // Created on first use so deploying needs no manual Storage step.
+//
+// allowedMimeTypes includes the raster types too (not just application/pdf)
+// since TASK 3's audit fix moved snagging photos into this same private
+// bucket via uploadPrivateMedia below — a bucket freshly created before
+// that function's own MIME check ever ran would otherwise reject every
+// image upload at the Storage layer with a mismatched, harder-to-debug error.
 async function ensureBucket() {
   const { data: buckets } = await supabaseAdmin.storage.listBuckets();
   if ((buckets || []).some((b) => b.name === BUCKET)) return;
@@ -25,7 +31,7 @@ async function ensureBucket() {
   const { error } = await supabaseAdmin.storage.createBucket(BUCKET, {
     public: false,
     fileSizeLimit: '10MB',
-    allowedMimeTypes: ['application/pdf'],
+    allowedMimeTypes: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'],
   });
   // A parallel request may have created it between the check and the call.
   if (error && !/already exists/i.test(error.message)) throw error;
@@ -68,6 +74,38 @@ const MEDIA_TYPES = {
 };
 
 const MAX_MEDIA_BYTES = 6 * 1024 * 1024;
+
+// TASK 3 AUDIT FIX (Important #12) — a snagging photo documents a specific
+// defect in a specific buyer's unit. It belongs on the PRIVATE side of the
+// split this file's own comment above describes, not next to marketing
+// floor plans: it went into the public MEDIA_BUCKET originally only because
+// uploadMedia already existed and did the validation this needed. This
+// reuses that same validation (MEDIA_TYPES, MAX_MEDIA_BYTES) but uploads
+// into the private document BUCKET instead, and returns a storage PATH —
+// never a URL — exactly like uploadPdf. The caller must resolve it through
+// createSignedUrl() at read time, same as any other private document.
+async function uploadPrivateMedia(path, buffer, contentType) {
+  const extension = MEDIA_TYPES[contentType];
+  if (!extension) {
+    throw Object.assign(
+      new Error(`Unsupported file type "${contentType}". Use JPEG, PNG, WebP or PDF.`),
+      { statusCode: 400 }
+    );
+  }
+  if (buffer.length > MAX_MEDIA_BYTES) {
+    throw Object.assign(new Error('That file is larger than 6MB.'), { statusCode: 400 });
+  }
+
+  await ensureBucket();
+
+  const fullPath = `${path}.${extension}`;
+  const { error } = await supabaseAdmin.storage
+    .from(BUCKET)
+    .upload(fullPath, buffer, { contentType, upsert: true });
+  if (error) throw error;
+
+  return fullPath;
+}
 
 async function ensureMediaBucket() {
   const { data: buckets } = await supabaseAdmin.storage.listBuckets();
@@ -177,7 +215,7 @@ async function uploadUserAvatar(userId, buffer, contentType) {
 }
 
 module.exports = {
-  BUCKET, SIGNED_URL_TTL_SECONDS, ensureBucket, uploadPdf, createSignedUrl,
+  BUCKET, SIGNED_URL_TTL_SECONDS, ensureBucket, uploadPdf, createSignedUrl, uploadPrivateMedia,
   MEDIA_BUCKET, MEDIA_TYPES, MAX_MEDIA_BYTES, uploadMedia,
   PUBLIC_ASSETS_BUCKET, LOGO_TYPES, MAX_LOGO_BYTES, uploadTeamLogo, uploadUserAvatar,
 };

@@ -161,6 +161,11 @@ async function gatherOrgState(orgId) {
   // real name afterwards — see requestBriefFromModel.
   const refByCustomerId = new Map();
   const nameByRef = new Map();
+  // TASK 2.5 — the other direction of refByCustomerId, so a buyer mentioned
+  // in the brief's prose or listed as a risk/follow-up can be resolved back
+  // to their real id and opened in a drawer. Built at the same point as
+  // nameByRef so the two never drift out of sync (one ref, one name, one id).
+  const idByRef = new Map();
   function refFor(customer) {
     if (!customer?.id) return null;
     let ref = refByCustomerId.get(customer.id);
@@ -168,6 +173,7 @@ async function gatherOrgState(orgId) {
       ref = `BUYER_${refByCustomerId.size + 1}`;
       refByCustomerId.set(customer.id, ref);
       nameByRef.set(ref, customer.full_name || 'Unknown buyer');
+      idByRef.set(ref, customer.id);
     }
     return ref;
   }
@@ -182,6 +188,7 @@ async function gatherOrgState(orgId) {
       schedule_id: row.id,
       reservation_id: reservation.id || null,
       customer_ref: refFor(customer),
+      customer_id: customer.id || null,
       customer_name: customer.full_name || 'Unknown buyer',
       customer_phone: customer.phone || null,
       customer_email: customer.email || null,
@@ -247,8 +254,9 @@ async function gatherOrgState(orgId) {
     })),
     // Not sent to OpenAI (see requestBriefFromModel) — kept on the state
     // object so the model's ref-only response can be resolved back to a
-    // real name before anyone reads the brief.
+    // real name (and, via idByRef, a real id) before anyone reads the brief.
     nameByRef,
+    idByRef,
   };
 }
 
@@ -286,6 +294,7 @@ function buildFallbackBrief(state) {
     const key = row.customer_name;
     const entry = byCustomer.get(key) || {
       customer_name: key,
+      customer_id: row.customer_id || null,
       reservation_id: row.reservation_id,
       project: row.project,
       unit_number: row.unit_number,
@@ -380,6 +389,7 @@ function buildFallbackBrief(state) {
       const t = termsFor(c);
       return {
         customer_name: c.customer_name,
+        customer_id: c.customer_id,
         reason: `${c.count} missed ${t.noun}${c.count > 1 ? 's' : ''} totalling ${naira(c.amount)}, oldest ${c.max_days_late} day${c.max_days_late === 1 ? '' : 's'} late`
           + (c.promise?.status === 'broken' ? `; promised to pay by ${c.promise.promised_date} and did not` : '')
           + (c.promise?.status === 'open' ? `; promised to pay by ${c.promise.promised_date}` : ''),
@@ -393,6 +403,7 @@ function buildFallbackBrief(state) {
       const t = termsFor(c);
       return {
         customer_name: c.customer_name,
+        customer_id: c.customer_id,
         reservation_id: c.reservation_id,
         whatsapp_draft: draftFor(c),
         email_subject: c.stage.key === 'reminder'
@@ -538,7 +549,7 @@ function sanitizeStateForModel(state) {
 // whatsapp_draft/email_draft/email_subject/recommendation titles where a
 // name belongs. This resolves every one of those back to the real name
 // before the brief is stored or shown to anyone.
-function resolveRefs(brief, nameByRef) {
+function resolveRefs(brief, nameByRef, idByRef = new Map()) {
   const nameFor = (ref) => nameByRef.get(ref) || 'this buyer';
   const replaceRefs = (text) => {
     if (typeof text !== 'string') return text;
@@ -547,13 +558,17 @@ function resolveRefs(brief, nameByRef) {
     return out;
   };
 
+  // TASK 2.5 — customer_id travels alongside customer_name from here on, so
+  // the frontend can make a buyer's name clickable without a second lookup.
   const risks = (brief.risks || []).map(({ customer_ref, ...rest }) => ({
     customer_name: nameFor(customer_ref),
+    customer_id: idByRef.get(customer_ref) || null,
     ...rest,
   }));
 
   const follow_ups = (brief.follow_ups || []).map(({ customer_ref, ...rest }) => ({
     customer_name: nameFor(customer_ref),
+    customer_id: idByRef.get(customer_ref) || null,
     ...rest,
     whatsapp_draft: replaceRefs(rest.whatsapp_draft),
     email_subject: replaceRefs(rest.email_subject),
@@ -588,6 +603,19 @@ async function requestBriefFromModel(state) {
             'You write a concise morning brief for the MD/CEO. Currency is Naira (₦). ' +
             'Only reference customers present in the data, never invent names, amounts or dates. ' +
             'Use reservation_id values exactly as given.\n\n' +
+            // TASK 2.4 — without this the model reads "morning brief" as
+            // license to pick the one or two most urgent buyers and stop,
+            // the same way a human skimming the list would only mention the
+            // worst case out loud. follow_ups is a WORK QUEUE a rep copies
+            // messages out of one at a time, not a highlight reel — every
+            // buyer who is left un-drafted here is a buyer nobody hears
+            // from today.
+            'follow_ups is a WORKLIST, not a highlights reel: include exactly one entry for EVERY customer_ref that ' +
+            'appears in `overdue`, with no exceptions other than the legal-stage rule below. If eight distinct ' +
+            'customer_ref values appear in `overdue`, follow_ups must contain eight entries (minus any at the legal ' +
+            'stage) — never fewer, regardless of how minor some of them individually seem. Prioritisation belongs in ' +
+            'the ORDER of the array and in `risks`/`recommendations`, never in leaving a buyer out of follow_ups ' +
+            'entirely.\n\n' +
             // Buyer names never reach this prompt (see sanitizeStateForModel) —
             // each row carries customer_ref instead (e.g. BUYER_3). Without this
             // paragraph the model either invents a name to fill the gap or
@@ -667,7 +695,7 @@ async function requestBriefFromModel(state) {
     throw Object.assign(new Error('OpenAI returned JSON that was not a brief object'), { malformedResponse: true });
   }
 
-  return resolveRefs(parsed, state.nameByRef);
+  return resolveRefs(parsed, state.nameByRef, state.idByRef);
 }
 
 // SECTION 15 — "Include project health summary in the Monday morning

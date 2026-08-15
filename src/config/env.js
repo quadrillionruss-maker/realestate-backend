@@ -164,7 +164,28 @@ const env = {
   // Whether this process serves frontend/ itself. Set false when the
   // frontend is deployed separately (Vercel) and this process is API-only.
   serveFrontend: process.env.SERVE_FRONTEND !== 'false',
+
+  // Platform-operator access — every re_* table across every workspace, at
+  // once, with no org filter. Not a user role: there is no user row and no
+  // JWT here, just one shared secret compared with a timing-safe check
+  // (src/routes/admin.js). Absent → every /api/admin/* route 503s rather
+  // than either booting wide open or refusing to start at all; this is
+  // optional infrastructure, not a required credential like JWT_SECRET.
+  adminSecret: process.env.ADMIN_SECRET || '',
 };
+
+// TASK 3 AUDIT FIX (Important #10) — present-but-weak used to be silently
+// usable (only a console.warn, no enforcement anywhere). Deliberately NOT a
+// boot-blocking failure the way a weak JWT_SECRET is: JWT_SECRET is
+// required — the whole product (every session, every buyer-portal link)
+// depends on it, so refusing to boot is proportionate. ADMIN_SECRET is
+// optional infrastructure the core product never touches; taking down
+// staff and buyer traffic over a weak value entered for a feature nobody
+// may even be using tonight would be a wildly disproportionate blast
+// radius. Instead, routes/admin.js treats a weak secret exactly like an
+// absent one (503, the feature simply isn't usable) — a weak value can
+// exist in the environment but can never actually gate real access.
+env.adminSecretIsWeak = Boolean(env.adminSecret) && env.adminSecret.length < MIN_JWT_SECRET_LENGTH;
 
 // Called by server.js before anything binds a port. Failing loudly at boot
 // beats a 500 on the first request that happens to need a missing key.
@@ -194,6 +215,20 @@ env.assertRequired = () => {
     jwtProblems.forEach((problem) => console.error(`  - ${problem}`));
     console.error('\nGenerate one: node -e "console.log(require(\'crypto\').randomBytes(64).toString(\'hex\'))"');
     process.exit(1);
+  }
+
+  // ADMIN_SECRET is optional infrastructure (env.adminSecret's own comment
+  // above), so this logs loudly rather than blocking boot the way a weak
+  // JWT_SECRET does — see env.adminSecretIsWeak's own comment for why that
+  // split is deliberate. routes/admin.js is what actually enforces this:
+  // env.adminSecretIsWeak makes the admin feature 503 exactly as if the
+  // secret were never set at all, so a weak value can sit in the
+  // environment without ever being able to gate real access.
+  if (env.adminSecretIsWeak) {
+    console.error(`ADMIN_SECRET is only ${env.adminSecret.length} characters — too short to use. `
+      + `It gates unrestricted cross-workspace read/write/delete access and needs to be at least as strong as `
+      + `JWT_SECRET (${MIN_JWT_SECRET_LENGTH}+ characters, generated, never reused from another value in this file). `
+      + 'The /api/admin/* routes and the /admin dashboard will 503 until this is fixed.');
   }
 };
 

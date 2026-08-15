@@ -158,11 +158,15 @@ function assertValidCredentials(email, password) {
 // users.token_version and rejects a mismatch, which is how a password change or
 // a removal from a team kills tokens that have not expired yet. Defaults to 0
 // so a caller that did not select the column still produces a usable token.
-function issueToken(user) {
+// `expiresIn` overrides env.jwt.expiresIn (30d) for a caller that needs a
+// deliberately short-lived token — currently only adminService.impersonateWorkspace,
+// which must NOT silently inherit the 30-day default meant for a real staff
+// session. Omitted, this behaves exactly as it always has.
+function issueToken(user, { expiresIn } = {}) {
   return jwt.sign(
     { id: user.id, sub: user.id, email: user.email, tv: Number(user.token_version || 0) },
     env.jwt.secret,
-    { algorithm: 'HS256', expiresIn: env.jwt.expiresIn }
+    { algorithm: 'HS256', expiresIn: expiresIn || env.jwt.expiresIn }
   );
 }
 

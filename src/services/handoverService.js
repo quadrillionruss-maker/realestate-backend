@@ -11,7 +11,7 @@ const { renderHtmlToPdf } = require('./pdfAdapter');
 const { escapeHtml } = require('../utils/escapeHtml');
 const { resolveBranding } = require('./brandingService');
 const { fillPlaceholders } = require('./documentService');
-const { uploadPdf, uploadMedia } = require('./documentStorage');
+const { uploadPdf, uploadPrivateMedia, createSignedUrl } = require('./documentStorage');
 const { assignedRepUser } = require('./messageService');
 const { audit, auditSystem } = require('./auditService');
 
@@ -75,7 +75,14 @@ async function getChecklist(orgId, reservationId) {
     .eq('checklist_id', checklist.id)
     .order('created_at', { ascending: true });
 
-  checklist.snagging_items = items || [];
+  // TASK 3 AUDIT FIX (Important #12) — photo_url is a private storage path
+  // now (see logSnag), never a directly-usable URL; every caller of this
+  // function (staff screens and the buyer portal alike) needs a real,
+  // time-limited link, not the path itself.
+  checklist.snagging_items = await Promise.all((items || []).map(async (item) => ({
+    ...item,
+    photo_url: item.photo_url ? await createSignedUrl(item.photo_url) : null,
+  })));
   return checklist;
 }
 
@@ -151,17 +158,23 @@ async function logSnag(customer, reservationId, { description, photo }) {
     throw Object.assign(new Error('No handover checklist exists for this reservation yet.'), { statusCode: 404 });
   }
 
-  let photoUrl = null;
+  // TASK 3 AUDIT FIX (Important #12) — a snagging photo documents a defect
+  // in this specific buyer's unit; it belongs in the private document
+  // bucket, not the public media bucket floor plans use. photo_url now
+  // stores a storage PATH, never a directly-usable URL — every read site
+  // (getChecklist below, portalService.js's own snag read) resolves it
+  // through createSignedUrl() before handing it to the frontend, same as
+  // any other private document.
+  let photoPath = null;
   if (photo?.content && photo?.contentType) {
     const base64 = String(photo.content).replace(/^data:[^;]+;base64,/, '');
     const buffer = Buffer.from(base64, 'base64');
     if (buffer.length) {
-      const stored = await uploadMedia(
+      photoPath = await uploadPrivateMedia(
         `${customer.organization_id}/snags/${checklist.id}/${Date.now()}`,
         buffer,
         photo.contentType
       );
-      photoUrl = stored.url;
     }
   }
 
@@ -171,7 +184,7 @@ async function logSnag(customer, reservationId, { description, photo }) {
       checklist_id: checklist.id,
       organization_id: customer.organization_id,
       description: trimmed,
-      photo_url: photoUrl,
+      photo_url: photoPath,
     })
     .select()
     .single();
@@ -206,7 +219,10 @@ async function logSnag(customer, reservationId, { description, photo }) {
     console.warn('[handover] could not file snag task:', err.message);
   }
 
-  return data;
+  // The frontend shows this snag immediately after submitting it — photo_url
+  // must already be a usable (signed) URL in this response, not the raw
+  // storage path just written above.
+  return { ...data, photo_url: data.photo_url ? await createSignedUrl(data.photo_url) : null };
 }
 
 async function updateSnag(req, snagId, { status, developerResponse, fixCommittedDate }) {

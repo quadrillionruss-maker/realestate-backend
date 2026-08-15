@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>Archta — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!--
+  ADMIN DASHBOARD — completely standalone.
+
+  Deliberately shares nothing with the operator app (realestate.css/js) or
+  the buyer portal (portal.html/js): its own markup, its own inline styles
+  below, its own admin.js. This page has visibility across every workspace
+  on the platform at once — reusing a component library built around "one
+  authenticated org" would be the wrong abstraction, and a bug in shared CSS
+  here would be a bug that touches the one screen with the widest blast
+  radius in the whole product.
+
+  Auth is a single shared secret (ADMIN_SECRET), not a user session: there is
+  no login-as-a-person here, only "does the caller know the operator
+  secret". admin.js stores it in sessionStorage (not localStorage — it should
+  not outlive the tab) and sends it as `Authorization: Bearer <secret>` on
+  every request to /api/admin/*.
+-->
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --accent: #4F46E5;
+    --accent-2: #4338CA;
+    --accent-soft: #EEF2FF;
+    --bg: #FFFFFF;
+    --panel: #F9FAFB;
+    --panel-2: #F3F4F6;
+    --line: #E5E7EB;
+    --text: #111827;
+    --text-dim: #4B5563;
+    --text-faint: #9CA3AF;
+    --danger: #DC2626;
+    --danger-soft: #FEF2F2;
+    --good: #059669;
+    --good-soft: #ECFDF5;
+    --warn: #D97706;
+    --warn-soft: #FFFBEB;
+    --sidebar-bg: #111827;
+    --sidebar-line: rgba(255,255,255,0.08);
+    --sidebar-text: rgba(255,255,255,0.6);
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;
+    --radius: 8px;
+  }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  [hidden] { display: none !important; }
+  button { font: inherit; cursor: pointer; }
+  input { font: inherit; }
+  a { color: var(--accent); }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* ── Login ── */
+  #login-screen {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    background: var(--panel);
+  }
+  .login-card {
+    width: 100%;
+    max-width: 340px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 32px 28px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+  }
+  .login-card h1 { font-size: 18px; margin: 0 0 4px; }
+  .login-card p { font-size: 13px; color: var(--text-dim); margin: 0 0 20px; }
+  .login-card input {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    font-size: 14px;
+    margin-bottom: 12px;
+  }
+  .login-card input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .login-card button {
+    width: 100%;
+    padding: 10px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .login-card button:hover { background: var(--accent-2); }
+  .login-error { color: var(--danger); font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+
+  /* ── Shell ── */
+  #app-shell { display: grid; grid-template-columns: 210px 1fr; min-height: 100vh; }
+  .sidebar { background: var(--sidebar-bg); color: var(--sidebar-text); padding: 18px 12px; }
+  .sidebar-brand { color: #fff; font-weight: 700; font-size: 15px; padding: 6px 10px 18px; }
+  .sidebar nav button {
+    display: block; width: 100%; text-align: left; background: none; border: none;
+    color: var(--sidebar-text); padding: 9px 10px; border-radius: 6px; font-size: 13.5px; margin-bottom: 2px;
+  }
+  .sidebar nav button:hover { background: rgba(255,255,255,0.06); color: #fff; }
+  .sidebar nav button.is-active { background: var(--accent); color: #fff; font-weight: 600; }
+  .main { padding: 28px 32px 60px; max-width: 1280px; }
+  .page-title { font-size: 22px; font-weight: 700; margin: 0 0 20px; }
+
+  /* ── Cards / KPIs ── */
+  .kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 24px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+  .kpi-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); font-weight: 600; }
+  .kpi-value { font-family: var(--mono); font-size: 22px; font-weight: 700; margin-top: 6px; }
+
+  .card { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 20px; overflow: hidden; }
+  .card-head { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; background: var(--panel); }
+  .card-head h2 { font-size: 14px; margin: 0; }
+  .card-body { padding: 16px; }
+
+  /* ── Table ── */
+  .search-input {
+    padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; width: 260px;
+  }
+  table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.data th {
+    text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint);
+    padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  table.data td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  table.data tr:hover { background: var(--panel); }
+  table.data tr.is-clickable { cursor: pointer; }
+  .table-wrap { overflow-x: auto; }
+  .detail-row td { background: var(--panel); padding: 14px 18px; }
+  .detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 20px; font-size: 12.5px; }
+  .detail-grid .k { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .detail-grid .v { margin-top: 2px; }
+
+  .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 20px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+  .badge.good { background: var(--good-soft); color: var(--good); }
+  .badge.off { background: var(--panel-2); color: var(--text-faint); }
+  .badge.bad { background: var(--danger-soft); color: var(--danger); }
+  .badge.warn { background: var(--warn-soft); color: var(--warn); }
+
+  .btn { border: 1px solid var(--line); background: var(--bg); padding: 6px 11px; border-radius: 6px; font-size: 12.5px; font-weight: 500; color: var(--text); }
+  .btn:hover { background: var(--panel); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent-2); }
+  .btn.danger { border-color: var(--danger); color: var(--danger); }
+  .btn.danger:hover { background: var(--danger-soft); }
+  .btn.sm { padding: 4px 9px; font-size: 11.5px; }
+  .btn + .btn { margin-left: 6px; }
+
+  .filter-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+  select.filter { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 12.5px; }
+
+  .empty { text-align: center; padding: 30px; color: var(--text-faint); font-size: 13px; }
+  .muted { color: var(--text-faint); font-size: 12px; }
+
+  /* ── Modal ── */
+  .scrim { position: fixed; inset: 0; background: rgba(17,24,39,0.5); display: grid; place-items: center; z-index: 100; padding: 20px; }
+  .modal { background: #fff; border-radius: 10px; width: 100%; max-width: 420px; box-shadow: 0 20px 60px rgba(0,0,0,0.25); }
+  .modal-head { padding: 16px 18px; border-bottom: 1px solid var(--line); font-weight: 700; font-size: 15px; }
+  .modal-body { padding: 18px; font-size: 13.5px; line-height: 1.6; }
+  .modal-foot { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
+  .password-box {
+    font-family: var(--mono); background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px 12px; font-size: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px;
+  }
+
+  .toast-host { position: fixed; bottom: 18px; right: 18px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
+  .toast { background: var(--text); color: #fff; padding: 10px 14px; border-radius: 8px; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+  .toast.ok { background: var(--good); }
+  .toast.err { background: var(--danger); }
+</style>
+</head>
+<body>
+
+<div id="login-screen">
+  <form class="login-card" id="login-form" novalidate>
+    <h1>Archta Admin</h1>
+    <p>Platform operator access. Not a user account.</p>
+    <input type="password" id="login-secret" placeholder="Admin secret" autocomplete="off" autofocus>
+    <button type="submit">Sign in</button>
+    <div class="login-error" id="login-error"></div>
+  </form>
+</div>
+
+<div id="app-shell" hidden>
+  <aside class="sidebar">
+    <div class="sidebar-brand">◆ ARCHTA ADMIN</div>
+    <nav id="nav">
+      <button data-section="overview" class="is-active">Overview</button>
+      <button data-section="workspaces">Workspaces</button>
+      <button data-section="users">Users</button>
+      <button data-section="agents">Agents</button>
+      <button data-section="notifications">Notifications</button>
+      <button data-section="health">Health</button>
+    </nav>
+  </aside>
+  <main class="main" id="view"></main>
+</div>
+
+<div class="toast-host" id="toasts"></div>
+<div id="overlay"></div>
+
+<script src="./admin.js"></script>
+</body>
+</html>
