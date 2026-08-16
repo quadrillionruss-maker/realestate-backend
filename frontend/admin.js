@@ -122,11 +122,6 @@
     });
   });
 
-  // A stored secret from an earlier tab session skips straight past login —
-  // sessionStorage already scopes this to the tab's own lifetime, so there is
-  // nothing extra to check here.
-  if (sessionStorage.getItem(SECRET_KEY)) showApp();
-
   // ── Nav / router ───────────────────────────────────────────────────────
   var view = document.getElementById('view');
   var currentSection = null;
@@ -512,4 +507,21 @@
     }
     if (opts.onOpen) opts.onOpen();
   }
+
+  // A stored secret from an earlier tab session skips straight past login —
+  // sessionStorage already scopes this to the tab's own lifetime, so there is
+  // nothing extra to check here. Deliberately the LAST thing this file does,
+  // not right after showApp() is defined near the top: showApp() calls
+  // goToSection('overview'), which reads `view` and `SECTIONS` — both
+  // declared further down with `var`, so calling it before those
+  // assignments actually ran left them undefined, threw partway through
+  // goToSection, and silently aborted the rest of this script — including
+  // the #nav click listener a few lines below that assignment. The
+  // symptom was exactly a refresh with a valid session: the shell appeared
+  // (showApp had already flipped the two hidden flags before the throw)
+  // but the content area stayed empty and nav clicks did nothing, because
+  // nothing after the throw ever ran. Placing this check after every
+  // declaration and every event listener in the file is what actually
+  // fixes that, not just moving it later by a few lines.
+  if (sessionStorage.getItem(SECRET_KEY)) showApp();
 })();

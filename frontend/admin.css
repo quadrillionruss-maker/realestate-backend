@@ -1,0 +1,197 @@
+/* admin.css — styling for the standalone admin dashboard (admin.html).
+ *
+ * A SEPARATE FILE, not an inline <style> block — this used to be inline,
+ * which worked fine served through server.js (helmet's CSP there allows
+ * 'unsafe-inline' for styles) but silently failed served through Vercel:
+ * frontend/vercel.json's own CSP has no 'unsafe-inline' for style-src, so
+ * the browser dropped the entire block with no visible error — the page
+ * loaded, the HTML was correct, and every rule in it was simply never
+ * applied. An external stylesheet needs no 'unsafe-inline' at all, so this
+ * works identically on both hosts without weakening either CSP.
+ *
+ * The tokens below are a second, independent copy of the operator app's
+ * own "Site Register" palette (frontend/realestate.css) — same values, so
+ * this page reads as the same product, but copied rather than linked, for
+ * the same isolation this file's own admin.html keeps: no shared CSS with
+ * the operator app or the buyer portal. When that palette changes, this
+ * file needs the same update by hand; nothing enforces the two staying
+ * in sync.
+ */
+
+* { box-sizing: border-box; }
+:root {
+  --accent: #1E4F63;
+  --accent-2: #163B4B;
+  --accent-soft: #E4EEF1;
+  --bg: #FBF9F4;
+  --panel: #F2EFE7;
+  --panel-2: #E9E4D8;
+  --line: #DFDACB;
+  --line-strong: #CBC4B0;
+  --text: #1D1B17;
+  --text-dim: #4A463D;
+  --text-faint: #8B8577;
+  --danger: #B23A24;
+  --danger-soft: #F7E9E4;
+  --good: #2F6B45;
+  --good-soft: #E7F1E5;
+  --warn: #96631C;
+  --warn-soft: #F5EDD9;
+  --gold: #C9A45C;
+  --sidebar-bg: #163B4B;
+  --sidebar-line: rgba(255,255,255,0.08);
+  --sidebar-text: rgba(255,255,255,0.6);
+  --display: 'Archivo Black', 'Arial Black', sans-serif;
+  --sans: 'Public Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --radius: 4px;
+}
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+[hidden] { display: none !important; }
+button { font: inherit; cursor: pointer; }
+input { font: inherit; }
+a { color: var(--accent); }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ── Login ── */
+#login-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--panel);
+}
+.login-card {
+  width: 100%;
+  max-width: 340px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 32px 28px;
+  box-shadow: 0 4px 24px rgba(30,27,75,0.08);
+}
+.login-card h1 { font-family: var(--display); text-transform: uppercase; font-size: 17px; font-weight: 900; margin: 0 0 6px; }
+.login-card p { font-size: 13px; color: var(--text-dim); margin: 0 0 20px; }
+.login-card input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: var(--radius);
+  font-size: 14px;
+  margin-bottom: 12px;
+  background: var(--bg);
+  color: var(--text);
+}
+.login-card input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.login-card button {
+  width: 100%;
+  padding: 10px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-weight: 600;
+  font-size: 14px;
+}
+.login-card button:hover { background: var(--accent-2); }
+.login-error { color: var(--danger); font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+
+/* ── Shell ── */
+#app-shell { display: grid; grid-template-columns: 210px 1fr; min-height: 100vh; }
+.sidebar { background: var(--sidebar-bg); color: var(--sidebar-text); padding: 18px 12px; }
+.sidebar-brand {
+  display: flex; align-items: center; gap: 9px;
+  color: #fff; font-family: var(--mono); text-transform: uppercase; font-weight: 600;
+  font-size: 12px; letter-spacing: 0.12em; padding: 6px 10px 18px;
+}
+.sidebar-brand::before {
+  content: '◆';
+  width: 20px; height: 20px; flex-shrink: 0;
+  display: grid; place-items: center;
+  background: var(--accent); border-radius: 5px;
+  color: var(--gold); font-size: 10px;
+}
+.sidebar nav button {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  color: var(--sidebar-text); padding: 9px 10px; border-radius: var(--radius); font-size: 13.5px; margin-bottom: 2px;
+}
+.sidebar nav button:hover { background: rgba(255,255,255,0.06); color: #fff; }
+.sidebar nav button.is-active { background: var(--accent); color: #fff; font-weight: 600; }
+.main { padding: 28px 32px 60px; max-width: 1280px; }
+.page-title { font-family: var(--display); text-transform: uppercase; font-size: 19px; font-weight: 900; margin: 0 0 20px; }
+
+/* ── Cards / KPIs ── */
+.kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 24px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+.kpi-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); font-weight: 600; }
+.kpi-value { font-family: var(--mono); font-size: 22px; font-weight: 700; margin-top: 6px; }
+
+.card { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 20px; overflow: hidden; }
+.card-head { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; background: var(--panel); }
+.card-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
+.card-body { padding: 16px; }
+
+/* ── Table ── */
+.search-input {
+  padding: 8px 12px; border: 1.5px solid var(--line-strong); border-radius: var(--radius); font-size: 13px; width: 260px;
+  background: var(--bg); color: var(--text);
+}
+.search-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.data th {
+  text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-faint);
+  padding: 8px 10px; border-bottom: 2px solid var(--line); white-space: nowrap; background: var(--panel);
+}
+table.data td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.data tr:nth-child(even) td { background: var(--panel); }
+table.data tr:hover td { background: var(--accent-soft); }
+table.data tr.is-clickable { cursor: pointer; }
+.table-wrap { overflow-x: auto; }
+.detail-row td { background: var(--panel) !important; padding: 14px 18px; }
+.detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 20px; font-size: 12.5px; }
+.detail-grid .k { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+.detail-grid .v { margin-top: 2px; }
+
+/* Square permit tags, matching the operator app's own badge shape. */
+.badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 2px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; border: 1px solid transparent; }
+.badge.good { background: var(--good-soft); color: var(--good); border-color: rgba(47,107,69,0.28); }
+.badge.off { background: var(--panel-2); color: var(--text-faint); border-color: var(--line-strong); }
+.badge.bad { background: var(--danger-soft); color: var(--danger); border-color: rgba(178,58,36,0.28); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); border-color: rgba(150,99,28,0.28); }
+
+.btn { border: 1px solid var(--line-strong); background: var(--bg); padding: 6px 11px; border-radius: var(--radius); font-size: 12.5px; font-weight: 500; color: var(--text); }
+.btn:hover { background: var(--panel); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-2); }
+.btn.danger { border-color: var(--danger); color: var(--danger); }
+.btn.danger:hover { background: var(--danger-soft); }
+.btn.sm { padding: 4px 9px; font-size: 11.5px; }
+.btn + .btn { margin-left: 6px; }
+
+.filter-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+select.filter { padding: 7px 10px; border: 1.5px solid var(--line-strong); border-radius: var(--radius); font-size: 12.5px; background: var(--bg); color: var(--text); }
+
+.empty { text-align: center; padding: 30px; color: var(--text-faint); font-size: 13px; }
+.muted { color: var(--text-faint); font-size: 12px; }
+
+/* ── Modal ── */
+.scrim { position: fixed; inset: 0; background: rgba(22,59,75,0.45); display: grid; place-items: center; z-index: 100; padding: 20px; }
+.modal { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; width: 100%; max-width: 420px; box-shadow: 0 20px 60px rgba(22,59,75,0.25); }
+.modal-head { padding: 16px 18px; border-bottom: 1px solid var(--line); font-family: var(--display); text-transform: uppercase; font-weight: 900; font-size: 14px; }
+.modal-body { padding: 18px; font-size: 13.5px; line-height: 1.6; }
+.modal-foot { padding: 12px 18px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; background: var(--panel); }
+.password-box {
+  font-family: var(--mono); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 10px 12px; font-size: 15px; display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px;
+}
+
+.toast-host { position: fixed; bottom: 18px; right: 18px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
+.toast { background: var(--accent); color: #fff; padding: 10px 14px; border-radius: var(--radius); font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+.toast.ok { background: var(--good); }
+.toast.err { background: var(--danger); }
