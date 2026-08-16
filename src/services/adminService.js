@@ -510,8 +510,11 @@ async function notificationStats() {
     supabaseRaw.from('re_notifications').select('id', { count: 'exact', head: true }),
     supabaseRaw.from('re_notifications').select('id', { count: 'exact', head: true }).eq('status', 'failed'),
     supabaseRaw.from('re_notifications').select('channel'),
+    // TASK 3 FOLLOW-UP FIX — the column is `error` (migrations/003), not
+    // `reason`; nothing caught this at write time since supabase-js only
+    // reports a bad column name once the query actually runs.
     supabaseRaw.from('re_notifications')
-      .select('id, channel, recipient, reason, created_at')
+      .select('id, channel, recipient, error, created_at')
       .eq('status', 'failed')
       .order('created_at', { ascending: false })
       .limit(100),
@@ -564,6 +567,7 @@ const MIGRATION_CHECKPOINTS = {
   '030': 're_hardship_requests', '031': 're_messages', '033': 're_legal_cases',
   '034': 're_financing_requests', '035': 're_handover_checklists', '036': 're_contractors',
   '037': 're_community_posts', '038': 're_project_health', '039': 're_cron_runs',
+  '040': 're_admin_actions',
 };
 
 // Reads which migration files exist on disk and, best-effort, whether the

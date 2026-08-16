@@ -4,15 +4,22 @@
 // portal.js (the buyer portal) — this file duplicates the handful of small
 // helpers (naira formatting, escaping, toasts) it needs rather than importing
 // them, on purpose (see admin.html's own header comment for why).
-
+//
+// API_BASE is the one exception: it reads window.__API_BASE__, set by
+// config.js (loaded before this file — see admin.html). That is NOT
+// reinvented here, on purpose — this page's own origin (wherever Vercel
+// serves frontend/ from) is not the API's origin (Render) in production;
+// only local dev has them the same. config.js is already the single place
+// that distinction is handled correctly, and duplicating it here was a
+// real, shipped bug: admin.js used to compute window.location.origin +
+// '/api/admin' directly, which resolved to the Vercel domain itself in
+// production — a domain with no /api/admin route at all — so every fetch
+// from this page 404'd (or worse, hit Vercel's own catch-all) the moment
+// it was deployed anywhere but localhost.
 (function () {
   'use strict';
 
-  var API_BASE = (function () {
-    var host = window.location.hostname;
-    if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:' + (window.location.port || '4000') + '/api/admin';
-    return window.location.origin + '/api/admin';
-  })();
+  var API_BASE = (window.__API_BASE__ || '/api') + '/admin';
 
   var SECRET_KEY = 'archta_admin_secret';
 
@@ -444,7 +451,7 @@
         '<div class="table-wrap"><table class="data"><thead><tr><th>Channel</th><th>Recipient</th><th>Reason</th><th>When</th></tr></thead><tbody>' +
         (d.recent_failures.length ? d.recent_failures.map(function (f) {
           return '<tr><td>' + esc(f.channel) + '</td><td>' + esc(f.recipient || '—') + '</td>' +
-            '<td>' + esc(f.reason || '—') + '</td><td>' + timeAgo(f.created_at) + '</td></tr>';
+            '<td>' + esc(f.error || '—') + '</td><td>' + timeAgo(f.created_at) + '</td></tr>';
         }).join('') : '<tr><td colspan="4"><div class="empty">No failures recorded.</div></td></tr>') +
         '</tbody></table></div></div>';
     });
