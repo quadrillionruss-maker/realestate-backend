@@ -14,7 +14,8 @@ const {
 const { uploadTeamLogo } = require('../services/documentStorage');
 const { encrypt, last4 } = require('../utils/credentials');
 const { verifyPaystackKey } = require('../services/paystackService');
-const { sendTestEmail, sendTestSms } = require('../services/notificationService');
+const { sendTestEmail, sendTestSms, EMAIL_TEMPLATE_TYPES } = require('../services/notificationService');
+const { buildBackup } = require('../services/backupService');
 const router = express.Router();
 
 const SETTINGS_COLUMNS = `organization_id, company_name, logo_url, address, phone, website,
@@ -35,6 +36,19 @@ const logoLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req) => req.userId || req.ip,
   message: { error: 'Too many uploads. Wait a few minutes and try again.' },
+});
+
+// SECTION 25 — a full ZIP is expensive (nine table reads plus compression),
+// and there is nothing a legitimate workflow needs it for twice in one day.
+// Same shape as routes/audit.js's auditExportLimiter, tighter budget for a
+// heavier export.
+const backupLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 1,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: 'A workspace backup is limited to once per day. Try again tomorrow.' },
 });
 
 // Every table this service owns carries organization_id. Converting a solo
@@ -400,6 +414,148 @@ router.post('/email/test', requirePermission('settings.write'), async (req, res,
     const apiKey = String(req.body?.resend_api_key || '').trim();
     const from = String(req.body?.resend_from_email || '').trim();
     res.json(await sendTestEmail({ apiKey, from, to: req.user.email }));
+  } catch (e) { next(e); }
+});
+
+// ── SECTION 14 — customizable email content ─────────────────────────────
+// Owner only, same tier as every other piece of workspace configuration on
+// this file. Unlike the Paystack/Email/Termii "test" buttons above, there
+// is no default HTML to show as a baseline here — the built-in email for
+// each type is generated in code with real data at send time
+// (notify.emailShell), not a static template string — so an un-customized
+// type simply reads as is_custom: false with empty fields, not a rendered
+// preview of what it would otherwise send.
+router.get('/email-templates', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const { data: overrides, error } = await supabaseAdmin
+      .from('re_email_templates')
+      .select('template_type, subject, body_html, updated_at')
+      .eq('organization_id', req.orgId);
+    if (error) throw error;
+
+    const byType = new Map((overrides || []).map((o) => [o.template_type, o]));
+    const templates = EMAIL_TEMPLATE_TYPES.map((type) => {
+      const override = byType.get(type);
+      return {
+        template_type: type,
+        is_custom: Boolean(override),
+        subject: override?.subject || '',
+        body_html: override?.body_html || '',
+        updated_at: override?.updated_at || null,
+      };
+    });
+    res.json(templates);
+  } catch (e) { next(e); }
+});
+
+// An empty/omitted subject AND body_html resets to the built-in default
+// (deletes the override row) — same "blank clears it" convention
+// routes/documents.js's own template routes and this file's own provider
+// keys already use.
+router.patch('/email-templates/:type', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const type = req.params.type;
+    if (!EMAIL_TEMPLATE_TYPES.includes(type)) {
+      return res.status(400).json({ error: `type must be one of: ${EMAIL_TEMPLATE_TYPES.join(', ')}` });
+    }
+
+    const subject = String(req.body?.subject || '').trim();
+    const bodyHtml = String(req.body?.body_html || '').trim();
+
+    if (!subject && !bodyHtml) {
+      await supabaseAdmin.from('re_email_templates')
+        .delete().eq('organization_id', req.orgId).eq('template_type', type);
+      audit(req, {
+        action: 'email_template.reset',
+        entityType: 're_email_templates',
+        summary: `${type.replace(/_/g, ' ')} email template reset to the default`,
+      });
+      return res.json({ template_type: type, is_custom: false, subject: '', body_html: '' });
+    }
+
+    if (!subject || !bodyHtml) {
+      return res.status(400).json({ error: 'Both subject and body_html are required — or leave both blank to reset to the default.' });
+    }
+    if (subject.length > 200) return res.status(400).json({ error: 'subject must be 200 characters or fewer.' });
+    if (bodyHtml.length > 5000) return res.status(400).json({ error: 'body_html must be 5000 characters or fewer.' });
+
+    const { data, error } = await supabaseAdmin
+      .from('re_email_templates')
+      .upsert(
+        { organization_id: req.orgId, template_type: type, subject, body_html: bodyHtml, updated_at: new Date().toISOString() },
+        { onConflict: 'organization_id,template_type' }
+      )
+      .select()
+      .single();
+    if (error) throw error;
+
+    audit(req, {
+      action: 'email_template.updated',
+      entityType: 're_email_templates',
+      entityId: data.id,
+      summary: `${type.replace(/_/g, ' ')} email template customized`,
+    });
+
+    res.json({ template_type: type, is_custom: true, subject: data.subject, body_html: data.body_html, updated_at: data.updated_at });
+  } catch (e) { next(e); }
+});
+
+// ── SECTION 5 — receipt header/footer customization ─────────────────────
+// Owner only, same tier as every other piece of workspace configuration on
+// this file. One row per org (unlike the five email template TYPES above),
+// so this is read/written directly rather than through a list.
+router.get('/receipt-template', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('re_receipt_templates')
+      .select('header_html, footer_html, show_logo, show_developer_address, updated_at')
+      .eq('organization_id', req.orgId)
+      .maybeSingle();
+    if (error) throw error;
+
+    res.json(data || { header_html: null, footer_html: null, show_logo: true, show_developer_address: true, updated_at: null });
+  } catch (e) { next(e); }
+});
+
+router.patch('/receipt-template', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const headerHtml = req.body?.header_html != null ? String(req.body.header_html).trim() : null;
+    const footerHtml = req.body?.footer_html != null ? String(req.body.footer_html).trim() : null;
+    const showLogo = req.body?.show_logo !== false;
+    const showAddress = req.body?.show_developer_address !== false;
+
+    if (headerHtml && headerHtml.length > 2000) {
+      return res.status(400).json({ error: 'header_html must be 2000 characters or fewer.' });
+    }
+    if (footerHtml && footerHtml.length > 1000) {
+      return res.status(400).json({ error: 'footer_html must be 1000 characters or fewer.' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('re_receipt_templates')
+      .upsert(
+        {
+          organization_id: req.orgId,
+          header_html: headerHtml || null,
+          footer_html: footerHtml || null,
+          show_logo: showLogo,
+          show_developer_address: showAddress,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'organization_id' }
+      )
+      .select()
+      .single();
+    if (error) throw error;
+
+    audit(req, {
+      action: 'receipt_template.updated',
+      entityType: 're_receipt_templates',
+      entityId: data.id,
+      summary: 'Receipt header/footer customized',
+    });
+
+    res.json(data);
   } catch (e) { next(e); }
 });
 
@@ -1097,5 +1253,25 @@ async function reassignWork(req, member, targetRepId) {
   summary.deactivated = deactivated?.length || 0;
   return summary;
 }
+
+// SECTION 25 — a full ZIP of the workspace's data: buyers, reservations,
+// payments, documents, units, projects, commissions, activities, audit log —
+// one CSV each. Owner only (settings.backup, permissions.js), rate-limited
+// to once a day (backupLimiter, above).
+router.post('/backup', backupLimiter, requirePermission('settings.backup'), async (req, res, next) => {
+  try {
+    const result = await buildBackup(req.orgId);
+
+    await audit(req, {
+      action: 'settings.backup_generated',
+      entityType: 'organization',
+      entityId: req.orgId,
+      summary: `Downloaded a full workspace backup (${result.tables.length} tables, ${Math.round(result.size_bytes / 1024)} KB)`,
+      metadata: { size_bytes: result.size_bytes, tables: result.tables },
+    });
+
+    res.json(result);
+  } catch (e) { next(e); }
+});
 
 module.exports = router;

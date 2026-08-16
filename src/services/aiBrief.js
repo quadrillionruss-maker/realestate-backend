@@ -15,6 +15,8 @@ const { lagosToday } = require('./overdueService');
 const { openAndBrokenForBrief } = require('./promiseService');
 const { describeStage } = require('./escalationService');
 const projectHealth = require('./projectHealthService');
+const pushService = require('./pushService');
+const featureUsage = require('./featureUsageService');
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 
@@ -166,6 +168,10 @@ async function gatherOrgState(orgId) {
   // to their real id and opened in a drawer. Built at the same point as
   // nameByRef so the two never drift out of sync (one ref, one name, one id).
   const idByRef = new Map();
+  // SECTION 15 — same reasoning as idByRef: built alongside the others so it
+  // can never drift, and never sent to the model (sanitizeStateForModel
+  // strips customer_phone the same way it already strips customer_name).
+  const phoneByRef = new Map();
   function refFor(customer) {
     if (!customer?.id) return null;
     let ref = refByCustomerId.get(customer.id);
@@ -174,6 +180,7 @@ async function gatherOrgState(orgId) {
       refByCustomerId.set(customer.id, ref);
       nameByRef.set(ref, customer.full_name || 'Unknown buyer');
       idByRef.set(ref, customer.id);
+      phoneByRef.set(ref, customer.phone || null);
     }
     return ref;
   }
@@ -257,6 +264,7 @@ async function gatherOrgState(orgId) {
     // real name (and, via idByRef, a real id) before anyone reads the brief.
     nameByRef,
     idByRef,
+    phoneByRef,
   };
 }
 
@@ -295,6 +303,10 @@ function buildFallbackBrief(state) {
     const entry = byCustomer.get(key) || {
       customer_name: key,
       customer_id: row.customer_id || null,
+      // SECTION 15 — carried through to follow_ups below so the dashboard's
+      // "Send all" queue can open WhatsApp Web for each draft without a
+      // second buyer lookup.
+      customer_phone: row.customer_phone || null,
       reservation_id: row.reservation_id,
       project: row.project,
       unit_number: row.unit_number,
@@ -404,6 +416,7 @@ function buildFallbackBrief(state) {
       return {
         customer_name: c.customer_name,
         customer_id: c.customer_id,
+        customer_phone: c.customer_phone,
         reservation_id: c.reservation_id,
         whatsapp_draft: draftFor(c),
         email_subject: c.stage.key === 'reminder'
@@ -549,7 +562,7 @@ function sanitizeStateForModel(state) {
 // whatsapp_draft/email_draft/email_subject/recommendation titles where a
 // name belongs. This resolves every one of those back to the real name
 // before the brief is stored or shown to anyone.
-function resolveRefs(brief, nameByRef, idByRef = new Map()) {
+function resolveRefs(brief, nameByRef, idByRef = new Map(), phoneByRef = new Map()) {
   const nameFor = (ref) => nameByRef.get(ref) || 'this buyer';
   const replaceRefs = (text) => {
     if (typeof text !== 'string') return text;
@@ -569,6 +582,7 @@ function resolveRefs(brief, nameByRef, idByRef = new Map()) {
   const follow_ups = (brief.follow_ups || []).map(({ customer_ref, ...rest }) => ({
     customer_name: nameFor(customer_ref),
     customer_id: idByRef.get(customer_ref) || null,
+    customer_phone: phoneByRef.get(customer_ref) || null,
     ...rest,
     whatsapp_draft: replaceRefs(rest.whatsapp_draft),
     email_subject: replaceRefs(rest.email_subject),
@@ -695,7 +709,7 @@ async function requestBriefFromModel(state) {
     throw Object.assign(new Error('OpenAI returned JSON that was not a brief object'), { malformedResponse: true });
   }
 
-  return resolveRefs(parsed, state.nameByRef, state.idByRef);
+  return resolveRefs(parsed, state.nameByRef, state.idByRef, state.phoneByRef);
 }
 
 // SECTION 15 — "Include project health summary in the Monday morning
@@ -806,6 +820,18 @@ async function storeBrief(orgId, brief, generatedBy) {
     { onConflict: 'organization_id,brief_date' }
   );
   if (error) throw error;
+
+  featureUsage.track(orgId, 'brief_generated');
+
+  // SECTION 1 — push, owner only. Covers both the 07:00 cron path and a
+  // manual "Regenerate" click from the dashboard, since both call this same
+  // function — one place writing the brief is one place notifying about it.
+  const ownerIds = await pushService.resolveUserIdsByRole(orgId, ['owner']);
+  await pushService.notify(orgId, ownerIds, {
+    title: 'Morning brief ready',
+    body: brief.summary ? String(brief.summary).slice(0, 120) : 'Your daily brief is ready.',
+    url: '/#/dashboard',
+  });
 }
 
 // Recommendations become real tasks so the CEO works one list, not two.

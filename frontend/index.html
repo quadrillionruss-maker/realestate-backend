@@ -70,36 +70,18 @@
     <div class="gate-mark"><i>◆</i> ARCHTA</div>
 
     <div>
-      <!-- Three independently-styled lines — not achievable with one <em> run
-           inside a single heading — so this is one of the few disclosed HTML
-           changes in this pass. The middle line dims, the same device the
-           previous version of this tagline used; only the typeface, weight
-           and copy changed. -->
+      <!-- Four independently-styled lines — not achievable with one <em> run
+           inside a single heading. Middle two dim, bookended by the first
+           and last line at full weight, the same device the three-line
+           version of this tagline used, just extended by one line. -->
       <h1 class="gate-headline">
         <span class="gate-headline-line">Every plot,</span>
         <span class="gate-headline-line is-dim">every naira,</span>
+        <span class="gate-headline-line is-dim">every promise,</span>
         <span class="gate-headline-line">on record.</span>
       </h1>
-      <p class="gate-blurb">
-        Installment sales, allocations and collections for property developers —
-        with a brief on your desk at 7am telling you who has fallen behind,
-        what is due this week, and what to say to whom.
-      </p>
-
-      <!-- These are statements about how the product behaves, not counters.
-           The previous version showed "07:00 / 0 / ₦" as if they were live
-           metrics, which read as a claim nobody could interpret — a first-time
-           visitor cannot tell whether "0 double allocations" means "we have
-           never caused one" or "you currently have none". Each line now says
-           what it means. -->
-      <ul class="gate-points">
-        <li><b>A brief every morning at 7:00</b> — written overnight, waiting when you open the app</li>
-        <li><b>Double allocation is physically blocked</b> — the database refuses a second live reservation on a unit, whatever the app does</li>
-        <li><b>Schedules balance to the kobo</b> — installments always sum to the exact plan total</li>
-      </ul>
+      <p class="gate-blurb">Nothing about a sale lives anywhere else.</p>
     </div>
-
-    <div class="faint fs-12">Paystack and bank transfer.</div>
   </section>
 
   <section class="gate-form-wrap">
@@ -219,6 +201,29 @@
         </div>
       </form>
 
+      <!-- SECTION 2 — shown instead of landing in the app when POST /login
+           answers requires_2fa: true (owner accounts with 2FA on). -->
+      <form id="form-2fa" autocomplete="off" novalidate hidden>
+        <h1 class="gate-title">Enter your code</h1>
+        <p class="gate-sub">Open your authenticator app and enter the current code.</p>
+
+        <div class="field">
+          <label for="tfa-login-code">Code</label>
+          <input class="input mono" id="tfa-login-code" inputmode="numeric" autocomplete="one-time-code"
+                 maxlength="6" placeholder="123456" required>
+        </div>
+
+        <p class="field-hint">Lost your device? Use one of your backup codes instead.</p>
+
+        <p class="field-error hidden" id="tfa-login-error" role="alert"></p>
+
+        <button class="btn primary block lg mt-1" type="submit" id="tfa-login-submit">Verify</button>
+
+        <div class="gate-foot">
+          <button class="link-quiet" type="button" id="link-2fa-cancel">Back to sign in</button>
+        </div>
+      </form>
+
     </div>
   </section>
 </main>
@@ -307,6 +312,13 @@
         <span class="offline-banner hidden" id="offline-banner">Offline</span>
         <span class="sync-status hidden" id="sync-status" title="Tap to retry any failed submissions"></span>
         <span class="dateline" id="dateline"></span>
+        <!-- SECTION 1 — push notifications. Hidden until R.notifications'
+             own init has a real unread count to show; realestate.js wires
+             the click handler and the dropdown. -->
+        <button class="icon-btn" id="btn-notifications" type="button" aria-label="Notifications">
+          <span aria-hidden="true">&#128276;&#xFE0E;</span><span class="notif-badge hidden" id="notif-count"></span>
+        </button>
+        <div class="notif-dropdown hidden" id="notif-dropdown"></div>
         <button class="btn ghost sm" id="btn-signout" type="button">Sign out</button>
         <!-- Under 640px the search bar gets squeezed between the hamburger and
              this button. Text hides, this icon-only twin takes over — same

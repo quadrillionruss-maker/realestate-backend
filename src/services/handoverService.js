@@ -14,6 +14,7 @@ const { fillPlaceholders } = require('./documentService');
 const { uploadPdf, uploadPrivateMedia, createSignedUrl } = require('./documentStorage');
 const { assignedRepUser } = require('./messageService');
 const { audit, auditSystem } = require('./auditService');
+const satisfactionSurvey = require('./satisfactionSurveyService');
 
 const TEMPLATE_PATH = path.join(__dirname, '../templates/handover_certificate.html');
 const CHECKLIST_STATUSES = ['pending', 'inspection_done', 'issues_raised', 'resolved', 'signed_off'];
@@ -98,6 +99,14 @@ async function getChecklistById(orgId, id) {
 }
 
 async function updateChecklist(req, id, updates) {
+  // SECTION 18 — read BEFORE the update, so the survey trigger below can
+  // tell "just signed off" from "already was, this is a later edit" — the
+  // whole point being it fires once, not on every subsequent save of an
+  // already-signed-off checklist.
+  const wasAlreadySignedOff = updates.status === 'signed_off'
+    ? (await getChecklistById(req.orgId, id))?.status === 'signed_off'
+    : true;
+
   const patch = {};
   if (updates.status !== undefined) {
     if (!CHECKLIST_STATUSES.includes(updates.status)) {
@@ -141,6 +150,20 @@ async function updateChecklist(req, id, updates) {
     summary: `Handover checklist updated: ${Object.keys(patch).join(', ')}`,
     metadata: patch,
   });
+
+  // SECTION 18 — fires exactly once, the moment this checklist first
+  // reaches 'signed_off'. Never lets a failure here turn a successful
+  // checklist save into an error response — the checklist update already
+  // happened and is real; a survey link that failed to send is a
+  // reconcilable gap, not a reason to fail the request that got a buyer's
+  // handover recorded.
+  if (patch.status === 'signed_off' && !wasAlreadySignedOff) {
+    try {
+      await satisfactionSurvey.sendForHandover(req.orgId, data.reservation_id);
+    } catch (err) {
+      console.warn('[handover] could not send satisfaction survey:', err.message);
+    }
+  }
 
   return data;
 }

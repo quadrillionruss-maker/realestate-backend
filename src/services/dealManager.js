@@ -20,6 +20,7 @@
 const { supabaseAdmin } = require('../middleware/orgContext');
 const notify = require('./notificationService');
 const { lagosToday } = require('./overdueService');
+const featureUsage = require('./featureUsageService');
 
 const HUMAN_HANDLING_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -103,6 +104,7 @@ async function logAction(orgId, agentName, customerId, actionType, outcome) {
   // Logging failing must not take the agent down with it — same rule
   // notificationService.js's record() follows for its own write.
   if (error) console.warn('[deal-manager] could not log agent action:', error.message);
+  featureUsage.track(orgId, 'agent_action');
 }
 
 // The one call an agent makes to both check clearance AND record the

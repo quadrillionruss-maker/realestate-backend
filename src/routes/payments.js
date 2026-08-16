@@ -446,6 +446,92 @@ router.patch('/:scheduleId/waive', requirePermission('payments.waive'), async (r
   } catch (e) { next(e); }
 });
 
+// SECTION 4 — bulk-waive the NEXT overdue installment for every buyer in a
+// selection. Same underlying write as PATCH /:scheduleId/waive above (one
+// row, owner only) run once per buyer — this route's own job is choosing
+// WHICH row that is, and previewing the total before anything is written.
+// dry_run mirrors imports.js's own preview-then-commit shape ("show me what
+// this will do before I commit to it").
+router.post('/bulk-waive-next-overdue', requirePermission('payments.waive'), async (req, res, next) => {
+  try {
+    const customerIds = Array.isArray(req.body?.customer_ids) ? req.body.customer_ids : [];
+    const reason = String(req.body?.reason || '').trim();
+    const dryRun = req.body?.dry_run !== false;
+    if (!customerIds.length) return res.status(400).json({ error: 'customer_ids is required.' });
+    if (!dryRun && !reason) return res.status(400).json({ error: 'A reason is required.' });
+
+    const { data: reservations, error } = await supabaseAdmin
+      .from('re_reservations')
+      .select(`
+        customer_id,
+        re_customers(full_name),
+        re_installment_plans(
+          status,
+          re_installment_schedule(id, due_date, amount_due, status)
+        )`)
+      .eq('organization_id', req.orgId)
+      .in('customer_id', customerIds)
+      .neq('status', 'cancelled');
+    if (error) throw error;
+
+    // One target per buyer: the earliest-due overdue row across every live
+    // reservation they hold, on their currently ACTIVE plan only — a
+    // superseded plan's own rows are already 'waived' by the restructure
+    // that superseded it (CLAUDE.md's "Renegotiating a plan"), so this can
+    // never pick a row that isn't real, live debt.
+    const targets = new Map(); // customer_id -> { scheduleId, amount, buyerName, dueDate }
+    for (const reservation of reservations || []) {
+      const plans = Array.isArray(reservation.re_installment_plans)
+        ? reservation.re_installment_plans
+        : [reservation.re_installment_plans].filter(Boolean);
+      const activePlan = plans.find((p) => p.status === 'active');
+      for (const row of activePlan?.re_installment_schedule || []) {
+        if (row.status !== 'overdue') continue;
+        const existing = targets.get(reservation.customer_id);
+        if (!existing || row.due_date < existing.dueDate) {
+          targets.set(reservation.customer_id, {
+            scheduleId: row.id,
+            amount: Number(row.amount_due || 0),
+            buyerName: reservation.re_customers?.full_name || 'Unknown buyer',
+            dueDate: row.due_date,
+          });
+        }
+      }
+    }
+
+    const rows = [...targets.entries()].map(([customerId, t]) => ({ customer_id: customerId, ...t }));
+    const totalAmount = rows.reduce((sum, r) => sum + r.amount, 0);
+    const skippedCount = customerIds.length - rows.length;
+
+    if (dryRun) {
+      return res.json({
+        rows: rows.map((r) => ({ customer_id: r.customer_id, buyer_name: r.buyerName, amount: r.amount, due_date: r.dueDate })),
+        total_amount: totalAmount,
+        skipped_count: skippedCount,
+      });
+    }
+
+    for (const r of rows) {
+      const { error: waiveErr } = await supabaseAdmin
+        .from('re_installment_schedule')
+        .update({ status: 'waived' })
+        .eq('id', r.scheduleId)
+        .eq('organization_id', req.orgId);
+      if (waiveErr) throw waiveErr;
+
+      audit(req, {
+        action: 'installment.waived',
+        entityType: 're_installment_schedule',
+        entityId: r.scheduleId,
+        summary: `Installment (₦${r.amount.toLocaleString('en-NG')}) waived for ${r.buyerName} — bulk: ${reason}`,
+        metadata: { reason, amount_due: r.amount, bulk: true },
+      });
+    }
+
+    res.json({ waived_count: rows.length, total_amount: totalAmount, skipped_count: skippedCount });
+  } catch (e) { next(e); }
+});
+
 // Re-render a receipt. Idempotent — it writes back to the same document row,
 // each render at its own versioned storage path — so this doubles as "the
 // buyer lost it, send it again" without producing a second receipt for one

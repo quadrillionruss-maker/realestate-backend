@@ -242,4 +242,102 @@ async function repPerformance(orgId) {
   return rows.sort((a, b) => b.collected - a.collected);
 }
 
-module.exports = { accrueForPayment, summaryByRep, repPerformance, round2 };
+// FEATURE — the sales rep leaderboard (Reports screen). Deliberately its own
+// function rather than repPerformance with an extra parameter: this scopes
+// EVERY figure on a rep's row — contracted value, collected, collection
+// rate, default rate, commission earned — to the reservations they created
+// inside the chosen period ("deals closed" this period), not their whole
+// career book. "How is what you sold this quarter doing" is a different,
+// more useful question on a leaderboard than "how is your portfolio doing
+// all-time", which repPerformance already answers elsewhere.
+//
+// default_rate mirrors forecastService's org-wide default_rate_percent
+// definition exactly (share of installments that have actually come due —
+// paid or overdue — and were overdue), so a rep's number on this screen
+// means the same thing as the org-wide figure on the forecast card.
+async function leaderboard(orgId, { from = null, to = null } = {}) {
+  let reservationsQuery = supabaseAdmin
+    .from('re_reservations')
+    .select(`
+      id, sales_rep_id, created_at,
+      re_units(list_price),
+      re_installment_plans(
+        status, total_amount,
+        re_installment_schedule(status, amount_due)
+      )`)
+    .eq('organization_id', orgId)
+    .neq('status', 'cancelled');
+  if (from) reservationsQuery = reservationsQuery.gte('created_at', from);
+  if (to) reservationsQuery = reservationsQuery.lte('created_at', to);
+
+  const [reps, reservationsRes] = await Promise.all([
+    supabaseAdmin
+      .from('re_sales_reps')
+      .select('id, active, users(id, full_name, email)')
+      .eq('organization_id', orgId),
+    reservationsQuery,
+  ]);
+  for (const result of [reps, reservationsRes]) {
+    if (result.error) throw result.error;
+  }
+
+  const reservations = reservationsRes.data || [];
+  const reservationIds = reservations.map((r) => r.id);
+
+  // Scoped to reservations already inside the period, via re_commissions'
+  // own reservation_id (migrations/003) — a rep's commission_earned on this
+  // screen only ever counts what was actually earned on the deals being
+  // shown, never their whole career total.
+  let commissions = [];
+  if (reservationIds.length) {
+    const { data, error } = await supabaseAdmin
+      .from('re_commissions')
+      .select('sales_rep_id, amount, status')
+      .eq('organization_id', orgId)
+      .in('reservation_id', reservationIds);
+    if (error) throw error;
+    commissions = data || [];
+  }
+
+  const rows = (reps.data || []).map((rep) => {
+    const mine = reservations.filter((r) => r.sales_rep_id === rep.id);
+
+    let portfolioValue = 0;
+    let collected = 0;
+    let dueEvents = 0;
+    let overdueEvents = 0;
+
+    for (const reservation of mine) {
+      const plans = Array.isArray(reservation.re_installment_plans)
+        ? reservation.re_installment_plans
+        : [reservation.re_installment_plans].filter(Boolean);
+      const plan = plans.find((p) => p.status === 'active') || plans[0];
+      portfolioValue += Number(plan?.total_amount || reservation.re_units?.list_price || 0);
+
+      for (const row of plan?.re_installment_schedule || []) {
+        if (row.status === 'paid') { collected += Number(row.amount_due || 0); dueEvents += 1; }
+        else if (row.status === 'overdue') { dueEvents += 1; overdueEvents += 1; }
+      }
+    }
+
+    const earned = commissions
+      .filter((c) => c.sales_rep_id === rep.id && c.status !== 'void')
+      .reduce((total, c) => total + Number(c.amount || 0), 0);
+
+    return {
+      sales_rep_id: rep.id,
+      name: rep.users?.full_name || rep.users?.email || 'Unnamed rep',
+      active: rep.active !== false,
+      deals_closed: mine.length,
+      total_contracted: round2(portfolioValue),
+      total_collected: round2(collected),
+      collection_rate: portfolioValue > 0 ? Math.round((collected / portfolioValue) * 100) : 0,
+      default_rate: dueEvents > 0 ? Math.round((overdueEvents / dueEvents) * 100) : 0,
+      commission_earned: round2(earned),
+    };
+  });
+
+  return rows.sort((a, b) => b.total_collected - a.total_collected);
+}
+
+module.exports = { accrueForPayment, summaryByRep, repPerformance, leaderboard, round2 };

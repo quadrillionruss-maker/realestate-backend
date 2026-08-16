@@ -137,6 +137,39 @@ a { color: var(--accent); }
 .card-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
 .card-body { padding: 16px; }
 
+/* SECTION 21 — the MRR chart. Height in discrete 10%-buckets via a class
+   (.mrr-bar-h0..h100), not an inline style — this page's CSP is looser
+   through server.js (helmet allows 'unsafe-inline' for styles there) but
+   NOT through the separate Vercel deployment (frontend/vercel.json has no
+   'unsafe-inline' for style-src, see this page's own top-of-file comment),
+   so a bar chart that only renders correctly on one of the two deploy
+   paths is a bug waiting to be filed. */
+.mrr-chart { display: flex; align-items: flex-end; gap: 6px; height: 140px; }
+.mrr-bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; height: 100%; }
+.mrr-bar-track { width: 100%; height: 100px; display: flex; align-items: flex-end; }
+.mrr-bar { width: 100%; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; }
+.mrr-bar-label { font-size: 9px; color: var(--text-faint); font-family: var(--mono); white-space: nowrap; }
+.mrr-bar-h0 { height: 2%; } .mrr-bar-h10 { height: 10%; } .mrr-bar-h20 { height: 20%; }
+.mrr-bar-h30 { height: 30%; } .mrr-bar-h40 { height: 40%; } .mrr-bar-h50 { height: 50%; }
+.mrr-bar-h60 { height: 60%; } .mrr-bar-h70 { height: 70%; } .mrr-bar-h80 { height: 80%; }
+.mrr-bar-h90 { height: 90%; } .mrr-bar-h100 { height: 100%; }
+.mrr-plan-row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+
+/* SECTION 22 — feature usage heat grid. Discrete indigo buckets via a class,
+   same reasoning as the MRR bars above: this has to render identically
+   through server.js's looser CSP and Vercel's stricter one, so no inline
+   background-color. Indigo specifically (not --accent, this page's teal) —
+   the spec asked for it by name to read as a distinct "heat" scale rather
+   than the page's own brand color. */
+table.data.usage-grid th { white-space: pre-line; line-height: 1.3; }
+.usage-cell { text-align: center; font-family: var(--mono); font-size: 12px; }
+.usage-heat-0 { background: var(--bg); color: var(--text-faint); }
+.usage-heat-1 { background: #EEF2FF; color: #312E81; }
+.usage-heat-2 { background: #C7D2FE; color: #312E81; }
+.usage-heat-3 { background: #A5B4FC; color: #1E1B4B; }
+.usage-heat-4 { background: #6366F1; color: #fff; }
+.usage-heat-5 { background: #4338CA; color: #fff; }
+
 /* ── Table ── */
 .search-input {
   padding: 8px 12px; border: 1.5px solid var(--line-strong); border-radius: var(--radius); font-size: 13px; width: 260px;
@@ -157,6 +190,22 @@ table.data tr.is-clickable { cursor: pointer; }
 .detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 20px; font-size: 12.5px; }
 .detail-grid .k { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
 .detail-grid .v { margin-top: 2px; }
+
+/* SECTION 23 — onboarding checklist, shown inside the same expanded detail
+   row. Width in discrete 10%-buckets via a class (.onboarding-bar-wN), same
+   reasoning as the MRR/usage buckets above: no inline style, so it survives
+   both this app's server.js CSP and the stricter Vercel one. */
+.onboarding-block { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.onboarding-block .k { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+.onboarding-bar-track { width: 100%; max-width: 320px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; margin-bottom: 10px; }
+.onboarding-bar { height: 100%; background: var(--accent); border-radius: 4px; }
+.onboarding-bar-w0 { width: 0%; } .onboarding-bar-w10 { width: 10%; } .onboarding-bar-w20 { width: 20%; }
+.onboarding-bar-w30 { width: 30%; } .onboarding-bar-w40 { width: 40%; } .onboarding-bar-w50 { width: 50%; }
+.onboarding-bar-w60 { width: 60%; } .onboarding-bar-w70 { width: 70%; } .onboarding-bar-w80 { width: 80%; }
+.onboarding-bar-w90 { width: 90%; } .onboarding-bar-w100 { width: 100%; }
+.onboarding-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 20px; font-size: 12px; }
+.onboarding-steps li { color: var(--text-faint); }
+.onboarding-steps li.done { color: var(--text); }
 
 /* Square permit tags, matching the operator app's own badge shape. */
 .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 2px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; border: 1px solid transparent; }

@@ -47,6 +47,20 @@ const avatarLimiter = rateLimit({
   message: { error: 'Too many uploads. Wait a few minutes and try again.' },
 });
 
+// SECTION 3 — resolves req.tokenHash (set by middleware/auth.js) to the
+// re_sessions row it belongs to. null is a normal answer, not an error: the
+// lazy upsert that creates the row is fire-and-forget, so the very first
+// request on a brand new token can reach here before its own row exists.
+async function currentSessionId(tokenHash) {
+  if (!tokenHash) return null;
+  const { data } = await supabaseAdmin
+    .from('re_sessions')
+    .select('id')
+    .eq('token_hash', tokenHash)
+    .maybeSingle();
+  return data?.id || null;
+}
+
 // What the sign-in screen needs to know before anyone types anything: whether
 // to draw a Google button, and whether to offer a sign-up tab.
 router.get('/config', (_req, res) => {
@@ -90,6 +104,62 @@ router.post('/login', credentialLimiter, async (req, res, next) => {
   try {
     const { email, password } = req.body || {};
     res.json(await auth.login({ email, password }));
+  } catch (e) { next(e); }
+});
+
+// SECTION 2 — second step of login when POST /login above answered
+// requires_2fa: true. Shares credentialLimiter's budget with /login and
+// /register — a code guess is exactly the same class of attempt a password
+// guess is.
+router.post('/login/2fa', credentialLimiter, async (req, res, next) => {
+  try {
+    const { partial_token: partialToken, code } = req.body || {};
+    if (!partialToken || !code) {
+      return res.status(400).json({ error: 'partial_token and code are required.' });
+    }
+    res.json(await auth.loginWithTotp({ partialToken, code }));
+  } catch (e) { next(e); }
+});
+
+// ── SECTION 2 — 2FA management ──────────────────────────────────────────────
+// Owner role only. Not a permissions.js entry: that file's whole model is
+// "what may a role do inside a workspace's own data", and this is an
+// account property that happens to be gated to whichever role a caller
+// currently holds — checked here, inline, the same way PATCH /me's
+// current_password requirement is a check specific to this file rather
+// than a general permission.
+function requireOwnerForTwoFactor(req, res) {
+  if (normalizeRole(req.user.role) !== 'owner') {
+    res.status(403).json({ error: 'Two-factor authentication is available to the workspace owner only.' });
+    return false;
+  }
+  return true;
+}
+
+router.post('/2fa/setup', authenticate, credentialLimiter, async (req, res, next) => {
+  try {
+    if (!requireOwnerForTwoFactor(req, res)) return;
+    const result = await auth.setupTotp(req.user.id, req.user.email);
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+router.post('/2fa/verify', authenticate, credentialLimiter, async (req, res, next) => {
+  try {
+    if (!requireOwnerForTwoFactor(req, res)) return;
+    const result = await auth.verifyTotpSetup(req.user.id, req.body?.code);
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+router.post('/2fa/disable', authenticate, credentialLimiter, async (req, res, next) => {
+  try {
+    if (!requireOwnerForTwoFactor(req, res)) return;
+    await auth.disableTotp(req.user.id, {
+      currentPassword: req.body?.current_password,
+      code: req.body?.code,
+    });
+    res.status(204).end();
   } catch (e) { next(e); }
 });
 
@@ -148,7 +218,7 @@ router.get('/me', authenticate, async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin
       .from('users')
-      .select('id, email, full_name, company_name, avatar_url, created_at, last_login_at, email_verified_at')
+      .select('id, email, full_name, company_name, avatar_url, created_at, last_login_at, email_verified_at, totp_enabled')
       .eq('id', req.user.id)
       .maybeSingle();
     if (error) throw error;
@@ -201,6 +271,18 @@ router.get('/me', authenticate, async (req, res, next) => {
       // A password-less account signed up with Google and has nothing to
       // "change"; the Settings screen shows "Set a password" instead.
       has_password: Boolean((await auth.findUserByEmail(data.email))?.password_hash),
+      // SECTION 1 — the PUBLIC half of the VAPID pair, safe to hand to the
+      // browser (it's what PushManager.subscribe() signs against). Absent
+      // → the frontend never shows the permission banner at all, the same
+      // "missing key, feature quietly unavailable" shape every other
+      // optional provider in this product already degrades by.
+      vapid_public_key: env.vapid.publicKey || null,
+      // SECTION 3 — lets the Sessions screen mark one row "This device"
+      // without the client ever having to compute or send a token hash
+      // itself. null only if migration 047 has not run yet or the lazy
+      // upsert in middleware/auth.js has not landed this specific request's
+      // row yet (a race that resolves itself on the very next request).
+      current_session_id: await currentSessionId(req.tokenHash),
     });
   } catch (e) { next(e); }
 });
@@ -349,6 +431,69 @@ router.post('/logout', authenticate, async (req, res, next) => {
       token: auth.issueToken({ id: req.user.id, email: req.user.email, token_version: version ?? 0 }),
       sessions_ended: true,
     });
+  } catch (e) { next(e); }
+});
+
+// ── SECTION 3 — session visibility and management ───────────────────────────
+// A session is created lazily by middleware/auth.js the first time a token
+// is actually used, so this list is "every device that has made at least
+// one request since 047 shipped", not "every token ever issued" — a token
+// nobody has used yet has no row to show.
+router.get('/sessions', authenticate, async (req, res, next) => {
+  try {
+    const [{ data, error }, currentId] = await Promise.all([
+      supabaseAdmin
+        .from('re_sessions')
+        .select('id, device_info, ip_address, created_at, last_used_at')
+        .eq('user_id', req.user.id)
+        .is('revoked_at', null)
+        .order('last_used_at', { ascending: false }),
+      currentSessionId(req.tokenHash),
+    ]);
+    if (error) throw error;
+
+    res.json((data || []).map((s) => ({ ...s, is_current: s.id === currentId })));
+  } catch (e) { next(e); }
+});
+
+// Revokes one session — the row itself has to belong to the caller (there
+// is no "revoke someone else's session" here, even for an owner; that is a
+// different feature, team removal, and already exists via
+// bumpTokenVersion). Revoking the CURRENT session is allowed on purpose —
+// that is exactly what the sign-out button calls, per its own comment in
+// frontend/realestate.js.
+router.delete('/sessions/:id', authenticate, async (req, res, next) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('re_sessions')
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .eq('user_id', req.user.id)
+      .is('revoked_at', null)
+      .select('id')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Session not found' });
+    res.status(204).end();
+  } catch (e) { next(e); }
+});
+
+// "Sign out all other devices" — every OTHER live session for this user,
+// current one excluded so the click does not also sign the caller out of
+// the tab they clicked it from.
+router.delete('/sessions', authenticate, async (req, res, next) => {
+  try {
+    const currentId = await currentSessionId(req.tokenHash);
+    let query = supabaseAdmin
+      .from('re_sessions')
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('user_id', req.user.id)
+      .is('revoked_at', null);
+    if (currentId) query = query.neq('id', currentId);
+
+    const { data, error } = await query.select('id');
+    if (error) throw error;
+    res.json({ revoked: (data || []).length });
   } catch (e) { next(e); }
 });
 

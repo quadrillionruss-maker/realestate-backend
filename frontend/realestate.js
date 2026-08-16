@@ -525,7 +525,11 @@
     return '<div class="table-wrap"><table class="data"><thead><tr>' +
       columns.map(function (c) {
         var cls = [c.num ? 'num' : '', c.hideMobile ? 'hide-mobile' : ''].filter(Boolean).join(' ');
-        return '<th' + (cls ? ' class="' + cls + '"' : '') + '>' + esc(c.label) + '</th>';
+        // SECTION 4 — c.raw opts a header out of escaping, for the one case
+        // a column label needs to BE markup (a select-all checkbox) rather
+        // than describe text. Off by default — every existing caller passes
+        // a plain string label and keeps getting it escaped exactly as before.
+        return '<th' + (cls ? ' class="' + cls + '"' : '') + '>' + (c.raw ? c.label : esc(c.label)) + '</th>';
       }).join('') +
       '</tr></thead><tbody>' +
       rows.map(rowFn).join('') +
@@ -566,7 +570,13 @@
     openCallPopup = null;
   }
 
-  function showCallPopup(anchor, phone) {
+  // SECTION 17 — customerId/customerName are undefined for a tel: link
+  // rendered with no buyer context (there are none left after screens.js's
+  // own SECTION 17 pass added data-customer-id everywhere a Call link
+  // already knows who it's calling, but this stays optional rather than
+  // required so a future tel: link that forgets the attribute just skips
+  // outcome-logging instead of throwing).
+  function showCallPopup(anchor, phone, customerId, customerName) {
     closeCallPopup();
 
     var normalized = waNumber(phone);
@@ -577,7 +587,7 @@
     pop.setAttribute('role', 'dialog');
     pop.innerHTML =
       '<div class="call-popup-number">' + esc(phone) + '</div>' +
-      '<button class="btn-quiet" type="button">Copy</button>';
+      '<button class="btn-quiet" type="button" data-call-copy>Copy</button>';
 
     document.body.appendChild(pop);
 
@@ -591,10 +601,25 @@
     pop.style.top = top + 'px';
     pop.style.left = left + 'px';
 
-    pop.querySelector('.btn-quiet').addEventListener('click', function () {
+    pop.querySelector('[data-call-copy]').addEventListener('click', function () {
       copyText(copyValue).then(function () {
         toast('Copied', 'ok');
-        closeCallPopup();
+        // SECTION 17 — "after copying the number show a Log this call
+        // button that opens the same outcome modal immediately." Appended
+        // rather than replacing the popup outright, so Copy still reads as
+        // having worked before the next action appears.
+        if (customerId && !pop.querySelector('[data-call-log]')) {
+          var logBtn = document.createElement('button');
+          logBtn.className = 'btn-quiet';
+          logBtn.type = 'button';
+          logBtn.setAttribute('data-call-log', '');
+          logBtn.textContent = 'Log this call';
+          logBtn.addEventListener('click', function () {
+            closeCallPopup();
+            openCallOutcomeModal(customerId, customerName, { askReached: false });
+          });
+          pop.appendChild(logBtn);
+        }
       }, function () {
         toast('Could not copy — try selecting the number instead.', 'err');
       });
@@ -603,22 +628,38 @@
     openCallPopup = pop;
   }
 
+  // SECTION 17 — a call just placed from a touch device (the dialer took
+  // over; there was no popup to attach a "Log this call" button to). Set
+  // right before the dialer opens; read back once this window regains
+  // focus/visibility, per pendingCallReturned below.
+  var pendingCallCustomer = null;
+
   // One document-level listener, exactly like wireSearch()'s outside-click
   // handling below — installed once in boot(), covers every screen.
   function wireCallLinks() {
     document.addEventListener('click', function (e) {
       var link = e.target.closest('a[href^="tel:"]');
       if (link) {
-        if (isTouchDevice()) return; // unchanged: let the dialer open
-        e.preventDefault();
         var phone = link.getAttribute('href').replace(/^tel:/, '');
+        var customerId = link.dataset.customerId || null;
+        var customerName = link.dataset.customerName || '';
+
+        if (isTouchDevice()) {
+          // Unchanged: let the dialer open. Only difference is remembering
+          // who this call was to, for pendingCallReturned to ask about once
+          // the user comes back to this tab.
+          if (customerId) pendingCallCustomer = { id: customerId, name: customerName };
+          return;
+        }
+
+        e.preventDefault();
         // Clicking the already-open popup's own trigger again closes it,
         // rather than closing and instantly reopening in the same spot.
         if (openCallPopup && openCallPopup.dataset.forLink === phone && document.body.contains(openCallPopup)) {
           closeCallPopup();
           return;
         }
-        showCallPopup(link, phone);
+        showCallPopup(link, phone, customerId, customerName);
         if (openCallPopup) openCallPopup.dataset.forLink = phone;
         return;
       }
@@ -628,6 +669,107 @@
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') closeCallPopup();
     });
+
+    // SECTION 17 — "after returning to the app (focus/visibility change
+    // event after 5 seconds)". Both events are wired (a phone switching
+    // apps fires visibilitychange reliably; focus is the desktop/tablet
+    // fallback) but pendingCallReturned's own dedupe means only the first
+    // one to fire after a given call actually shows the prompt.
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') pendingCallReturned();
+    });
+    window.addEventListener('focus', pendingCallReturned);
+  }
+
+  var pendingCallPromptTimer = null;
+
+  function pendingCallReturned() {
+    if (!pendingCallCustomer || pendingCallPromptTimer) return;
+    var call = pendingCallCustomer;
+    pendingCallPromptTimer = setTimeout(function () {
+      pendingCallPromptTimer = null;
+      // Cleared before opening, not after: if the rep is still on this
+      // prompt when a SECOND call happens to complete, that should open its
+      // own fresh prompt rather than being silently absorbed into this one.
+      pendingCallCustomer = null;
+      openCallOutcomeModal(call.id, call.name, { askReached: true });
+    }, 5000);
+  }
+
+  // SECTION 17 — deliberately NOT the same five values as
+  // re_activities.outcome's own enum (interested/not_interested/
+  // promised_payment/no_answer/follow_up_needed — routes/customers.js's
+  // ACTIVITY_OUTCOMES): those describe a CONVERSATION's outcome, these
+  // describe whether the CALL CONNECTED at all, a different and finer-
+  // grained question a rep still answers before ever getting to "were they
+  // interested". Rather than widen a database CHECK constraint for a
+  // frontend-only feature, this folds straight into the activity's notes
+  // text (logCallActivity below) — 're_activities.notes' already accepts
+  // free text, and "Call outcome: Voicemail" reads perfectly well in the
+  // Activity timeline exactly as logged.
+  var CALL_OUTCOMES = [
+    ['answered', 'Answered'], ['no_answer', 'No answer'], ['voicemail', 'Voicemail'],
+    ['busy', 'Busy'], ['wrong_number', 'Wrong number'],
+  ];
+
+  async function logCallActivity(customerId, outcomeLabel, notes) {
+    var composed = 'Call outcome: ' + outcomeLabel + (notes ? ' — ' + notes : '');
+    // SECTION 14 — same offline-safe path logActivityModal (screens.js) already
+    // uses: a rep on a site visit with no signal is exactly the case this exists for.
+    var result = await RE.offlineQueue.submitOrQueue('log_activity', '/customers/' + customerId + '/activities', {
+      activity_type: 'call',
+      notes: composed,
+    });
+    toast(result.queued ? 'No connection — call logged and will sync automatically.' : 'Call logged.', 'ok');
+  }
+
+  function callOutcomeStepHtml() {
+    return '<p class="page-sub mb-2">How did it go?</p>' +
+      '<div class="btn-row wrap mb-2">' +
+        CALL_OUTCOMES.map(function (o) {
+          return '<button class="btn-quiet" type="button" data-call-outcome="' + o[0] + '">' + esc(o[1]) + '</button>';
+        }).join('') +
+      '</div>' +
+      '<div class="field"><label for="call-outcome-notes">Notes (optional)</label>' +
+        '<textarea class="textarea" id="call-outcome-notes" rows="2"></textarea></div>';
+  }
+
+  // askReached: true for the mobile flow (tel: link fired the dialer; ask
+  // "did you reach them" first) — false for the desktop popup's "Log this
+  // call" button, which already implies yes, skip straight to the outcome
+  // step. Both paths end at the same five-button outcome step and the same
+  // logCallActivity call.
+  function openCallOutcomeModal(customerId, customerName, opts) {
+    var askReached = Boolean(opts && opts.askReached);
+
+    var m = modal({
+      title: askReached ? 'Did you reach ' + (customerName || 'them') + '?' : 'Log this call',
+      cancelLabel: askReached ? 'Not yet' : 'Cancel',
+      body: askReached
+        ? '<p class="page-sub">Quick note on how the call with ' + esc(customerName || 'this buyer') + ' went.</p>' +
+          '<div class="btn-row mt-2"><button class="btn primary" type="button" data-call-reached>Reached — log it</button></div>'
+        : callOutcomeStepHtml(),
+      onSubmit: function () {}, // every action here is its own button — see openAccountModal's identical reasoning
+    });
+
+    function wireOutcomeButtons() {
+      qsa('[data-call-outcome]', m.form).forEach(function (button) {
+        button.addEventListener('click', async function () {
+          var notesField = qs('#call-outcome-notes', m.form);
+          await logCallActivity(customerId, button.textContent, notesField ? notesField.value.trim() : '');
+          m.close();
+        });
+      });
+    }
+
+    if (askReached) {
+      qs('[data-call-reached]', m.form).addEventListener('click', function () {
+        m.form.innerHTML = callOutcomeStepHtml();
+        wireOutcomeButtons();
+      });
+    } else {
+      wireOutcomeButtons();
+    }
   }
 
   // Wires a button that does async work: spinner while it runs, toast on
@@ -914,7 +1056,7 @@
   }
 
   // ── Gate ──────────────────────────────────────────────────────────────
-  var gateForms = ['form-login', 'form-register', 'form-forgot', 'form-reset'];
+  var gateForms = ['form-login', 'form-register', 'form-forgot', 'form-reset', 'form-2fa'];
 
   function showGateForm(id) {
     gateForms.forEach(function (formId) { el(formId).hidden = formId !== id; });
@@ -960,6 +1102,19 @@
           email: el('login-email').value.trim(),
           password: el('login-password').value,
         });
+
+        // SECTION 2 — an owner with 2FA on gets a short-lived partial_token
+        // instead of a real session; the form-2fa screen exchanges it for
+        // one after a correct code (POST /auth/login/2fa). Nothing is
+        // stored yet — pendingTwoFactorToken lives only in this tab, only
+        // until that exchange succeeds or the user cancels back to sign-in.
+        if (result.requires_2fa) {
+          pendingTwoFactorToken = result.partial_token;
+          el('login-password').value = '';
+          showGateForm('form-2fa');
+          return;
+        }
+
         setToken(result.token);
         el('login-password').value = '';
 
@@ -985,6 +1140,52 @@
         button.disabled = false;
         button.classList.remove('is-working');
       }
+    });
+
+    // SECTION 2 — second step of login. pendingInviteToken (above) is still
+    // honoured here too: an invited address with 2FA on has to clear BOTH
+    // steps before the invite is claimed.
+    el('form-2fa').addEventListener('submit', async function (e) {
+      e.preventDefault();
+      var button = el('tfa-login-submit');
+      if (button.disabled) return;
+      gateError('tfa-login-error', '');
+      button.disabled = true;
+      button.classList.add('is-working');
+
+      try {
+        var result = await authApi.post('/login/2fa', {
+          partial_token: pendingTwoFactorToken,
+          code: el('tfa-login-code').value.trim(),
+        });
+        setToken(result.token);
+        el('tfa-login-code').value = '';
+        pendingTwoFactorToken = null;
+
+        if (pendingInviteToken) {
+          try {
+            var accepted = await authApi.post('/invite/accept', { token: pendingInviteToken });
+            setWorkspace(accepted.team_id);
+            window.location.hash = '#/dashboard';
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+          pendingInviteToken = null;
+        }
+
+        await enterApp();
+      } catch (err) {
+        gateError('tfa-login-error', err.message);
+      } finally {
+        button.disabled = false;
+        button.classList.remove('is-working');
+      }
+    });
+
+    el('link-2fa-cancel').addEventListener('click', function () {
+      pendingTwoFactorToken = null;
+      gateError('tfa-login-error', '');
+      showGateForm('form-login');
     });
 
     el('form-register').addEventListener('submit', async function (e) {
@@ -1300,6 +1501,7 @@
 
     await renderRoute();
     refreshCounts();
+    refreshNotifBell();
   }
 
   function showGate() {
@@ -1313,6 +1515,15 @@
   }
 
   function signOut(message) {
+    // SECTION 3 — best-effort, not awaited: sign-out has to feel instant
+    // regardless of network state, and a session that fails to revoke here
+    // is not a security hole — the token itself is about to be discarded
+    // client-side, and the row simply ages out of "last used" on the
+    // Sessions screen instead of showing revoked_at.
+    if (RE.state.user && RE.state.user.current_session_id) {
+      api('/auth/sessions/' + RE.state.user.current_session_id, { method: 'DELETE' }).catch(function () {});
+    }
+
     setToken(null);
     RE.state.user = null;
     RE.state.config = RE.state.config || {};
@@ -1370,6 +1581,31 @@
         '<div class="field"><label for="acc-new">' + (me.has_password ? 'New password' : 'Set a password') + '</label>' +
           '<input class="input" id="acc-new" type="password" autocomplete="new-password" placeholder="At least 12 characters"></div>' +
         '<button class="btn" type="button" id="btn-change-password">Change password</button>' +
+
+        // SECTION 2 — owner role only, same gate routes/auth.js's own
+        // 2fa/* routes enforce server-side; this is presentation only, the
+        // usual rule (CLAUDE.md: hiding a button is never the real gate).
+        (me.role === 'owner'
+          ? '<div class="divider"></div>' +
+            '<div class="field"><label>Two-factor authentication</label>' +
+              '<p class="field-hint mb-1">' +
+                (me.totp_enabled
+                  ? 'Enabled — an authenticator app code is required every time you sign in.'
+                  : 'Not enabled. Adds a second step to sign-in using an authenticator app.') +
+              '</p>' +
+              '<button class="btn" type="button" id="btn-manage-2fa">' +
+                (me.totp_enabled ? 'Manage 2FA' : 'Enable 2FA') +
+              '</button></div>'
+          : '') +
+
+        '<div class="divider"></div>' +
+
+        // SECTION 3 — every role, not owner-only: a session is a fact about
+        // the signed-in PERSON (this modal's whole scope, per its own
+        // comment below), not a workspace permission.
+        '<div class="field"><label>Sessions</label>' +
+          '<p class="field-hint mb-1">See every device signed in as you, and sign out ones you do not recognise.</p>' +
+          '<button class="btn" type="button" id="btn-manage-sessions">Manage sessions</button></div>' +
 
         '<div class="divider"></div>' +
 
@@ -1492,6 +1728,21 @@
       toast('Password changed. Every other signed-in device has been signed out.', 'ok');
     });
 
+    // SECTION 2 — defined in screens.js (it needs the same multi-step-modal
+    // idioms every other domain flow there already uses); called dynamically
+    // here since realestate.js loads first and screens.js has finished
+    // registering everything long before anyone actually clicks this button.
+    var manage2fa = qs('#btn-manage-2fa', m.root);
+    if (manage2fa) {
+      manage2fa.addEventListener('click', async function () {
+        await RE.twoFactorModal(me);
+      });
+    }
+
+    onClick(m.root, '#btn-manage-sessions', async function () {
+      await RE.sessionsModal();
+    });
+
     onClick(m.root, '#btn-account-signout', async function () {
       m.close();
       signOut();
@@ -1503,6 +1754,7 @@
     wireGate();
     wireSearch();
     wireCallLinks();
+    wireNotifBell();
 
     el('btn-signout').addEventListener('click', function () { signOut(); });
     el('btn-signout-icon').addEventListener('click', function () { signOut(); });
@@ -1552,6 +1804,12 @@
   // variable is actually used for is somebody who already has an account and
   // needs to sign in before POST /invite/accept can attach it to them.
   var pendingInviteToken = null;
+
+  // SECTION 2 — the partial_token POST /login hands back when the account
+  // signing in has 2FA on. Lives only in this tab, only until form-2fa's
+  // own submit handler exchanges it for a real session token or the user
+  // cancels back to the plain sign-in form.
+  var pendingTwoFactorToken = null;
 
   async function consumeInviteLink() {
     el('gate').hidden = false;
@@ -1667,6 +1925,259 @@
     table: table,
     emptyState: emptyState,
     skeleton: skeleton,
+
+    // SECTION 1
+    pushSupported: pushSupported,
+    shouldShowPushBanner: shouldShowPushBanner,
+    dismissPushBanner: dismissPushBanner,
+    subscribeToPush: subscribeToPush,
+    refreshNotifBell: refreshNotifBell,
+
+    // SECTION 15
+    whatsappQueue: whatsappQueue,
+  };
+
+  // ── SECTION 1 — push notifications ───────────────────────────────────────
+  // A VAPID public key arrives as base64url; PushManager.subscribe() wants
+  // it as a raw Uint8Array. This is the standard conversion every Web Push
+  // integration needs — there is no browser API that does it for you.
+  function urlBase64ToUint8Array(base64String) {
+    var padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+    var base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    var raw = window.atob(base64);
+    var output = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; ++i) output[i] = raw.charCodeAt(i);
+    return output;
+  }
+
+  function pushSupported() {
+    return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  }
+
+  var PUSH_BANNER_DISMISSED_KEY = 'archta_push_banner_dismissed';
+
+  function pushBannerDismissed() {
+    try { return window.localStorage.getItem(PUSH_BANNER_DISMISSED_KEY) === 'true'; }
+    catch (e) { return false; }
+  }
+
+  function dismissPushBanner() {
+    try { window.localStorage.setItem(PUSH_BANNER_DISMISSED_KEY, 'true'); } catch (e) { /* private browsing */ }
+  }
+
+  // Whether the banner should even be considered: supported by this browser,
+  // the server has a VAPID key configured at all, permission has not
+  // already been decided either way (a "denied" browser can only be
+  // re-enabled from the browser's own site settings, not by asking again),
+  // and this browser hasn't already dismissed it.
+  function shouldShowPushBanner() {
+    return pushSupported()
+      && Boolean(RE.state.user && RE.state.user.vapid_public_key)
+      && Notification.permission === 'default'
+      && !pushBannerDismissed();
+  }
+
+  // The whole flow: ask the browser, subscribe with the service worker,
+  // save the subscription server-side. Thrown errors are the caller's to
+  // toast — this does not swallow them, since "why didn't that work" matters
+  // for a feature the user just explicitly opted into.
+  async function subscribeToPush() {
+    if (!pushSupported()) throw new Error('Push notifications are not supported in this browser.');
+    if (!RE.state.user || !RE.state.user.vapid_public_key) {
+      throw new Error('Push notifications are not configured on this server.');
+    }
+
+    var permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      throw new Error(permission === 'denied'
+        ? 'Notifications are blocked. Enable them from your browser\'s site settings to turn this on.'
+        : 'Permission was not granted.');
+    }
+
+    var registration = await navigator.serviceWorker.ready;
+    var subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(RE.state.user.vapid_public_key),
+    });
+
+    await api.post('/push/subscribe', { subscription: subscription.toJSON() });
+  }
+
+  // ── The bell ─────────────────────────────────────────────────────────────
+  var notifDropdownOpen = false;
+
+  function renderNotifRow(n) {
+    return '<button class="notif-row' + (n.read_at ? '' : ' is-unread') + '" data-notif-id="' + esc(n.id) + '" data-notif-url="' + esc(n.url || '') + '">' +
+      '<div class="notif-title">' + esc(n.title) + '</div>' +
+      (n.body ? '<div class="notif-body">' + esc(n.body) + '</div>' : '') +
+      '<div class="notif-time">' + esc(fmtRelative(n.created_at)) + '</div>' +
+    '</button>';
+  }
+
+  async function refreshNotifBell() {
+    var badge = el('notif-count');
+    if (!badge) return; // not signed in yet — boot() runs this before the gate even resolves
+    try {
+      var result = await api('/push/notifications?limit=20');
+      badge.textContent = result.unread_count > 9 ? '9+' : String(result.unread_count);
+      badge.classList.toggle('hidden', !result.unread_count);
+      RE.state.notifications = result.items;
+    } catch (e) {
+      // A failed fetch leaves the last-known badge state rather than
+      // clearing it — an unreachable API for one refresh should not read as
+      // "you have no notifications".
+    }
+  }
+
+  function closeNotifDropdown() {
+    var dropdown = el('notif-dropdown');
+    if (dropdown) dropdown.classList.add('hidden');
+    notifDropdownOpen = false;
+    document.removeEventListener('mousedown', onNotifDocClick);
+  }
+
+  function onNotifDocClick(e) {
+    var dropdown = el('notif-dropdown');
+    var button = el('btn-notifications');
+    if (dropdown && !dropdown.contains(e.target) && button && !button.contains(e.target)) closeNotifDropdown();
+  }
+
+  function openNotifDropdown() {
+    var dropdown = el('notif-dropdown');
+    if (!dropdown) return;
+    var items = RE.state.notifications || [];
+    dropdown.innerHTML = items.length
+      ? items.map(renderNotifRow).join('')
+      : emptyState('Nothing yet', 'Notifications about payments, briefs and buyer activity will show up here.');
+    dropdown.classList.remove('hidden');
+    notifDropdownOpen = true;
+
+    qsa('[data-notif-id]', dropdown).forEach(function (row) {
+      row.addEventListener('click', async function () {
+        closeNotifDropdown();
+        try { await api.post('/push/notifications/' + row.dataset.notifId + '/read'); } catch (e) { /* not worth blocking navigation over */ }
+        refreshNotifBell();
+        if (row.dataset.notifUrl) window.location.hash = row.dataset.notifUrl.replace(/^\/?#?/, '#');
+      });
+    });
+
+    setTimeout(function () { document.addEventListener('mousedown', onNotifDocClick); }, 0);
+  }
+
+  function wireNotifBell() {
+    var button = el('btn-notifications');
+    if (!button) return;
+    button.addEventListener('click', function () {
+      if (notifDropdownOpen) closeNotifDropdown();
+      else openNotifDropdown();
+    });
+  }
+
+  // ── SECTION 15 — bulk WhatsApp from the brief ────────────────────────────
+  // sessionStorage, not a module variable: the whole point is surviving the
+  // user tabbing away to WhatsApp Web and back, which a plain in-memory
+  // variable would too (this tab never navigates), but sessionStorage is
+  // also what makes the queue resume correctly across an accidental reload
+  // of this tab mid-sequence, which a variable would silently lose.
+  var WHATSAPP_QUEUE_KEY = 'archta_whatsapp_queue';
+  var RESUME_DELAY_MS = 2000;
+  var whatsappQueueAwaitingFocus = false;
+
+  function readWhatsappQueue() {
+    try {
+      var raw = window.sessionStorage.getItem(WHATSAPP_QUEUE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  function writeWhatsappQueue(queue) {
+    try {
+      if (queue) window.sessionStorage.setItem(WHATSAPP_QUEUE_KEY, JSON.stringify(queue));
+      else window.sessionStorage.removeItem(WHATSAPP_QUEUE_KEY);
+    } catch (e) { /* private browsing, or storage disabled — the queue just won't survive a reload */ }
+  }
+
+  function openWhatsappQueueLink(queue) {
+    var item = queue.items[queue.index];
+    if (!item) return;
+    var win = window.open(item.url, '_blank', 'noopener');
+    // Some browsers (mobile Safari, popup-blocked desktop) refuse a
+    // window.open that isn't a direct response to the click that triggered
+    // it — start()/skip() below are both real click handlers, so this is
+    // the same trusted-gesture chain openFile() elsewhere in this file
+    // already relies on, just without the extra fetch-then-click step a
+    // signed URL needs.
+    if (!win) toast('Your browser blocked the popup. Allow popups for this site to use Send all.', 'err');
+    whatsappQueueAwaitingFocus = true;
+  }
+
+  // Drafts with no usable phone number are filtered out up front rather
+  // than left in the queue to silently fail on — "Sending 3 of 7" should
+  // never land on a draft with nothing to open.
+  function startWhatsappQueue(drafts) {
+    var items = [];
+    (drafts || []).forEach(function (d) {
+      var link = waLink(d.customer_phone);
+      if (!link) return;
+      items.push({
+        name: d.customer_name || 'this buyer',
+        url: link + '&text=' + encodeURIComponent(d.whatsapp_draft || ''),
+      });
+    });
+    if (!items.length) {
+      toast('None of these drafts have a valid phone number on file.', 'err');
+      return;
+    }
+    var queue = { items: items, index: 0, total: items.length };
+    writeWhatsappQueue(queue);
+    openWhatsappQueueLink(queue);
+  }
+
+  function skipWhatsappQueueItem() {
+    var queue = readWhatsappQueue();
+    if (!queue) return;
+    advanceWhatsappQueue(queue);
+  }
+
+  function advanceWhatsappQueue(queue) {
+    queue.index += 1;
+    if (queue.index >= queue.items.length) {
+      writeWhatsappQueue(null);
+      toast('Reached the end of the queue (' + queue.total + ' draft(s)).', 'ok');
+      return;
+    }
+    writeWhatsappQueue(queue);
+    openWhatsappQueueLink(queue);
+  }
+
+  function endWhatsappQueue() {
+    writeWhatsappQueue(null);
+    whatsappQueueAwaitingFocus = false;
+  }
+
+  // Returning from WhatsApp Web (or anywhere else) fires a focus event on
+  // this window. A flat 2-second delay rather than reacting instantly: an
+  // instant re-trigger on every alt-tab (checking something else, coming
+  // right back) would fire the next link before the user meant to move on
+  // at all. Wrapped like every other top-level window.* call in this file
+  // (see the offline test suite's own comment on why): the minimal window
+  // stub logic.test.js requires this file against has no addEventListener.
+  try {
+    window.addEventListener('focus', function () {
+      if (!whatsappQueueAwaitingFocus) return;
+      whatsappQueueAwaitingFocus = false;
+      setTimeout(function () {
+        var queue = readWhatsappQueue();
+        if (queue) advanceWhatsappQueue(queue);
+      }, RESUME_DELAY_MS);
+    });
+  } catch (e) { /* no-op outside a real browser */ }
+
+  var whatsappQueue = {
+    start: startWhatsappQueue,
+    current: readWhatsappQueue,
+    skip: skipWhatsappQueueItem,
+    done: endWhatsappQueue,
   };
 
   document.addEventListener('DOMContentLoaded', boot);

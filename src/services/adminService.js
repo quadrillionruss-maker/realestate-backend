@@ -15,6 +15,7 @@ const crypto = require('crypto');
 const { supabaseAdmin: db, supabaseRaw } = require('../middleware/orgContext');
 const { hashPassword, issueToken, MIN_PASSWORD_LENGTH } = require('./authService');
 const { auditSystem } = require('./auditService');
+const featureUsageService = require('./featureUsageService');
 
 const notFound = (message) => Object.assign(new Error(message), { statusCode: 404 });
 const badRequest = (message) => Object.assign(new Error(message), { statusCode: 400 });
@@ -40,6 +41,7 @@ async function logAdminAction({ action, targetOrgId = null, targetUserEmail = nu
   }
 }
 
+const round2 = (value) => Math.round(Number(value) * 100) / 100;
 const sevenDaysAgo = () => new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 const startOfMonth = () => {
   const d = new Date();
@@ -610,6 +612,132 @@ async function migrationStatus() {
   return results.map(({ file, applied }) => ({ file, applied }));
 }
 
+// ── SECTION 21 — Archta's own subscription revenue ──────────────────────────
+// NOT developer customer revenue — that is the rest of this product
+// (re_payments, collected installments). This is what a WORKSPACE pays
+// Archta, tracked in re_subscriptions (migrations/052), a platform-wide
+// table this file is the only reader of.
+async function revenue() {
+  const monthStartIso = startOfMonth();
+
+  const [{ data: active, error: activeErr }, { data: endedThisMonth, error: endedErr }, { data: activeStartOfMonth, error: startErr }, { data: allSubs, error: allErr }] = await Promise.all([
+    supabaseRaw.from('re_subscriptions').select('organization_id, plan, monthly_amount').is('ended_at', null),
+    supabaseRaw.from('re_subscriptions').select('id').gte('ended_at', monthStartIso),
+    // "Active at the start of this month" — started before this month began,
+    // and either still active or only ended on/after this month began. This
+    // is the denominator both churn_rate and monthly_growth_rate below read
+    // from, so the two numbers describe the same baseline.
+    supabaseRaw.from('re_subscriptions').select('monthly_amount')
+      .lt('started_at', monthStartIso)
+      .or(`ended_at.is.null,ended_at.gte.${monthStartIso}`),
+    // Every subscription this workspace has ever had, for the 12-month MRR
+    // chart below — cheaper to read once and bucket in memory than to run
+    // twelve separate range queries.
+    supabaseRaw.from('re_subscriptions').select('monthly_amount, started_at, ended_at'),
+  ]);
+  if (activeErr) throw activeErr;
+  if (endedErr) throw endedErr;
+  if (startErr) throw startErr;
+  if (allErr) throw allErr;
+
+  const activeRows = active || [];
+  const mrr = round2(activeRows.reduce((sum, r) => sum + Number(r.monthly_amount || 0), 0));
+  const payingCustomers = activeRows.length;
+  const mrrStartOfMonth = round2((activeStartOfMonth || []).reduce((sum, r) => sum + Number(r.monthly_amount || 0), 0));
+  const activeCountStartOfMonth = (activeStartOfMonth || []).length;
+
+  const mrrByPlan = {};
+  for (const row of activeRows) {
+    mrrByPlan[row.plan] = round2((mrrByPlan[row.plan] || 0) + Number(row.monthly_amount || 0));
+  }
+
+  // 12-month MRR trend. A subscription counts toward a given month if it
+  // was active at ANY point during that month — started on or before the
+  // month's last day, and either still active or ended after the month's
+  // first day.
+  const now = new Date();
+  const monthlyMrr = [];
+  for (let i = 11; i >= 0; i -= 1) {
+    const monthDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const monthStart = monthDate.toISOString();
+    const monthEnd = new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 1).toISOString();
+    const monthMrr = (allSubs || [])
+      .filter((r) => r.started_at < monthEnd && (!r.ended_at || r.ended_at > monthStart))
+      .reduce((sum, r) => sum + Number(r.monthly_amount || 0), 0);
+    monthlyMrr.push({ month: monthStart.slice(0, 7), mrr: round2(monthMrr) });
+  }
+
+  return {
+    mrr,
+    total_paying_customers: payingCustomers,
+    average_revenue_per_customer: payingCustomers ? round2(mrr / payingCustomers) : 0,
+    // Subscriptions ended this month ÷ subscriptions active as of the start
+    // of this month — the spec's own formula, verbatim.
+    churn_rate: activeCountStartOfMonth
+      ? round2(((endedThisMonth || []).length / activeCountStartOfMonth) * 100)
+      : 0,
+    monthly_growth_rate: mrrStartOfMonth
+      ? round2(((mrr - mrrStartOfMonth) / mrrStartOfMonth) * 100)
+      : 0,
+    mrr_by_plan: mrrByPlan,
+    monthly_mrr_last_12: monthlyMrr,
+  };
+}
+
+// ── SECTION 22 — feature usage across every workspace ───────────────────────
+// re_feature_events (migrations/053) is one row per (org, feature, day),
+// written by featureUsageService.track() from ten call sites across the
+// product. This is the only reader — everything here is aggregation, no
+// write.
+async function featureUsage() {
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  const { data: rows, error } = await supabaseRaw
+    .from('re_feature_events')
+    .select('organization_id, feature, count')
+    .gte('date', since);
+  if (error) throw error;
+
+  const byFeature = {};
+  const byOrg = new Map();
+  for (const row of rows || []) {
+    byFeature[row.feature] = (byFeature[row.feature] || 0) + row.count;
+    if (!byOrg.has(row.organization_id)) byOrg.set(row.organization_id, {});
+    const orgFeatures = byOrg.get(row.organization_id);
+    orgFeatures[row.feature] = (orgFeatures[row.feature] || 0) + row.count;
+  }
+
+  const orgIds = [...byOrg.keys()];
+  const [{ data: teams }, { data: users }] = await Promise.all([
+    orgIds.length ? supabaseRaw.from('teams').select('id, name').in('id', orgIds) : Promise.resolve({ data: [] }),
+    orgIds.length ? supabaseRaw.from('users').select('id, full_name, email').in('id', orgIds) : Promise.resolve({ data: [] }),
+  ]);
+  const teamById = new Map((teams || []).map((t) => [t.id, t.name]));
+  const userById = new Map((users || []).map((u) => [u.id, u.full_name || u.email]));
+
+  // Solo workspaces (no teams row) have their own id as organization_id —
+  // same fallback listWorkspaces above already relies on.
+  const workspaces = orgIds
+    .map((orgId) => {
+      const features = byOrg.get(orgId);
+      const total = Object.values(features).reduce((sum, n) => sum + n, 0);
+      return {
+        organization_id: orgId,
+        name: teamById.get(orgId) || userById.get(orgId) || orgId,
+        features,
+        total,
+      };
+    })
+    .sort((a, b) => b.total - a.total);
+
+  return {
+    since,
+    features: featureUsageService.FEATURES,
+    by_feature: byFeature,
+    workspaces,
+  };
+}
+
 module.exports = {
   overview,
   listWorkspaces,
@@ -621,6 +749,8 @@ module.exports = {
   notificationStats,
   health,
   migrationStatus,
+  revenue,
+  featureUsage,
   MIN_PASSWORD_LENGTH,
   badRequest,
   notFound,

@@ -214,4 +214,25 @@ function tier(score) {
   return { key: 'at_risk', label: 'At risk' };
 }
 
-module.exports = { WEIGHTS, HARDSHIP_PENALTY, computeFromHistory, computeBreakdown, recompute, tier };
+// OVERRIDE — forecastService's default-risk assessment. A stored
+// credit_score is a point-in-time snapshot: it only moves when recompute()
+// above is actually called (a payment, a promise resolving, a hardship
+// approval, or the daily overdue sweep). A buyer who is visibly, currently,
+// several installments behind must never read as low-risk just because
+// nothing has recomputed their score since. 3 is not arbitrary — it is
+// escalationService's own threshold for 'formal_notice' (STAGES[2].minOverdue
+// in escalationService.js): a buyer already that far behind is a real risk by
+// this product's own definition, independent of what their score says.
+const OVERDUE_RISK_OVERRIDE_THRESHOLD = 3;
+
+function assessDefaultRisk(overdueCount, tierKey) {
+  if ((overdueCount || 0) >= OVERDUE_RISK_OVERRIDE_THRESHOLD) return 'high';
+  if (tierKey === 'at_risk') return 'high';
+  if (tierKey === 'fair') return 'medium';
+  return 'low';
+}
+
+module.exports = {
+  WEIGHTS, HARDSHIP_PENALTY, OVERDUE_RISK_OVERRIDE_THRESHOLD,
+  computeFromHistory, computeBreakdown, recompute, tier, assessDefaultRisk,
+};

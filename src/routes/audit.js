@@ -3,10 +3,30 @@
 // can alter is not evidence, and evidence is the point (see auditService).
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission } = require('../middleware/rbac');
 const { canAccess } = require('../services/permissions');
+const { toCsv } = require('../utils/csv');
+const { audit } = require('../services/auditService');
 const router = express.Router();
+
+// FEATURE — a full CSV of the audit log is the single most sensitive export
+// this product offers (every action, every actor, every IP, back to day
+// one); owner-only (see permissions.js) and rate-limited hard enough that
+// even a compromised owner session can only walk away with it a handful of
+// times a day. 24h is a first for this codebase — every other limiter here
+// (see reports.js's exportLimiter) is a 15-minute window at a much higher
+// count, because none of them is "the whole history of the workspace" the
+// way this one is.
+const auditExportLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: 'Audit log export is limited to 3 per day. Try again tomorrow.' },
+});
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -111,6 +131,47 @@ router.get('/notifications', requirePermission('audit.read'), async (req, res, n
     const { data, error } = await query;
     if (error) throw error;
     res.json(data);
+  } catch (e) { next(e); }
+});
+
+// Owner only. No filters — a partial export invites the question "what was
+// left out and why", and the whole point of this button is a complete record
+// a developer can hand to a lawyer or a regulator unedited.
+router.get('/export', auditExportLimiter, requirePermission('audit.export'), async (req, res, next) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('re_audit_log')
+      .select('*')
+      .eq('organization_id', req.orgId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    const rows = data || [];
+    const stamp = new Date().toISOString().slice(0, 10);
+
+    // audit.export is owner-only and owner always has financial.view, so
+    // unlike GET /entity/:type/:id above this needs no redactFinancialAuditRows
+    // pass — there is no role reachable here that this would ever hide
+    // something from.
+    audit(req, {
+      action: 'audit.exported',
+      entityType: 're_audit_log',
+      summary: `Exported ${rows.length} audit log row(s) to CSV`,
+      metadata: { rows: rows.length },
+    });
+
+    res
+      .type('text/csv; charset=utf-8')
+      .attachment(`archta-audit-log-${stamp}.csv`)
+      .send(toCsv([
+        ['Timestamp', 'created_at'],
+        ['User', (r) => r.actor_email || r.actor_kind],
+        ['Action', 'action'],
+        ['Entity type', 'entity_type'],
+        ['Entity ID', (r) => r.entity_id || ''],
+        ['Changes summary', (r) => r.summary || ''],
+        ['IP address', (r) => r.ip || ''],
+      ], rows));
   } catch (e) { next(e); }
 });
 

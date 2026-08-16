@@ -132,6 +132,8 @@
     agents: renderAgents,
     notifications: renderNotifications,
     health: renderHealth,
+    revenue: renderRevenue,
+    usage: renderUsage,
   };
 
   document.getElementById('nav').addEventListener('click', function (e) {
@@ -184,9 +186,132 @@
     return '<div class="kpi"><div class="kpi-label">' + esc(label) + '</div><div class="kpi-value">' + esc(value) + '</div></div>';
   }
 
+  // ── SECTION 21 — Revenue ──────────────────────────────────────────────────
+  // Archta's OWN subscription revenue, not a developer workspace's collected
+  // installments (that number is "Total collected" on Overview) — see
+  // adminService.revenue's own header comment for why these are two
+  // completely different figures that happen to share a currency symbol.
+  var MRR_BAR_HEIGHT_CLASSES = ['h0', 'h10', 'h20', 'h30', 'h40', 'h50', 'h60', 'h70', 'h80', 'h90', 'h100'];
+  var MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  function renderRevenue() {
+    return api('/revenue').then(function (d) {
+      var peak = Math.max.apply(null, d.monthly_mrr_last_12.map(function (m) { return m.mrr; }).concat([1]));
+
+      view.innerHTML =
+        '<h1 class="page-title">Revenue</h1>' +
+        '<div class="kpi-grid">' +
+          kpi('MRR', naira(d.mrr)) +
+          kpi('Paying customers', d.total_paying_customers) +
+          kpi('Avg revenue / customer', naira(d.average_revenue_per_customer)) +
+          kpi('Churn rate (this month)', d.churn_rate + '%') +
+          kpi('Monthly growth rate', (d.monthly_growth_rate > 0 ? '+' : '') + d.monthly_growth_rate + '%') +
+          kpi('Plans represented', Object.keys(d.mrr_by_plan).length) +
+        '</div>' +
+
+        '<div class="card"><div class="card-head"><h2>MRR by plan</h2></div><div class="card-body">' +
+          (Object.keys(d.mrr_by_plan).length
+            ? Object.keys(d.mrr_by_plan).sort(function (a, b) { return d.mrr_by_plan[b] - d.mrr_by_plan[a]; }).map(function (plan) {
+                return '<div class="mrr-plan-row">' +
+                  '<span>' + esc(plan) + '</span><span class="mono">' + naira(d.mrr_by_plan[plan]) + '</span></div>';
+              }).join('')
+            : '<div class="empty">No active subscriptions yet.</div>') +
+        '</div></div>' +
+
+        '<div class="card"><div class="card-head"><h2>MRR, last 12 months</h2></div><div class="card-body">' +
+          '<div class="mrr-chart">' +
+            d.monthly_mrr_last_12.map(function (m) {
+              var bucket = m.mrr <= 0 ? 'h0' : MRR_BAR_HEIGHT_CLASSES[Math.min(10, Math.max(1, Math.round((m.mrr / peak) * 10)))];
+              var monthNum = Number(m.month.slice(5, 7)) - 1;
+              return '<div class="mrr-bar-col" title="' + esc(m.month + ': ' + naira(m.mrr)) + '">' +
+                '<div class="mrr-bar-track"><div class="mrr-bar mrr-bar-' + bucket + '"></div></div>' +
+                '<div class="mrr-bar-label">' + esc(MONTH_ABBR[monthNum] || m.month.slice(5)) + '</div>' +
+              '</div>';
+            }).join('') +
+          '</div>' +
+        '</div></div>';
+    });
+  }
+
+  // ── SECTION 22 — Feature usage ─────────────────────────────────────────────
+  // Which features are actually being used, across every workspace, last 30
+  // days. The heat grid caps at the 30 busiest workspaces (by total events) —
+  // a platform-wide grid with no cap would render one <td> per org per
+  // feature, and the busiest handful is what an operator scanning for "is
+  // anyone using X" actually needs to see first.
+  var USAGE_FEATURE_LABEL = {
+    brief_generated: 'Brief generated',
+    payment_recorded: 'Payment recorded',
+    document_generated: 'Document generated',
+    agent_action: 'Agent action',
+    portal_opened: 'Portal opened',
+    whatsapp_sent: 'WhatsApp sent',
+    import_used: 'Import used',
+    hardship_requested: 'Hardship requested',
+    community_posted: 'Community posted',
+    referral_made: 'Referral made',
+  };
+  var USAGE_HEAT_CLASSES = ['usage-heat-0', 'usage-heat-1', 'usage-heat-2', 'usage-heat-3', 'usage-heat-4', 'usage-heat-5'];
+  var USAGE_WORKSPACE_CAP = 30;
+
+  function usageHeatClass(count, max) {
+    if (!count) return USAGE_HEAT_CLASSES[0];
+    if (!max) return USAGE_HEAT_CLASSES[1];
+    var bucket = Math.min(5, Math.max(1, Math.ceil((count / max) * 5)));
+    return USAGE_HEAT_CLASSES[bucket];
+  }
+
+  function renderUsage() {
+    return api('/feature-usage').then(function (d) {
+      var features = d.features || Object.keys(USAGE_FEATURE_LABEL);
+      var sortedFeatures = features.slice().sort(function (a, b) { return (d.by_feature[b] || 0) - (d.by_feature[a] || 0); });
+
+      var topWorkspaces = (d.workspaces || []).slice(0, USAGE_WORKSPACE_CAP);
+      var maxCell = topWorkspaces.reduce(function (max, w) {
+        return Math.max(max, Math.max.apply(null, features.map(function (f) { return w.features[f] || 0; }).concat([0])));
+      }, 0);
+
+      view.innerHTML =
+        '<h1 class="page-title">Usage</h1>' +
+        '<p class="muted">Since ' + esc(d.since) + ' — every workspace on the platform.</p>' +
+
+        '<div class="card"><div class="card-head"><h2>Feature usage, last 30 days</h2></div><div class="card-body">' +
+          '<div class="table-wrap"><table class="data"><thead><tr><th>Feature</th><th>Events</th></tr></thead><tbody>' +
+          (sortedFeatures.length
+            ? sortedFeatures.map(function (f) {
+                var count = d.by_feature[f] || 0;
+                return '<tr><td>' + esc(USAGE_FEATURE_LABEL[f] || f) + '</td><td class="mono">' + esc(count) +
+                  '</td></tr>';
+              }).join('')
+            : '<tr><td colspan="2"><div class="empty">No feature events recorded yet.</div></td></tr>') +
+          '</tbody></table></div>' +
+        '</div></div>' +
+
+        '<div class="card"><div class="card-head"><h2>Usage by workspace</h2></div><div class="card-body">' +
+          (topWorkspaces.length
+            ? '<div class="table-wrap"><table class="data usage-grid"><thead><tr><th>Workspace</th>' +
+                features.map(function (f) { return '<th title="' + esc(USAGE_FEATURE_LABEL[f] || f) + '">' + esc((USAGE_FEATURE_LABEL[f] || f).replace(' ', '\n')) + '</th>'; }).join('') +
+              '</tr></thead><tbody>' +
+              topWorkspaces.map(function (w) {
+                return '<tr><td>' + esc(w.name) + '</td>' +
+                  features.map(function (f) {
+                    var count = w.features[f] || 0;
+                    return '<td class="usage-cell ' + usageHeatClass(count, maxCell) + '" title="' + esc((USAGE_FEATURE_LABEL[f] || f) + ': ' + count) + '">' +
+                      (count || '') + '</td>';
+                  }).join('') +
+                '</tr>';
+              }).join('') +
+              '</tbody></table></div>'
+            : '<div class="empty">No workspace has used a tracked feature in the last 30 days.</div>') +
+        '</div></div>';
+    });
+  }
+
   // ── Workspaces ─────────────────────────────────────────────────────────
   var workspacesCache = [];
   var openWorkspaceId = null;
+  var onboardingCache = {}; // SECTION 23 — org id -> checklist response, fetched lazily on row expand
+  var PROGRESS_WIDTH_CLASSES = ['w0', 'w10', 'w20', 'w30', 'w40', 'w50', 'w60', 'w70', 'w80', 'w90', 'w100'];
 
   function renderWorkspaces() {
     return api('/workspaces').then(function (rows) {
@@ -219,8 +344,20 @@
     Array.prototype.forEach.call(document.querySelectorAll('tr[data-ws-row]'), function (tr) {
       tr.addEventListener('click', function (e) {
         if (e.target.closest('button')) return;
-        openWorkspaceId = openWorkspaceId === tr.dataset.wsRow ? null : tr.dataset.wsRow;
+        var id = tr.dataset.wsRow;
+        if (openWorkspaceId === id) {
+          openWorkspaceId = null;
+          paintWorkspaces(filterText);
+          return;
+        }
+        openWorkspaceId = id;
         paintWorkspaces(filterText);
+        if (!onboardingCache[id]) {
+          api('/workspaces/' + id + '/onboarding').then(function (data) {
+            onboardingCache[id] = data;
+            if (openWorkspaceId === id) paintWorkspaces(filterText);
+          }).catch(function () { /* best-effort — the rest of the detail panel still works */ });
+        }
       });
     });
     Array.prototype.forEach.call(document.querySelectorAll('[data-impersonate]'), function (btn) {
@@ -254,9 +391,29 @@
         detail('Payments', w.payment_count) +
         detail('Agent actions (7d)', w.agent_actions_7d) +
         detail('Organization id', w.organization_id) +
-        '</div></td></tr>';
+        '</div>' +
+        onboardingBlock(onboardingCache[w.organization_id]) +
+        '</td></tr>';
     }
     return rows;
+  }
+
+  // SECTION 23 — the same checklist the workspace's own dashboard shows,
+  // read-only here: this is what an operator checks before a support call
+  // ("have they even added a buyer yet?").
+  function onboardingBlock(data) {
+    if (!data) return '<div class="onboarding-block"><div class="k">Onboarding</div><div class="muted">Loading…</div></div>';
+    var pct = Math.round((data.completed_count / data.total_count) * 100);
+    var bucket = PROGRESS_WIDTH_CLASSES[Math.round(pct / 10)];
+    return '<div class="onboarding-block">' +
+      '<div class="k">Onboarding — ' + data.completed_count + '/' + data.total_count + '</div>' +
+      '<div class="onboarding-bar-track"><div class="onboarding-bar ' + bucket + '"></div></div>' +
+      '<ul class="onboarding-steps">' +
+        data.steps.map(function (s) {
+          return '<li class="' + (s.done ? 'done' : '') + '">' + (s.done ? '✓' : '○') + ' ' + esc(s.label) + '</li>';
+        }).join('') +
+      '</ul>' +
+    '</div>';
   }
 
   function detail(label, value) {

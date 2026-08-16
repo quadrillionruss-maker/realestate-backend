@@ -41,5 +41,7 @@ router.use('/financing-requests', require('./financingRequests'));
 router.use('/handover', require('./handover'));
 router.use('/contractor-payments', require('./contractorPayments'));
 router.use('/community', require('./community'));
+router.use('/push', require('./push'));
+router.use('/scheduled-messages', require('./scheduledMessages'));
 
 module.exports = router;

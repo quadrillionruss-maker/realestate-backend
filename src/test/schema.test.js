@@ -34,7 +34,7 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -69,7 +69,7 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -467,6 +467,15 @@ function check(name, cond, detail) {
     unverifiedBefore > 0, `${unverifiedBefore}`);
 
   await db.exec(fs.readFileSync(`${M}/005_soft_delete_and_lifecycle.sql`, 'utf8'));
+
+  // 005 recreates uniq_re_allocation_letter_per_reservation with its OWN
+  // (narrower, pre-043) predicate — replaying 005 alone here, out of its
+  // normal single-pass position, leaves that index in a shape no real
+  // deployment could ever actually have (005 always runs once, followed by
+  // every later migration, including 043's widening of this same index).
+  // Replaying 043 right behind it restores the state a real migration run
+  // always guarantees, for every check below this point.
+  await db.exec(fs.readFileSync(`${M}/043_document_versioning.sql`, 'utf8'));
 
   const [{ unverifiedAfter }] = await q(
     `select count(*)::int as "unverifiedAfter" from users where email_verified_at is null`);
@@ -2103,6 +2112,366 @@ function check(name, cond, detail) {
   const [{ orgs_processed: orgsProcessed }] = await q(
     `select orgs_processed from re_cron_runs where id = $1`, [cronRunId]);
   check('a cron run records how many orgs it processed once finished', orgsProcessed === 3);
+
+  // ── 041: buyer blacklist (SECTION 7) ─────────────────────────────────────
+  const customerCols041 = await colsOf('re_customers');
+  check('re_customers has the blacklist columns',
+    ['blacklisted', 'blacklist_reason', 'blacklisted_at', 'blacklisted_by'].every((c) => customerCols041.includes(c)),
+    customerCols041.join(', '));
+
+  const [{ id: blacklistFixtureId }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Blacklist Fixture Buyer') returning id`, [userId]);
+  const [{ blacklisted: blacklistedDefault }] = await q(
+    `select blacklisted from re_customers where id=$1`, [blacklistFixtureId]);
+  check('blacklisted defaults to false', blacklistedDefault === false);
+
+  await q(
+    `update re_customers set blacklisted = true, blacklist_reason = 'chargeback fraud', blacklisted_at = now() where id = $1`,
+    [blacklistFixtureId]);
+  const [{ blacklisted: blacklistedAfter, blacklist_reason: reasonAfter }] = await q(
+    `select blacklisted, blacklist_reason from re_customers where id=$1`, [blacklistFixtureId]);
+  check('a buyer can be blacklisted with a reason', blacklistedAfter === true && reasonAfter === 'chargeback fraud');
+
+  // ── 042/043: document expiry + version history (SECTIONS 9/10) ──────────
+  const docCols042 = await colsOf('re_documents');
+  check('re_documents has the expiry and version-history columns',
+    ['expires_at', 'version', 'superseded_at', 'superseded_by'].every((c) => docCols042.includes(c)),
+    docCols042.join(', '));
+
+  const [{ id: docVerProject }] = await q(
+    `insert into re_projects (organization_id, name, total_units) values ($1,'Doc Version Estate',1) returning id`, [userId]);
+  const [{ id: docVerUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price) values ($1,$2,'DOCVER-1',5000000) returning id`,
+    [userId, docVerProject]);
+  const [{ id: docVerCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Doc Version Buyer') returning id`, [userId]);
+  const [{ id: docVerReservation }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, docVerUnit, docVerCustomer]);
+
+  const [{ id: docV1 }] = await q(
+    `insert into re_documents (organization_id, reservation_id, doc_type, status, expires_at)
+     values ($1,$2,'allocation_letter','generated', now() + interval '90 days') returning id`,
+    [userId, docVerReservation]);
+  const [{ version: v1Version }] = await q(`select version from re_documents where id=$1`, [docV1]);
+  check('re_documents.version defaults to 1', v1Version === 1);
+
+  // Supersede v1 and insert v2 — the exact two-step writeGeneratedVersion
+  // does, and the case the widened unique index (migrations/043) exists to
+  // allow: one superseded row and one live row for the same reservation +
+  // doc_type coexisting without a 23505.
+  await q(`update re_documents set status='superseded', superseded_at=now() where id=$1`, [docV1]);
+  let secondLiveAllocationLetterAllowed = true;
+  let docV2 = null;
+  try {
+    const [{ id }] = await q(
+      `insert into re_documents (organization_id, reservation_id, doc_type, status, version, expires_at)
+       values ($1,$2,'allocation_letter','generated',2, now() + interval '90 days') returning id`,
+      [userId, docVerReservation]);
+    docV2 = id;
+  } catch (err) { secondLiveAllocationLetterAllowed = false; console.log(`       ${err.message}`); }
+  check('a superseded allocation letter and its live replacement can coexist', secondLiveAllocationLetterAllowed);
+
+  await q(`update re_documents set superseded_by=$1 where id=$2`, [docV2, docV1]);
+  const [{ superseded_by: supersededByLink }] = await q(`select superseded_by from re_documents where id=$1`, [docV1]);
+  check('the old version links forward to the one that replaced it', supersededByLink === docV2);
+
+  // The invariant itself must still hold: TWO LIVE (non-superseded)
+  // allocation letters for one reservation is still refused, exactly as
+  // before 043 — only "superseded" rows are exempt from the count.
+  let secondLiveWithoutSupersedingRefused = false;
+  try {
+    await q(
+      `insert into re_documents (organization_id, reservation_id, doc_type, status, version)
+       values ($1,$2,'allocation_letter','generated',3)`,
+      [userId, docVerReservation]);
+  } catch (err) { secondLiveWithoutSupersedingRefused = /unique|duplicate/i.test(err.message); }
+  check('two LIVE allocation letters for one reservation is still refused — only a superseded one may coexist',
+    secondLiveWithoutSupersedingRefused);
+
+  let badStatusStillRefused = false;
+  try {
+    await q(`update re_documents set status='not_a_real_status' where id=$1`, [docV2]);
+  } catch (err) { badStatusStillRefused = /check/i.test(err.message); }
+  check('an unknown re_documents.status is still refused after the constraint was widened for "superseded"', badStatusStillRefused);
+
+  // ── 044: customizable email templates (SECTION 14) ───────────────────────
+  const emailTemplateCols = await colsOf('re_email_templates');
+  check('re_email_templates has the columns the app selects',
+    ['organization_id', 'template_type', 'subject', 'body_html', 'created_at', 'updated_at']
+      .every((c) => emailTemplateCols.includes(c)), emailTemplateCols.join(', '));
+
+  const [{ id: emailTemplateId }] = await q(
+    `insert into re_email_templates (organization_id, template_type, subject, body_html)
+     values ($1,'receipt','Your receipt from {{buyer_name}}','<p>Thanks for {{amount}}</p>') returning id`,
+    [userId]);
+  check('an email template round-trips', !!emailTemplateId);
+
+  let badTemplateTypeRefused = false;
+  try {
+    await q(`insert into re_email_templates (organization_id, template_type, subject, body_html)
+             values ($1,'not_a_real_type','x','y')`, [userId]);
+  } catch (err) { badTemplateTypeRefused = /check/i.test(err.message); }
+  check('re_email_templates.template_type is limited to the five known types', badTemplateTypeRefused);
+
+  let duplicateTemplateTypeRefused = false;
+  try {
+    await q(`insert into re_email_templates (organization_id, template_type, subject, body_html)
+             values ($1,'receipt','again','again')`, [userId]);
+  } catch (err) { duplicateTemplateTypeRefused = /unique|duplicate/i.test(err.message); }
+  check('only one template per (organization_id, template_type)', duplicateTemplateTypeRefused);
+
+  let oversizedBodyRefused = false;
+  try {
+    await q(`insert into re_email_templates (organization_id, template_type, subject, body_html)
+             values ($1,'welcome','x',$2)`, [userId, 'x'.repeat(5001)]);
+  } catch (err) { oversizedBodyRefused = /check/i.test(err.message); }
+  check('re_email_templates.body_html is capped at 5000 characters', oversizedBodyRefused);
+
+  // ── 045: push notifications (SECTION 1) ──────────────────────────────────
+  const pushSubCols = await colsOf('re_push_subscriptions');
+  check('re_push_subscriptions has the columns the app selects',
+    ['user_id', 'organization_id', 'endpoint', 'p256dh', 'auth', 'created_at'].every((c) => pushSubCols.includes(c)),
+    pushSubCols.join(', '));
+
+  const pushNotifCols = await colsOf('re_push_notifications');
+  check('re_push_notifications has the columns the app selects',
+    ['user_id', 'organization_id', 'title', 'body', 'url', 'created_at', 'read_at'].every((c) => pushNotifCols.includes(c)),
+    pushNotifCols.join(', '));
+
+  const [{ id: pushSubId }] = await q(
+    `insert into re_push_subscriptions (user_id, organization_id, endpoint, p256dh, auth)
+     values ($1,$2,'https://fcm.googleapis.com/fcm/send/abc123','p256dh-key','auth-key') returning id`,
+    [userId, userId]);
+  check('a push subscription round-trips', !!pushSubId);
+
+  let duplicateEndpointRefused = false;
+  try {
+    await q(`insert into re_push_subscriptions (user_id, organization_id, endpoint, p256dh, auth)
+             values ($1,$2,'https://fcm.googleapis.com/fcm/send/abc123','x','y')`, [userId, userId]);
+  } catch (err) { duplicateEndpointRefused = /unique|duplicate/i.test(err.message); }
+  check('re_push_subscriptions.endpoint is unique — the same browser subscription is not stored twice', duplicateEndpointRefused);
+
+  const [{ id: pushNotifId }] = await q(
+    `insert into re_push_notifications (user_id, organization_id, title, body, url)
+     values ($1,$2,'Payment received','₦500,000 from Test Buyer','/#/payments') returning id`,
+    [userId, userId]);
+  const [{ read_at: pushNotifReadAtDefault }] = await q(`select read_at from re_push_notifications where id=$1`, [pushNotifId]);
+  check('a push notification round-trips and starts unread', pushNotifReadAtDefault === null);
+
+  // ── 046: TOTP 2FA (SECTION 2) ─────────────────────────────────────────────
+  const totpCols = await colsOf('users');
+  check('users has the 2FA columns',
+    ['totp_secret_encrypted', 'totp_enabled', 'totp_backup_codes'].every((c) => totpCols.includes(c)),
+    totpCols.join(', '));
+
+  const [{ totp_enabled: totpEnabledDefault, totp_backup_codes: totpBackupCodesDefault }] = await q(
+    `select totp_enabled, totp_backup_codes from users where id=$1`, [userId]);
+  check('totp_enabled defaults to false', totpEnabledDefault === false);
+  check('totp_backup_codes defaults to an empty array', Array.isArray(totpBackupCodesDefault) && totpBackupCodesDefault.length === 0);
+
+  // ── 047: sessions (SECTION 3) ─────────────────────────────────────────────
+  const sessionCols = await colsOf('re_sessions');
+  check('re_sessions has the columns the app selects',
+    ['user_id', 'organization_id', 'token_hash', 'device_info', 'ip_address', 'created_at', 'last_used_at', 'revoked_at']
+      .every((c) => sessionCols.includes(c)), sessionCols.join(', '));
+
+  const [{ id: sessionId }] = await q(
+    `insert into re_sessions (user_id, organization_id, token_hash, device_info, ip_address)
+     values ($1,$2,'fakehash123','Chrome on Windows','127.0.0.1') returning id`,
+    [userId, userId]);
+  const [{ revoked_at: sessionRevokedDefault }] = await q(`select revoked_at from re_sessions where id=$1`, [sessionId]);
+  check('a session round-trips and starts unrevoked', sessionRevokedDefault === null);
+
+  let duplicateTokenHashRefused = false;
+  try {
+    await q(`insert into re_sessions (user_id, organization_id, token_hash) values ($1,$2,'fakehash123')`, [userId, userId]);
+  } catch (err) { duplicateTokenHashRefused = /unique|duplicate/i.test(err.message); }
+  check('re_sessions.token_hash is unique — the same token is not tracked as two sessions', duplicateTokenHashRefused);
+
+  await q(`update re_sessions set revoked_at = now() where id = $1`, [sessionId]);
+  const [{ revoked_at: sessionRevokedAfter }] = await q(`select revoked_at from re_sessions where id=$1`, [sessionId]);
+  check('a session can be revoked', sessionRevokedAfter !== null);
+
+  // ── 048: receipt template customization (SECTION 5) ─────────────────────
+  const receiptTemplateCols = await colsOf('re_receipt_templates');
+  check('re_receipt_templates has the columns the app selects',
+    ['organization_id', 'header_html', 'footer_html', 'show_logo', 'show_developer_address', 'created_at', 'updated_at']
+      .every((c) => receiptTemplateCols.includes(c)), receiptTemplateCols.join(', '));
+
+  const [{ show_logo: receiptShowLogoDefault, show_developer_address: receiptShowAddressDefault }] = await q(
+    `insert into re_receipt_templates (organization_id, header_html, footer_html)
+     values ($1,'<b>My Letterhead</b>','Queries: accounts@example.com')
+     returning show_logo, show_developer_address`,
+    [userId]);
+  check('show_logo and show_developer_address default to true', receiptShowLogoDefault === true && receiptShowAddressDefault === true);
+
+  let secondReceiptTemplateForSameOrgRefused = false;
+  try {
+    await q(`insert into re_receipt_templates (organization_id) values ($1)`, [userId]);
+  } catch (err) { secondReceiptTemplateForSameOrgRefused = /unique|duplicate/i.test(err.message); }
+  check('only one receipt template per organization', secondReceiptTemplateForSameOrgRefused);
+
+  const [{ id: receiptTemplateFixtureUserId }] = await q(
+    `insert into users (email, full_name) values ('receipt-template-fixture@example.com','Receipt Template Fixture') returning id`);
+  let oversizedHeaderRefused = false;
+  try {
+    await q(`insert into re_receipt_templates (organization_id, header_html) values ($1, $2)`,
+      [receiptTemplateFixtureUserId, 'x'.repeat(2001)]);
+  } catch (err) { oversizedHeaderRefused = /check/i.test(err.message); }
+  check('re_receipt_templates.header_html is capped at 2000 characters', oversizedHeaderRefused);
+
+  // ── 049: scheduled WhatsApp messages (SECTION 16) ────────────────────────
+  const scheduledMsgCols = await colsOf('re_scheduled_messages');
+  check('re_scheduled_messages has the columns the app selects',
+    ['organization_id', 'customer_id', 'message', 'scheduled_for', 'sent_at', 'status', 'created_by', 'created_at']
+      .every((c) => scheduledMsgCols.includes(c)), scheduledMsgCols.join(', '));
+
+  const [{ id: scheduledMsgCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name, phone) values ($1,'Scheduled Msg Buyer','08031234567') returning id`, [userId]);
+  const [{ id: scheduledMsgId, status: scheduledMsgStatusDefault }] = await q(
+    `insert into re_scheduled_messages (organization_id, customer_id, message, scheduled_for, created_by)
+     values ($1,$2,'Hi, reminder about your installment', now() + interval '1 day', $1) returning id, status`,
+    [userId, scheduledMsgCustomer]);
+  check('a scheduled message round-trips and defaults to pending', scheduledMsgStatusDefault === 'pending');
+
+  let blankScheduledMessageRefused = false;
+  try {
+    await q(`insert into re_scheduled_messages (organization_id, customer_id, message, scheduled_for) values ($1,$2,'',now())`,
+      [userId, scheduledMsgCustomer]);
+  } catch (err) { blankScheduledMessageRefused = /check/i.test(err.message); }
+  check('re_scheduled_messages.message cannot be blank', blankScheduledMessageRefused);
+
+  let badScheduledStatusRefused = false;
+  try {
+    await q(`update re_scheduled_messages set status='not_a_real_status' where id=$1`, [scheduledMsgId]);
+  } catch (err) { badScheduledStatusRefused = /check/i.test(err.message); }
+  check('re_scheduled_messages.status is limited to the four known states', badScheduledStatusRefused);
+
+  await q(`update re_scheduled_messages set status='cancelled' where id=$1`, [scheduledMsgId]);
+  const [{ status: scheduledMsgCancelled }] = await q(`select status from re_scheduled_messages where id=$1`, [scheduledMsgId]);
+  check('a scheduled message can be cancelled', scheduledMsgCancelled === 'cancelled');
+
+  // ── 050: satisfaction surveys (SECTION 18) ───────────────────────────────
+  const surveyCols = await colsOf('re_satisfaction_surveys');
+  check('re_satisfaction_surveys has the columns the app selects',
+    ['organization_id', 'reservation_id', 'customer_id', 'sent_at', 'completed_at',
+      'overall_score', 'construction_quality_score', 'sales_experience_score', 'comments']
+      .every((c) => surveyCols.includes(c)), surveyCols.join(', '));
+
+  const [{ id: surveyUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price) values ($1,$2,'SURVEY-1',6000000) returning id`,
+    [userId, docVerProject]);
+  const [{ id: surveyCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name) values ($1,'Survey Buyer') returning id`, [userId]);
+  const [{ id: surveyReservation }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, surveyUnit, surveyCustomer]);
+
+  const [{ id: surveyId, completed_at: surveyCompletedAtDefault }] = await q(
+    `insert into re_satisfaction_surveys (organization_id, reservation_id, customer_id) values ($1,$2,$3) returning id, completed_at`,
+    [userId, surveyReservation, surveyCustomer]);
+  check('a satisfaction survey round-trips and starts uncompleted', surveyCompletedAtDefault === null);
+
+  let secondSurveyForSameReservationRefused = false;
+  try {
+    await q(`insert into re_satisfaction_surveys (organization_id, reservation_id, customer_id) values ($1,$2,$3)`,
+      [userId, surveyReservation, surveyCustomer]);
+  } catch (err) { secondSurveyForSameReservationRefused = /unique|duplicate/i.test(err.message); }
+  check('only one satisfaction survey per reservation', secondSurveyForSameReservationRefused);
+
+  let outOfRangeSurveyScoreRefused = false;
+  try {
+    await q(`update re_satisfaction_surveys set overall_score = 7 where id = $1`, [surveyId]);
+  } catch (err) { outOfRangeSurveyScoreRefused = /check/i.test(err.message); }
+  check('re_satisfaction_surveys scores are constrained to 1-5', outOfRangeSurveyScoreRefused);
+
+  await q(`update re_satisfaction_surveys set overall_score = 5, completed_at = now() where id = $1`, [surveyId]);
+  const [{ overall_score: surveyScoreAfter }] = await q(`select overall_score from re_satisfaction_surveys where id=$1`, [surveyId]);
+  check('a satisfaction survey can be completed with a score', surveyScoreAfter === 5);
+
+  // ── 051: portal notification bell (SECTION 20) ───────────────────────────
+  const portalNotifCols = await colsOf('re_portal_notifications');
+  check('re_portal_notifications has the columns the app selects',
+    ['organization_id', 'customer_id', 'type', 'title', 'body', 'read_at', 'created_at']
+      .every((c) => portalNotifCols.includes(c)), portalNotifCols.join(', '));
+
+  const [{ id: portalNotifId, read_at: portalNotifReadAtDefault }] = await q(
+    `insert into re_portal_notifications (organization_id, customer_id, type, title, body)
+     values ($1,$2,'payment_recorded','Payment received','We received ₦500,000') returning id, read_at`,
+    [userId, surveyCustomer]);
+  check('a portal notification round-trips and starts unread', portalNotifReadAtDefault === null);
+
+  let badPortalNotifTypeRefused = false;
+  try {
+    await q(`insert into re_portal_notifications (organization_id, customer_id, type, title) values ($1,$2,'not_a_real_type','x')`,
+      [userId, surveyCustomer]);
+  } catch (err) { badPortalNotifTypeRefused = /check/i.test(err.message); }
+  check('re_portal_notifications.type is limited to the five known types', badPortalNotifTypeRefused);
+
+  await q(`update re_portal_notifications set read_at = now() where id = $1`, [portalNotifId]);
+  const [{ read_at: portalNotifReadAtAfter }] = await q(`select read_at from re_portal_notifications where id=$1`, [portalNotifId]);
+  check('a portal notification can be marked read', portalNotifReadAtAfter !== null);
+
+  // ── 052: Archta's own subscription revenue (SECTION 21) ──────────────────
+  const subscriptionCols = await colsOf('re_subscriptions');
+  check('re_subscriptions has the columns the app selects',
+    ['organization_id', 'plan', 'monthly_amount', 'started_at', 'ended_at', 'created_at']
+      .every((c) => subscriptionCols.includes(c)), subscriptionCols.join(', '));
+
+  const [{ id: subscriptionId, ended_at: subscriptionEndedAtDefault }] = await q(
+    `insert into re_subscriptions (organization_id, plan, monthly_amount) values ($1,'growth',150000) returning id, ended_at`,
+    [userId]);
+  check('a subscription round-trips and starts active (ended_at null)', subscriptionEndedAtDefault === null);
+
+  let badPlanRefused = false;
+  try {
+    await q(`insert into re_subscriptions (organization_id, plan, monthly_amount) values ($1,'not_a_real_plan',1000)`, [userId]);
+  } catch (err) { badPlanRefused = /check/i.test(err.message); }
+  check('re_subscriptions.plan is limited to the five known plans', badPlanRefused);
+
+  let negativeAmountRefused = false;
+  try {
+    await q(`insert into re_subscriptions (organization_id, plan, monthly_amount) values ($1,'starter',-100)`, [userId]);
+  } catch (err) { negativeAmountRefused = /check/i.test(err.message); }
+  check('re_subscriptions.monthly_amount cannot be negative', negativeAmountRefused);
+
+  await q(`update re_subscriptions set ended_at = now() where id = $1`, [subscriptionId]);
+  const [{ ended_at: subscriptionEndedAfter }] = await q(`select ended_at from re_subscriptions where id=$1`, [subscriptionId]);
+  check('a subscription can be ended', subscriptionEndedAfter !== null);
+
+  // ── 053: feature usage tracking (SECTION 22) ──────────────────────────────
+  const featureEventCols = await colsOf('re_feature_events');
+  check('re_feature_events has the columns adminService.featureUsage selects',
+    ['organization_id', 'feature', 'count', 'date', 'created_at'].every((c) => featureEventCols.includes(c)),
+    featureEventCols.join(', '));
+
+  await q(`select increment_feature_event($1, 'brief_generated')`, [userId]);
+  await q(`select increment_feature_event($1, 'brief_generated')`, [userId]);
+  await q(`select increment_feature_event($1, 'brief_generated')`, [userId]);
+  const [{ count: featureEventCount }] = await q(
+    `select count from re_feature_events where organization_id = $1 and feature = 'brief_generated' and date = current_date`,
+    [userId]);
+  check('increment_feature_event() accumulates into one row per org/feature/day rather than inserting a new one each time',
+    Number(featureEventCount) === 3);
+
+  await q(`select increment_feature_event($1, 'payment_recorded')`, [userId]);
+  const [{ 'count': featureRowsForOrg }] = await q(
+    `select count(*)::int from re_feature_events where organization_id = $1`, [userId]);
+  check('a different feature on the same day gets its own row', Number(featureRowsForOrg) === 2);
+
+  let badFeatureRefused = false;
+  try {
+    await q(`insert into re_feature_events (organization_id, feature) values ($1, 'not_a_real_feature')`, [userId]);
+  } catch (err) { badFeatureRefused = /check/i.test(err.message); }
+  check('re_feature_events.feature is limited to the ten known features', badFeatureRefused);
+
+  let duplicateFeatureDayRefused = false;
+  try {
+    await q(`insert into re_feature_events (organization_id, feature, date) values ($1, 'brief_generated', current_date)`, [userId]);
+  } catch (err) { duplicateFeatureDayRefused = /duplicate|unique/i.test(err.message); }
+  check('a second direct insert for the same org/feature/day is refused — increment_feature_event is the only safe way to add usage',
+    duplicateFeatureDayRefused);
 
   // admin_wipe_organization — exercised against the SAME fixture org every
   // assertion above this point has been building up (userId), deliberately

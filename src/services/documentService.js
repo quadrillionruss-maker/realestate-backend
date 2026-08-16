@@ -18,6 +18,9 @@ const { resolveBranding } = require('./brandingService');
 const { auditSystem } = require('./auditService');
 const notify = require('./notificationService');
 const { BUCKET, SIGNED_URL_TTL_SECONDS, ensureBucket, uploadPdf, createSignedUrl } = require('./documentStorage');
+const { mapWithConcurrency } = require('../utils/concurrency');
+const portalNotifications = require('./portalNotificationService');
+const featureUsage = require('./featureUsageService');
 
 // Template lives inside src/ so it travels with the code.
 const TEMPLATE_PATH = path.join(__dirname, '../templates/allocation_letter.html');
@@ -36,6 +39,77 @@ const LEGAL_TEMPLATE_FILES = {
 const SIGN_AUDIENCE = 're-document-sign';
 const SIGN_TOKEN_TTL_DAYS = 14;
 
+// SECTION 9 — every generated document (allocation letter or one of the
+// three signable types) gets 90 days to be signed/acted on before the
+// morning sweep (sweepExpiredDocuments below) files a task about it.
+// Receipts are exempt — they are evidence of money already received, not
+// something waiting on anyone to act on, so they never carry an expiry.
+const EXPIRY_DAYS = 90;
+
+// SECTION 10 — version history. Regenerating creates a NEW row and
+// supersedes the old one, rather than rewriting it in place, EXCEPT for the
+// very first generation (status still 'pending' — nothing exists yet to
+// supersede) and receipts (their own idempotency — one receipt per payment,
+// ever — lives in receiptService and is untouched by this; see that
+// function's own header for why a receipt's reference number must never
+// have a second version at all).
+//
+// The old row's own fields (including any signature it carries) are left
+// exactly as they were when it is superseded — a document that WAS signed
+// before being regenerated now keeps that fact on its own row, which is
+// strictly more history than the in-place overwrite this replaces used to
+// preserve.
+async function writeGeneratedVersion(orgId, doc, updates) {
+  if (doc.status === 'pending') {
+    const { data: updated, error } = await supabaseAdmin
+      .from('re_documents')
+      .update(updates)
+      .eq('id', doc.id)
+      .eq('organization_id', orgId)
+      .select()
+      .single();
+    if (error) throw error;
+    featureUsage.track(orgId, 'document_generated');
+    return { document: updated, wasRegeneration: false };
+  }
+
+  // superseded_at is set on the OLD row FIRST, so the two partial unique
+  // indexes (uniq_re_allocation_letter_per_reservation,
+  // uniq_re_documents_receipt_per_payment — migrations/043) never see two
+  // live rows for the same reservation/payment at once, even for the
+  // instant between these two writes.
+  const { error: supersedeErr } = await supabaseAdmin
+    .from('re_documents')
+    .update({ status: 'superseded', superseded_at: new Date().toISOString() })
+    .eq('id', doc.id)
+    .eq('organization_id', orgId);
+  if (supersedeErr) throw supersedeErr;
+
+  const { data: created, error: insertErr } = await supabaseAdmin
+    .from('re_documents')
+    .insert({
+      organization_id: orgId,
+      reservation_id: doc.reservation_id,
+      payment_id: doc.payment_id || null,
+      doc_type: doc.doc_type,
+      version: (doc.version || 1) + 1,
+      ...updates,
+    })
+    .select()
+    .single();
+  if (insertErr) throw insertErr;
+
+  const { error: linkErr } = await supabaseAdmin
+    .from('re_documents')
+    .update({ superseded_by: created.id })
+    .eq('id', doc.id)
+    .eq('organization_id', orgId);
+  if (linkErr) throw linkErr;
+
+  featureUsage.track(orgId, 'document_generated');
+  return { document: created, wasRegeneration: true };
+}
+
 const naira = (amount) => {
   const n = Number(amount || 0);
   return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
@@ -53,10 +127,10 @@ async function loadDocumentContext(orgId, documentId) {
   const { data: doc, error } = await supabaseAdmin
     .from('re_documents')
     .select(`
-      id, doc_type, status, storage_path, payment_id, created_at,
+      id, doc_type, status, storage_path, payment_id, reservation_id, version, created_at,
       re_reservations(
         id, reserved_at,
-        re_customers(full_name, email, phone),
+        re_customers(id, full_name, email, phone),
         re_units(unit_number, unit_type, size_sqm, list_price, re_projects(name, location)),
         re_installment_plans(total_amount, number_of_installments, frequency, start_date)
       )`)
@@ -343,16 +417,27 @@ async function notifySigningLink(orgId, doc, signingUrl) {
   const message = `Hi ${customer.full_name || 'there'}, your ${label} is ready to review and sign: ${signingUrl}`;
 
   if (customer.email) {
+    const defaultHtml = notify.emailShell({
+      heading: `Please sign your ${label}`,
+      intro: `Your ${label} is ready. Please review it and sign using the button below.`,
+      ctaLabel: 'Review & sign',
+      ctaUrl: signingUrl,
+    });
+
+    // SECTION 14 — a workspace's own document_ready template, if saved, wins.
+    const content = await notify.resolveEmailContent(orgId, 'document_ready', {
+      buyer_name: customer.full_name || '',
+      amount: '',
+      unit: doc.re_reservations?.re_units?.unit_number || '',
+      due_date: '',
+      portal_link: signingUrl,
+    }, { subject: `Please sign your ${label}`, html: defaultHtml });
+
     await notify.sendEmail({
       orgId,
       to: customer.email,
-      subject: `Please sign your ${label}`,
-      html: notify.emailShell({
-        heading: `Please sign your ${label}`,
-        intro: `Your ${label} is ready. Please review it and sign using the button below.`,
-        ctaLabel: 'Review & sign',
-        ctaUrl: signingUrl,
-      }),
+      subject: content.subject,
+      html: content.html,
       text: message,
       template: 'document_signing_link',
       relatedType: 're_documents',
@@ -390,31 +475,31 @@ async function generateDocument(orgId, documentId) {
     const html = buildAllocationLetterHtml(doc, branding);
     const pdf = await renderHtmlToPdf(html);
 
-    // Timestamped rather than a deterministic {documentId}.pdf: the DB row is
-    // correctly reused on regeneration (one allocation letter per reservation
-    // is still enforced there), but the OLD PDF's exact bytes used to be
-    // silently overwritten in storage — gone the moment a letter was
-    // regenerated after a branding change or a price correction, with nothing
-    // left to produce in a dispute over the original wording. Each generation
-    // now lands at its own path; storage_path always points at the latest.
-    const wasRegeneration = doc.status === 'generated';
+    // Timestamped rather than a deterministic {documentId}.pdf — SECTION 10
+    // now gives a regeneration its own ROW too (writeGeneratedVersion), but
+    // the storage path was already unique per render before that, and stays
+    // that way: the exact bytes of every version, signed or not, survive in
+    // Storage regardless of what the database row does with them.
+    const wasRegeneration = doc.status !== 'pending';
     const storagePath = await uploadPdf(`${orgId}/${documentId}/${Date.now()}.pdf`, pdf);
+    const expiresAt = new Date(Date.now() + EXPIRY_DAYS * 86_400_000).toISOString();
 
-    const { data: updated, error: updateError } = await supabaseAdmin
-      .from('re_documents')
-      .update({
-        status: 'generated',
-        generated_at: new Date().toISOString(),
-        storage_path: storagePath,
-      })
-      .eq('id', documentId)
-      .eq('organization_id', orgId)
-      .select()
-      .single();
-    if (updateError) throw updateError;
+    const { document: written } = await writeGeneratedVersion(orgId, doc, {
+      status: 'generated',
+      generated_at: new Date().toISOString(),
+      storage_path: storagePath,
+      expires_at: expiresAt,
+    });
+
+    // SECTION 20 — the portal bell.
+    const allocationCustomer = doc.re_reservations?.re_customers;
+    if (allocationCustomer?.id) {
+      await portalNotifications.notify(orgId, allocationCustomer.id, 'document_ready',
+        'Your allocation letter is ready', 'You can download it from your account.');
+    }
 
     return {
-      document: updated,
+      document: written,
       download_url: await createSignedUrl(storagePath),
       was_regeneration: wasRegeneration,
       previous_storage_path: wasRegeneration ? doc.storage_path : null,
@@ -434,32 +519,36 @@ async function generateDocument(orgId, documentId) {
 
   const wasRegeneration = doc.status === 'generated' || doc.status === 'sent' || doc.status === 'signed';
   const storagePath = await uploadPdf(`${orgId}/${documentId}/${Date.now()}.pdf`, pdf);
+  const expiresAt = new Date(Date.now() + EXPIRY_DAYS * 86_400_000).toISOString();
 
-  const { data: updated, error: updateError } = await supabaseAdmin
-    .from('re_documents')
-    .update({
-      status: 'generated',
-      generated_at: new Date().toISOString(),
-      storage_path: storagePath,
-      // Regenerating invalidates any existing signature: the signed PDF
-      // attested to a specific rendering of the document, and if the
-      // underlying data changed (a price correction, a template edit) that
-      // attestation no longer matches what is now on file. The OLD signed
-      // PDF stays in storage, untouched, at its own path — only this row's
-      // pointer to "the current signed state" clears.
-      signed_at: null, signed_ip: null, signature_data: null, signature_type: null, signed_storage_path: null,
-    })
-    .eq('id', documentId)
-    .eq('organization_id', orgId)
-    .select()
-    .single();
-  if (updateError) throw updateError;
+  // SECTION 10 — a regeneration now supersedes the OLD row rather than
+  // wiping its signature fields in place: the old row keeps whatever it
+  // signed_at/signed_storage_path it had, as its own permanent record, and
+  // the NEW row (written_via writeGeneratedVersion) starts genuinely clean —
+  // there is nothing to null out any more, because it never had a signature
+  // to begin with.
+  const { document: written } = await writeGeneratedVersion(orgId, doc, {
+    status: 'generated',
+    generated_at: new Date().toISOString(),
+    storage_path: storagePath,
+    expires_at: expiresAt,
+  });
 
-  const signingUrl = issueSigningUrl(updated);
+  const signingUrl = issueSigningUrl(written);
   await notifySigningLink(orgId, doc, signingUrl);
 
+  // SECTION 20 — the portal bell. notifySigningLink above already emails/
+  // WhatsApps the buyer directly; this is the separate in-app bell entry,
+  // same "two channels, two calls" reasoning paymentEvents.js's push vs
+  // portal-notification split already follows.
+  const legalDocCustomer = doc.re_reservations?.re_customers;
+  if (legalDocCustomer?.id) {
+    await portalNotifications.notify(orgId, legalDocCustomer.id, 'document_ready',
+      `Your ${doc.doc_type.replace(/_/g, ' ')} is ready to sign`, 'You can review and sign it from your account.');
+  }
+
   return {
-    document: updated,
+    document: written,
     download_url: await createSignedUrl(storagePath),
     was_regeneration: wasRegeneration,
     previous_storage_path: wasRegeneration ? doc.storage_path : null,
@@ -485,6 +574,78 @@ async function getDownloadUrl(orgId, documentId) {
   return { download_url: await createSignedUrl(path), expires_in: SIGNED_URL_TTL_SECONDS, signed: Boolean(doc.signed_storage_path) };
 }
 
+const SWEEP_CONCURRENCY = 8;
+
+// SECTION 9 — platform-wide, run once a day from jobs/daily.js, after the
+// brief (this is housekeeping, not something the brief needs to read). Files
+// one task per document that crossed its own expires_at while still
+// 'generated' or 'sent' — never 'pending' (nothing was ever issued) or
+// 'signed'/'superseded' (resolved, one way or the other). Title-match
+// dedupe against open AI tasks, the exact same idempotency
+// rentalService.checkTenancyRenewals uses for the same reason: a sweep that
+// runs every morning for months must not re-file the same warning forever.
+async function sweepExpiredDocuments() {
+  const nowIso = new Date().toISOString();
+
+  const { data, error } = await supabaseAdmin
+    .from('re_documents')
+    .select(`
+      id, doc_type, status, expires_at, organization_id, reservation_id,
+      re_reservations(re_customers(full_name), re_units(unit_number, re_projects(name)))`)
+    .in('status', ['generated', 'sent'])
+    .not('expires_at', 'is', null)
+    .lt('expires_at', nowIso);
+  if (error) throw error;
+
+  let filed = 0;
+
+  await mapWithConcurrency(data || [], SWEEP_CONCURRENCY, async (doc) => {
+    const buyerName = doc.re_reservations?.re_customers?.full_name || 'a buyer';
+    const unit = doc.re_reservations?.re_units;
+    const unitLabel = unit?.unit_number
+      ? `Unit ${unit.unit_number}${unit.re_projects?.name ? ` (${unit.re_projects.name})` : ''}`
+      : 'a unit';
+    const title = `Document expired unsigned — ${buyerName} — ${doc.doc_type.replace(/_/g, ' ')} — ${unitLabel}`;
+
+    const { data: existing } = await supabaseAdmin
+      .from('re_tasks')
+      .select('id')
+      .eq('organization_id', doc.organization_id)
+      .eq('title', title)
+      .eq('status', 'open')
+      .eq('source', 'ai')
+      .limit(1)
+      .maybeSingle();
+    if (existing) return;
+
+    const { error: insertError } = await supabaseAdmin.from('re_tasks').insert({
+      organization_id: doc.organization_id,
+      title,
+      notes: `Expired ${doc.expires_at.slice(0, 10)} without being signed or marked sent. Regenerate it from the `
+        + 'Documents screen if it is still needed, or follow up with the buyer.',
+      related_reservation_id: doc.reservation_id,
+      source: 'ai',
+    });
+    if (insertError) {
+      if (insertError.code !== '23505') console.warn('[documents] could not file expiry task:', insertError.message);
+      return;
+    }
+    filed += 1;
+
+    await auditSystem({
+      orgId: doc.organization_id,
+      actorKind: 'system',
+      action: 'document.expired',
+      entityType: 're_documents',
+      entityId: doc.id,
+      summary: `${doc.doc_type.replace(/_/g, ' ')} for ${buyerName} expired unsigned`,
+      metadata: { expires_at: doc.expires_at },
+    });
+  });
+
+  return { evaluated: (data || []).length, filed };
+}
+
 module.exports = {
   generateDocument,
   getDownloadUrl,
@@ -502,4 +663,7 @@ module.exports = {
   loadSigningContext,
   applySignature,
   loadDocumentContext,
+  // SECTION 9
+  sweepExpiredDocuments,
+  EXPIRY_DAYS,
 };

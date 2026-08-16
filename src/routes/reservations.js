@@ -44,7 +44,7 @@ router.get('/', requirePermission('reservations.read'), async (req, res, next) =
 
     let query = supabaseAdmin
       .from('re_reservations')
-      .select('*, re_customers(full_name, phone), re_units(unit_number, list_price, re_projects(name)), re_installment_plans(id, total_amount, number_of_installments)')
+      .select('*, re_customers(full_name, phone), re_units(unit_number, list_price, project_id, re_projects(name)), re_installment_plans(id, total_amount, number_of_installments)')
       .eq('organization_id', req.orgId)
       .order('created_at', { ascending: false })
       .limit(limit);
@@ -153,12 +153,20 @@ router.post('/', requirePermission('reservations.create'), async (req, res, next
     const [{ data: unit }, { data: customer }] = await Promise.all([
       supabaseAdmin.from('re_units').select('id, status')
         .eq('id', unit_id).eq('organization_id', req.orgId).maybeSingle(),
-      supabaseAdmin.from('re_customers').select('id')
+      supabaseAdmin.from('re_customers').select('id, blacklisted, blacklist_reason')
         .eq('id', customer_id).eq('organization_id', req.orgId).maybeSingle(),
     ]);
 
     if (!unit) return res.status(404).json({ error: 'Unit not found' });
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    // SECTION 7 — checked before the unit is claimed below, so a blacklisted
+    // buyer never locks a unit out from under someone else while this 409s.
+    if (customer.blacklisted) {
+      return res.status(409).json({
+        error: `This buyer is blacklisted — ${customer.blacklist_reason || 'no reason given'}. `
+          + 'You can unblacklist them from their profile before proceeding.',
+      });
+    }
 
     // Fetched WITH commission_rate, not just id — the rate is snapshotted onto
     // the reservation below (migrations/020) so a later change to this rep's

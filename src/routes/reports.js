@@ -19,6 +19,8 @@ const { audit } = require('../services/auditService');
 const referrals = require('../services/referralService');
 const forecast = require('../services/forecastService');
 const { getInvestorReport } = require('../services/investorReportService');
+const commissionService = require('../services/commissionService');
+const satisfactionSurvey = require('../services/satisfactionSurveyService');
 const router = express.Router();
 
 // A compromised low-privilege account (see CLAUDE.md's RBAC notes) could
@@ -242,6 +244,197 @@ router.get('/collections', requirePermission('reports.collections'), async (req,
   } catch (e) { next(e); }
 });
 
+// A rep's row is scoped to reservations they created inside the chosen
+// window — "this month/last 3 months/this year/all time" reads as a date on
+// created_at, not a date on any payment, so the same reservation cannot
+// appear in two different periods. No reusable date-range helper exists
+// elsewhere in this codebase (every other report uses either ?months=N or
+// raw ?from=&to=), so this is the first of its kind — kept pure and exported
+// below so it is assertable offline.
+function periodRange(period, today) {
+  if (period === 'this_month') {
+    return { from: `${today.slice(0, 7)}-01`, to: null };
+  }
+  if (period === 'last_3_months') {
+    const d = new Date(`${today}T00:00:00Z`);
+    d.setUTCDate(1);
+    d.setUTCMonth(d.getUTCMonth() - 2); // this month plus 2 back = a 3-month window
+    return { from: d.toISOString().slice(0, 10), to: null };
+  }
+  if (period === 'this_year') {
+    return { from: `${today.slice(0, 4)}-01-01`, to: null };
+  }
+  return { from: null, to: null }; // all_time, and the default for anything unrecognised
+}
+
+const LEADERBOARD_PERIODS = ['this_month', 'last_3_months', 'this_year', 'all_time'];
+
+// Sales rep leaderboard.
+router.get('/leaderboard', requirePermission('reports.leaderboard'), async (req, res, next) => {
+  try {
+    const period = LEADERBOARD_PERIODS.includes(req.query.period) ? req.query.period : 'all_time';
+    const { from, to } = periodRange(period, lagosToday());
+    const rows = await commissionService.leaderboard(req.orgId, { from, to });
+    res.json({ period, rows });
+  } catch (e) { next(e); }
+});
+
+// SECTION 18 — buyer satisfaction survey averages + recent comments.
+router.get('/satisfaction', requirePermission('reports.satisfaction'), async (req, res, next) => {
+  try {
+    res.json(await satisfactionSurvey.summary(req.orgId));
+  } catch (e) { next(e); }
+});
+
+// ── Custom report builder ───────────────────────────────────────────────────
+// One row per non-cancelled reservation, since half the available fields
+// (unit, project, reservation date, sales rep) are reservation-level, not
+// buyer-level — a buyer with two live reservations legitimately appears
+// twice, once per unit they hold, the same way EXPORTS.schedule above does.
+//
+// Kept as a plain object of [label, accessor] pairs, same shape toCsv's
+// `columns` argument already expects everywhere else in this file, so a
+// field chosen by the caller maps straight onto a CSV column with no
+// translation step in between.
+function scheduleFigures(reservation) {
+  const plans = Array.isArray(reservation.re_installment_plans)
+    ? reservation.re_installment_plans
+    : [reservation.re_installment_plans].filter(Boolean);
+  const plan = plans.find((p) => p.status === 'active') || plans[0];
+  const contracted = Number(plan?.total_amount || reservation.re_units?.list_price || 0);
+
+  let paid = 0;
+  let overdue = 0;
+  let lastPaymentDate = null;
+  let nextDueDate = null;
+  for (const row of plan?.re_installment_schedule || []) {
+    if (row.status === 'paid') {
+      paid += Number(row.amount_due || 0);
+      const paidDate = String(row.paid_at || '').slice(0, 10);
+      if (paidDate && (!lastPaymentDate || paidDate > lastPaymentDate)) lastPaymentDate = paidDate;
+    } else if (row.status === 'overdue') {
+      overdue += Number(row.amount_due || 0);
+    }
+    if ((row.status === 'pending' || row.status === 'overdue')
+      && (!nextDueDate || row.due_date < nextDueDate)) {
+      nextDueDate = row.due_date;
+    }
+  }
+
+  return {
+    contracted: round2(contracted),
+    paid: round2(paid),
+    balance: round2(Math.max(0, contracted - paid)),
+    overdue: round2(overdue),
+    lastPaymentDate,
+    nextDueDate,
+  };
+}
+
+const CUSTOM_REPORT_FIELDS = {
+  buyer_name: ['Buyer name', (r) => r.re_customers?.full_name || ''],
+  email: ['Email', (r) => r.re_customers?.email || ''],
+  phone: ['Phone', (r) => r.re_customers?.phone || ''],
+  unit_number: ['Unit number', (r) => r.re_units?.unit_number || ''],
+  project_name: ['Project name', (r) => r.re_units?.re_projects?.name || ''],
+  total_contracted: ['Total contracted', (r) => r.__figures.contracted],
+  total_paid: ['Total paid', (r) => r.__figures.paid],
+  balance: ['Balance', (r) => r.__figures.balance],
+  overdue_amount: ['Overdue amount', (r) => r.__figures.overdue],
+  credit_score: ['Credit score', (r) => r.re_customers?.credit_score ?? ''],
+  sales_rep_name: ['Sales rep name', (r) => r.re_sales_reps?.users?.full_name || ''],
+  reservation_date: ['Reservation date', (r) => String(r.reserved_at || '').slice(0, 10)],
+  last_payment_date: ['Last payment date', (r) => r.__figures.lastPaymentDate || ''],
+  next_due_date: ['Next due date', (r) => r.__figures.nextDueDate || ''],
+  escalation_stage: ['Escalation stage', (r) => r.escalation_stage || 'none'],
+  referral_code: ['Referral code', (r) => r.re_customers?.referral_code || ''],
+};
+
+// Pure — which of the requested field ids are real, in the order given (a
+// caller re-ordering their checkbox list re-orders the CSV, rather than the
+// registry's own key order winning silently). Exported so the "at least one
+// valid field" rule is assertable offline.
+function buildCustomReportColumns(fieldsParam) {
+  const requested = String(fieldsParam || '').split(',').map((f) => f.trim()).filter(Boolean);
+  return requested.filter((f) => CUSTOM_REPORT_FIELDS[f]).map((f) => CUSTOM_REPORT_FIELDS[f]);
+}
+
+router.get('/custom-export', exportLimiter, requirePermission('reports.customExport'), async (req, res, next) => {
+  try {
+    const columns = buildCustomReportColumns(req.query.fields);
+    if (!columns.length) {
+      return res.status(400).json({
+        error: 'No valid fields given. Choose at least one of: ' + Object.keys(CUSTOM_REPORT_FIELDS).join(', '),
+      });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('re_reservations')
+      .select(`
+        reserved_at, escalation_stage,
+        re_customers(full_name, email, phone, credit_score, referral_code),
+        re_units(unit_number, list_price, re_projects(name)),
+        re_sales_reps(users(full_name)),
+        re_installment_plans(
+          status, total_amount,
+          re_installment_schedule(status, amount_due, due_date, paid_at)
+        )`)
+      .eq('organization_id', req.orgId)
+      .neq('status', 'cancelled')
+      .order('reserved_at', { ascending: false });
+    if (error) throw error;
+
+    const rows = (data || []).map((r) => ({ ...r, __figures: scheduleFigures(r) }));
+    const stamp = new Date().toISOString().slice(0, 10);
+
+    audit(req, {
+      action: 'data.exported',
+      entityType: 're_org_settings',
+      summary: `Exported ${rows.length} row(s) to a custom report (${columns.length} field(s))`,
+      metadata: { fields: req.query.fields, rows: rows.length },
+    });
+
+    res
+      .type('text/csv; charset=utf-8')
+      .attachment(`archta-custom-report-${stamp}.csv`)
+      .send(toCsv(columns, rows));
+  } catch (e) { next(e); }
+});
+
+// ── Payment heatmap ──────────────────────────────────────────────────────────
+// Which day OF THE MONTH buyers actually pay on, aggregated across every
+// month this workspace has ever collected on — not a real calendar (day 15
+// falls on a different weekday every month, so there is no single weekday to
+// anchor a specific day-of-month bucket to). The frontend lays this out as a
+// 7-wide grid in day order for a calendar-like read, without claiming any
+// particular day fell on a particular weekday.
+function bucketPaymentsByDayOfMonth(payments) {
+  const days = Array.from({ length: 31 }, (_, i) => ({ day: i + 1, amount: 0, count: 0 }));
+  for (const payment of payments || []) {
+    const dayOfMonth = Number(String(payment.paid_at || '').slice(8, 10));
+    if (dayOfMonth >= 1 && dayOfMonth <= 31) {
+      const bucket = days[dayOfMonth - 1];
+      bucket.amount = round2(bucket.amount + Number(payment.amount || 0));
+      bucket.count += 1;
+    }
+  }
+  return days;
+}
+
+router.get('/payment-heatmap', requirePermission('reports.heatmap'), async (req, res, next) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('re_payments')
+      .select('amount, paid_at')
+      .eq('organization_id', req.orgId)
+      .is('voided_at', null);
+    if (error) throw error;
+
+    const days = bucketPaymentsByDayOfMonth(data);
+    res.json({ days, max_amount: days.reduce((max, d) => Math.max(max, d.amount), 0) });
+  } catch (e) { next(e); }
+});
+
 // ── Export ─────────────────────────────────────────────────────────────────
 // "Can I get my data out?" is a question a developer asks before they trust a
 // system with their buyer list, and the honest answer has to be a button rather
@@ -253,8 +446,13 @@ router.get('/collections', requirePermission('reports.collections'), async (req,
 const EXPORTS = {
   customers: {
     filename: 'buyers',
-    async load(orgId) {
-      const { data, error } = await supabaseAdmin
+    // SECTION 4 — "Export selected" on the Buyers screen's bulk action bar
+    // reuses this exact export, scoped with `ids` rather than growing a
+    // second, near-identical loader: the columns and the data shape must
+    // stay in lockstep with the unfiltered "Export buyers" button, and a
+    // second copy is the one that drifts.
+    async load(orgId, params = {}) {
+      let query = supabaseAdmin
         .from('re_customers')
         .select(`
           full_name, phone, email, source, created_at, credit_score,
@@ -264,6 +462,11 @@ const EXPORTS = {
           )`)
         .eq('organization_id', orgId)
         .order('full_name');
+      if (params.ids) {
+        const ids = String(params.ids).split(',').map((id) => id.trim()).filter(Boolean);
+        if (ids.length) query = query.in('id', ids);
+      }
+      const { data, error } = await query;
       if (error) throw error;
       return data || [];
     },
@@ -589,7 +792,7 @@ router.get('/export/:kind', exportLimiter, requirePermission('reports.export'), 
     // src/middleware/rbac.js's own comment describes assertPermission for.
     if (spec.permission && !assertPermission(req, res, spec.permission)) return;
 
-    const rows = await spec.load(req.orgId);
+    const rows = await spec.load(req.orgId, req.query);
     const stamp = new Date().toISOString().slice(0, 10);
 
     audit(req, {
@@ -607,3 +810,9 @@ router.get('/export/:kind', exportLimiter, requirePermission('reports.export'), 
 });
 
 module.exports = router;
+// Pure helpers, attached to the exported router for the offline test suite —
+// same pattern audit.js uses for redactFinancialAuditRows.
+module.exports.periodRange = periodRange;
+module.exports.buildCustomReportColumns = buildCustomReportColumns;
+module.exports.bucketPaymentsByDayOfMonth = bucketPaymentsByDayOfMonth;
+module.exports.CUSTOM_REPORT_FIELDS = CUSTOM_REPORT_FIELDS;

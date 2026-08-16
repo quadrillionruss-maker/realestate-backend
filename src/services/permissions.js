@@ -112,6 +112,18 @@ const PERMISSIONS = {
   'settings.write': OWNER,
   'settings.transferOwner': OWNER,
   'reports.investor': OWNER,
+  // FEATURE — a full CSV of every audit row this workspace has ever
+  // produced (every actor, every action, every IP) is the single most
+  // sensitive export this product offers. audit.read itself is
+  // DIRECTORS-tier (a sales director may look at the log on screen), but
+  // walking away with the whole thing as a file is a different, narrower
+  // decision — the same owner-only tier as the investor report.
+  'audit.export': OWNER,
+  // SECTION 25 — a ZIP of every CSV this workspace has, every table, every
+  // row, no per-record redaction. Same owner-only tier as audit.export just
+  // above, for the same reason: the whole book leaving as a file is a wider
+  // decision than any one screen a director already has access to.
+  'settings.backup': OWNER,
   // SECTION 6 — a collections/default-risk forecast is strategic, same
   // owner-only tier as the investor report it sits beside on the Reports
   // screen.
@@ -146,6 +158,10 @@ const PERMISSIONS = {
   // financing request forward is that same conversation, not a sales
   // decision a director could make on their behalf.
   'financing.manage': OWNER,
+  // FEATURE — blacklisting a buyer (refusing to sell to them again, ever)
+  // is the same weight as waiving debt or deleting a record: the chairman's
+  // call, not a director's judgment.
+  'customers.blacklist': OWNER,
 
   // ── Owner + Sales Director ───────────────────────────────────────────────
   'reservations.restructure': DIRECTORS,
@@ -183,6 +199,19 @@ const PERMISSIONS = {
   // numbers, same tier as collections/rental, not the owner-only investor
   // P&L view.
   'reports.referrals': DIRECTORS,
+  // FEATURE — sales rep leaderboard, custom CSV report builder, and the
+  // payment-day heatmap. Same DIRECTORS tier as every other report on this
+  // screen (reports.collections/reports.rental/reports.referrals) — none of
+  // the three surfaces a figure those two roles could not already see
+  // elsewhere (per-rep numbers are already in reports.collections' spirit,
+  // and the custom export only ever draws from fields financial.view already
+  // permits DIRECTORS to see).
+  'reports.leaderboard': DIRECTORS,
+  'reports.customExport': DIRECTORS,
+  'reports.heatmap': DIRECTORS,
+  // FEATURE — buyer satisfaction survey averages/comments. Same DIRECTORS
+  // tier as every other report on this screen.
+  'reports.satisfaction': DIRECTORS,
   'commissions.approve': DIRECTORS,
   'commissions.readAll': DIRECTORS,
   'brief.read': DIRECTORS,
@@ -226,6 +255,14 @@ const PERMISSIONS = {
   // rule in this file uses.
   'activities.write': ['owner', 'sales_director', 'sales_rep', 'collections'],
 
+  // FEATURE — bulk allocation-letter generation, one project at a time.
+  // Narrower than documents.generate (PAPERWORK — owner, sales_director,
+  // documentation): generating dozens of legal documents in one click is
+  // owner-or-documentation-officer's call specifically, not a sales
+  // director's — no existing group constant is exactly that pair, so it is
+  // spelled out here rather than forced into PAPERWORK.
+  'documents.bulkGenerate': ['owner', 'documentation'],
+
   // ── Owner + Sales Director + Collections ─────────────────────────────────
   // Money arriving, and everything that is really "chasing it".
   'payments.record': MONEY_IN,
@@ -250,6 +287,11 @@ const PERMISSIONS = {
   // arrears (selling, or chasing them) have reason to send one; a
   // Documentation Officer, whose remit is letters and deeds, does not.
   'customers.portalAccess': ['owner', 'sales_director', 'sales_rep', 'collections'],
+  // FEATURE — bulk portal-link send. Narrower than the single-buyer send
+  // above: emailing dozens of buyers in one click is a director-level
+  // decision, not something a rep or collections officer triggers on their
+  // own initiative.
+  'customers.bulkPortalLink': DIRECTORS,
   // The at-risk list is the collections officer's whole morning. A sales rep
   // sees their own buyers' status on the buyer screen instead.
   'atRisk.read': MONEY_IN,

@@ -23,6 +23,10 @@ const financing = require('../services/financingService');
 const exchangeRates = require('../services/exchangeRateService');
 const handover = require('../services/handoverService');
 const community = require('../services/communityService');
+const satisfactionSurvey = require('../services/satisfactionSurveyService');
+const referrals = require('../services/referralService');
+const portalNotifications = require('../services/portalNotificationService');
+const featureUsage = require('../services/featureUsageService');
 
 const router = express.Router();
 
@@ -69,6 +73,7 @@ router.use(portalAuth);
 
 router.get('/me', async (req, res, next) => {
   try {
+    featureUsage.track(req.customer.organization_id, 'portal_opened');
     res.json(await portal.loadPortalAccount(req.customer));
   } catch (e) { next(e); }
 });
@@ -236,6 +241,17 @@ router.post('/community/:projectId', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// SECTION 19 — same membership gate as the posts themselves; a buyer can
+// only see the leaderboard for a project they are actually part of.
+router.get('/community/:projectId/referral-leaderboard', async (req, res, next) => {
+  try {
+    if (!(await community.assertBuyerInProject(req.customer, req.params.projectId))) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+    res.json(await referrals.projectReferralLeaderboard(req.customer.organization_id, req.params.projectId));
+  } catch (e) { next(e); }
+});
+
 router.post('/community/post/:postId/reply', async (req, res, next) => {
   try {
     const data = await community.createReply(req.customer, req.params.postId, req.body?.content);
@@ -259,6 +275,44 @@ router.post('/community/post/:postId/report', async (req, res, next) => {
   try {
     const data = await community.reportPost(req.customer, req.params.postId, req.body?.reason);
     res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
+// ── SECTION 20 — the portal bell ────────────────────────────────────────
+router.get('/notifications/:reservationId', async (req, res, next) => {
+  try {
+    await portal.assertOwnsReservation(req.customer, req.params.reservationId);
+    const result = await portalNotifications.listForCustomer(req.customer.organization_id, req.customer.id, {
+      limit: Number(req.query.limit) || 20,
+    });
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+router.post('/notifications/:reservationId/:id/read', async (req, res, next) => {
+  try {
+    await portal.assertOwnsReservation(req.customer, req.params.reservationId);
+    await portalNotifications.markRead(req.customer.organization_id, req.customer.id, req.params.id);
+    res.status(204).end();
+  } catch (e) { next(e); }
+});
+
+// SECTION 18 — the survey page's own submit. No auth beyond the portal
+// token every route here already requires; assertOwnsReservation is what
+// stops a buyer submitting scores against a reservation that isn't theirs.
+router.post('/survey/:reservationId', async (req, res, next) => {
+  try {
+    await portal.assertOwnsReservation(req.customer, req.params.reservationId);
+    const result = await satisfactionSurvey.submit(req.customer.organization_id, req.params.reservationId, req.customer.id, {
+      overallScore: req.body?.overall_score,
+      constructionQualityScore: req.body?.construction_quality_score,
+      salesExperienceScore: req.body?.sales_experience_score,
+      comments: req.body?.comments,
+    });
+    if (result.notFound) {
+      return res.status(404).json({ error: 'No survey is waiting for this reservation.' });
+    }
+    res.json(result.survey);
   } catch (e) { next(e); }
 });
 

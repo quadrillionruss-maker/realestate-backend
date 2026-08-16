@@ -54,6 +54,13 @@
       <option value="EUR">€ EUR</option>
       <option value="CAD">CA$ CAD</option>
     </select>
+    <!-- SECTION 20 — hidden until portal.js has a reservation to scope
+         notifications to (GET /portal/notifications/:reservationId needs
+         one, the same way every other portal route does). -->
+    <button class="icon-btn hidden" id="btn-portal-notifications" type="button" aria-label="Notifications">
+      <span aria-hidden="true">&#128276;&#xFE0E;</span><span class="notif-badge hidden" id="portal-notif-count"></span>
+    </button>
+    <div class="notif-dropdown hidden" id="portal-notif-dropdown"></div>
   </header>
 
   <div id="portal-view">

@@ -38,6 +38,88 @@
     }).join(' ');
   }
 
+  // SECTION 10 — group by (reservation, doc_type, payment): a reservation
+  // can hold many payments, each its own receipt document sharing the same
+  // reservation_id + doc_type, so payment_id is what tells separate
+  // receipts apart while still grouping every VERSION of the same
+  // allocation letter or legal document together.
+  function documentGroupKey(d) {
+    return d.reservation_id + '|' + d.doc_type + '|' + (d.payment_id || '');
+  }
+
+  // Returns one row per (reservation, doc_type, payment) group — the
+  // current live version — with __previousVersions attached for
+  // documentRow's own "Show previous versions" toggle.
+  function currentDocumentRows(documents) {
+    var groups = {};
+    documents.forEach(function (d) {
+      var key = documentGroupKey(d);
+      (groups[key] = groups[key] || []).push(d);
+    });
+    var rows = [];
+    Object.keys(groups).forEach(function (key) {
+      var versions = groups[key].slice().sort(function (a, b) { return (b.version || 1) - (a.version || 1); });
+      var current = versions.filter(function (d) { return !d.superseded_at; })[0] || versions[0];
+      current.__previousVersions = versions.filter(function (d) { return d.id !== current.id; });
+      rows.push(current);
+    });
+    return rows.sort(function (a, b) { return (b.created_at || '').localeCompare(a.created_at || ''); });
+  }
+
+  // SECTION 9 — 'pending' (never issued) and 'signed'/'superseded' (already
+  // resolved, one way or the other) never read as expired, only a
+  // generated-or-sent document that is still sitting there past its date.
+  function documentIsExpired(d) {
+    return (d.status === 'generated' || d.status === 'sent') && !!d.expires_at && d.expires_at < new Date().toISOString();
+  }
+
+  function documentRow(d) {
+    var reservation = d.re_reservations || {};
+    var unit = reservation.re_units || {};
+    // SECTION 8 — a generated-but-not-yet-signed legal document can have
+    // its signing link resent (re-runs /generate, which always re-issues
+    // and re-sends one — documentService.generateDocument).
+    var signable = ['deed_of_assignment', 'subscriber_agreement', 'power_of_attorney'].indexOf(d.doc_type) !== -1;
+    var expired = documentIsExpired(d);
+    var previous = d.__previousVersions || [];
+
+    var mainRow = '<tr>' +
+      '<td class="cell-primary">' + esc(formatDocType(d.doc_type)) + (d.version > 1 ? ' <span class="muted">v' + d.version + '</span>' : '') +
+        '<div class="cell-meta">' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</div></td>' +
+      '<td class="muted hide-mobile">' + esc(unit.unit_number || '—') + '</td>' +
+      '<td>' + (expired ? badge('expired') : badge(d.status)) + '</td>' +
+      '<td class="muted hide-mobile">' + esc(d.generated_at ? fmtDate(d.generated_at) : '—') + '</td>' +
+      '<td class="muted hide-mobile">' + esc(d.expires_at ? fmtDate(d.expires_at) : '—') + '</td>' +
+      '<td class="right nowrap">' +
+        (d.status === 'generated' || d.status === 'signed'
+          ? '<button class="btn-quiet" data-download="' + esc(d.id) + '">Preview</button>'
+          : '<button class="btn-quiet" data-generate="' + esc(d.id) + '">Generate</button>') +
+        (signable && d.status === 'generated'
+          ? ' <button class="btn-quiet" data-generate="' + esc(d.id) + '">Resend link</button>'
+          : '') +
+      '</td>' +
+    '</tr>';
+
+    if (!previous.length) return mainRow;
+
+    var label = 'Show ' + R.plural(previous.length, 'previous version');
+    return mainRow +
+      '<tr><td colspan="6" class="sched-detail-cell">' +
+        '<button class="btn-quiet" data-toggle-versions="' + esc(d.id) + '" data-versions-label="' + esc(label) + '">' + esc(label) + '</button>' +
+        '<div class="hidden mt-1" data-versions-detail="' + esc(d.id) + '">' +
+          previous.map(previousVersionRow).join('') +
+        '</div>' +
+      '</td></tr>';
+  }
+
+  function previousVersionRow(d) {
+    return '<div class="sched-history-row flex-row justify-between gap-10">' +
+      '<span>v' + (d.version || 1) + ' — ' + badge(d.status) +
+        (d.generated_at ? ' <span class="page-sub">generated ' + esc(fmtDate(d.generated_at)) + '</span>' : '') + '</span>' +
+      '<button class="btn-quiet" data-download="' + esc(d.id) + '">Preview</button>' +
+    '</div>';
+  }
+
   // Remembers the project filter across screens, so choosing "Lekki Gardens"
   // on the dashboard does not reset when you go and look at the units.
   //
@@ -51,7 +133,10 @@
   // projectFilter above, and cleared alongside it for the same reason.
   var showAllDrafts = false;
 
-  R.resetScreenState = function () { projectFilter = null; expandedScheduleBuyerId = null; showAllDrafts = false; };
+  R.resetScreenState = function () {
+    projectFilter = null; expandedScheduleBuyerId = null; showAllDrafts = false;
+    leaderboardSort = 'total_collected';
+  };
 
   // Mirrors src/services/installmentService.js addMonthsUTC exactly: a lease
   // starting 31 Jan renews to 28/29 Feb, not 3 March, which is what native
@@ -397,6 +482,45 @@
     return part + (name ? ', ' + name.split(' ')[0] : '') + '.';
   }
 
+  // SECTION 23 — the setup checklist card. R.navigate targets already used
+  // elsewhere in the sidebar (settings, buyers, projects) so "Add a buyer"
+  // etc. are real shortcuts, not just labels.
+  var ONBOARDING_STEP_LINK = {
+    project_created: '#/projects',
+    units_added: '#/projects',
+    buyer_added: '#/buyers',
+    reservation_created: '#/buyers',
+    payment_recorded: '#/payments',
+    branding_configured: '#/settings',
+    team_invited: '#/settings',
+    brief_generated: '#/dashboard',
+  };
+
+  function onboardingCardHtml(onboarding) {
+    var nextStep = onboarding.steps.filter(function (s) { return !s.done; })[0];
+    return '<div class="card onboarding-card mb-2">' +
+      '<div class="card-head">' +
+        '<span class="eyebrow">Get set up</span>' +
+        '<span class="spacer"></span>' +
+        '<span class="muted mono">' + onboarding.completed_count + '/' + onboarding.total_count + '</span>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<ul class="onboarding-steps">' +
+          onboarding.steps.map(function (s) {
+            var link = ONBOARDING_STEP_LINK[s.key];
+            return '<li class="' + (s.done ? 'done' : '') + '">' +
+              '<span class="onboarding-mark">' + (s.done ? '✓' : '○') + '</span>' +
+              (s.done || !link
+                ? '<span>' + esc(s.label) + '</span>'
+                : '<a href="' + link + '">' + esc(s.label) + '</a>') +
+            '</li>';
+          }).join('') +
+        '</ul>' +
+        (nextStep ? '<p class="muted mt-1 mb-0">Next: ' + esc(nextStep.label) + '</p>' : '') +
+      '</div>' +
+    '</div>';
+  }
+
   /* ══ COMMAND CENTER ═════════════════════════════════════════════════════
      The daily habit. Everything a developer needs before their first call:
      what the AI noticed overnight, the four numbers, the unit mix, who is
@@ -418,15 +542,22 @@
       var canSeeAtRisk = R.can('atRisk.read');
       var canSeeBrief = R.can('brief.read');
 
+      // SECTION 23 — owner only: inviting a team member and setting up
+      // branding are workspace-wide decisions nobody else on the team can
+      // act on, same reasoning the critical-projects card below restricts
+      // itself to the owner.
+      var wantsOnboarding = R.state.user.role === 'owner';
+
       var results = await Promise.all([
         api('/dashboard' + scope),
         // A Sales Executive and Documentation never reach GET /at-risk — the
         // server would 403 it, so this simply isn't asked for them.
         canSeeAtRisk ? api('/dashboard/at-risk' + scope) : Promise.resolve([]),
         api('/tasks?status=open'),
+        wantsOnboarding ? api('/dashboard/onboarding').catch(function () { return null; }) : Promise.resolve(null),
       ]);
 
-      var d = results[0], atRisk = results[1], tasks = results[2];
+      var d = results[0], atRisk = results[1], tasks = results[2], onboarding = results[3];
       // The 4 KPI tiles read a lot better as ₦28.5m than ₦28,450,000 once
       // the grid has collapsed to one column — checked at render time, not
       // in a media query, because there is no CSS way to swap which STRING
@@ -467,7 +598,28 @@
           '</div>'
         : '';
 
+      // SECTION 1 — the browser's own permission prompt can only ever be
+      // triggered by a real user gesture (a click), never fired
+      // automatically on page load — so this is a banner with a button,
+      // not the OS prompt appearing on its own. Shown once per browser
+      // (R.dismissPushBanner/localStorage) whether granted or dismissed;
+      // Notification.permission itself is what stops it reappearing after
+      // the browser's own prompt is answered either way.
+      var showPushBanner = R.shouldShowPushBanner();
+
       view.innerHTML =
+        (showPushBanner
+          ? '<div class="notice info mb-2" id="push-banner">' +
+              '<div class="flex-row justify-between align-center gap-10">' +
+                '<span>Turn on notifications for payments, the morning brief, and buyers falling behind — even when this tab is closed.</span>' +
+                '<div class="btn-row">' +
+                  '<button class="btn primary sm" id="btn-enable-push">Enable notifications</button>' +
+                  '<button class="btn-quiet" id="btn-dismiss-push">Not now</button>' +
+                '</div>' +
+              '</div>' +
+            '</div>'
+          : '') +
+
         // SECTION 15 — "a prominent warning card... visible to owner
         // only". First thing on the screen, before even the greeting —
         // d.critical_projects is already [] for every other role (see
@@ -480,6 +632,12 @@
               }).join('<br>') +
             '</div>'
           : '') +
+
+        // SECTION 23 — the setup checklist, only while it is still worth
+        // showing: once 5 of the 8 steps are done the workspace has proven
+        // it's in real use, and a permanent card nagging a live business
+        // about "invite a team member" would just be noise.
+        (onboarding && onboarding.completed_count < 5 ? onboardingCardHtml(onboarding) : '') +
 
         '<div class="greeting"><h1>' + esc(greeting()) + '</h1>' +
           '<div class="greeting-lines">' + lines.join('') + '</div></div>' +
@@ -616,9 +774,15 @@
 
           '<div>' +
             (canSeeBrief
-              ? card('Drafted follow-ups', drafts.length
-                  ? (showAllDrafts ? drafts : drafts.slice(0, 5)).map(draftRow).join('')
-                  : R.emptyState('Nothing to chase today'),
+              ? card('Drafted follow-ups',
+                  // SECTION 15 — the in-progress queue banner sits above the
+                  // draft list itself, visible regardless of showAllDrafts,
+                  // so leaving the dashboard mid-sequence and coming back
+                  // still shows where the queue is.
+                  whatsappQueueBannerHtml() +
+                  (drafts.length
+                    ? (showAllDrafts ? drafts : drafts.slice(0, 5)).map(draftRow).join('')
+                    : R.emptyState('Nothing to chase today')),
                   {
                     flush: true,
                     // Expands in place rather than navigating — there is no
@@ -626,11 +790,15 @@
                     // for the At risk card, so "See all" toggles the same
                     // module-level flag projectFilter already uses and
                     // reloads, same pattern, different variable.
-                    actions: drafts.length > 5
-                      ? (showAllDrafts
-                          ? '<button class="btn-quiet" id="btn-drafts-collapse">Show fewer</button>'
-                          : '<button class="btn-quiet" id="btn-drafts-see-all">See all ' + drafts.length + '</button>')
-                      : '',
+                    actions:
+                      (drafts.length
+                        ? '<button class="btn-quiet" id="btn-drafts-send-all">Send all</button>'
+                        : '') +
+                      (drafts.length > 5
+                        ? (showAllDrafts
+                            ? '<button class="btn-quiet" id="btn-drafts-collapse">Show fewer</button>'
+                            : '<button class="btn-quiet" id="btn-drafts-see-all">See all ' + drafts.length + '</button>')
+                        : ''),
                   })
               : '') +
 
@@ -648,8 +816,34 @@
         });
       });
 
+      R.onClick(view, '#btn-enable-push', async function () {
+        await R.subscribeToPush();
+        R.dismissPushBanner();
+        toast('Notifications enabled.', 'ok');
+        R.refreshNotifBell();
+        R.reload();
+      });
+
+      R.onClick(view, '#btn-dismiss-push', function () {
+        R.dismissPushBanner();
+        R.reload();
+      });
+
       R.onClick(view, '#btn-drafts-see-all', function () { showAllDrafts = true; R.reload(); });
       R.onClick(view, '#btn-drafts-collapse', function () { showAllDrafts = false; R.reload(); });
+
+      R.onClick(view, '#btn-drafts-send-all', function () {
+        R.whatsappQueue.start(drafts);
+        R.reload();
+      });
+      R.onClick(view, '#btn-drafts-queue-skip', function () {
+        R.whatsappQueue.skip();
+        R.reload();
+      });
+      R.onClick(view, '#btn-drafts-queue-done', function () {
+        R.whatsappQueue.done();
+        R.reload();
+      });
 
       // R.onClick disables the button for the duration, which is the debounce:
       // a frustrated developer cannot queue twenty model calls by clicking
@@ -780,7 +974,7 @@
       '</div>' +
       (flags ? '<div class="record-flags">' + flags + '</div>' : '') +
       '<div class="record-actions">' +
-        (phone ? '<a class="action-link" href="tel:' + esc(phone) + '">Call</a>' : '') +
+        (phone ? '<a class="action-link" href="tel:' + esc(phone) + '" data-customer-id="' + esc(c.customer.id) + '" data-customer-name="' + esc(c.customer.full_name) + '">Call</a>' : '') +
         (whatsapp ? '<a class="action-link" target="_blank" rel="noopener" href="' + esc(whatsapp) + '">WhatsApp</a>' : '') +
         // A promise the morning sweep already flagged open or broken still
         // needs a way out that isn't "wait for the buyer to pay" — paid in
@@ -882,6 +1076,22 @@
         R.reload();
       },
     });
+  }
+
+  // SECTION 15 — read fresh on every render (dashboard reload, or coming
+  // back from WhatsApp Web) rather than cached, since R.whatsappQueue.current()
+  // is sessionStorage-backed and can change from outside this render entirely.
+  function whatsappQueueBannerHtml() {
+    var queue = R.whatsappQueue.current();
+    if (!queue) return '';
+    return '<div class="notice info mb-2 flex-row justify-between align-center gap-10">' +
+      '<span>Sending ' + (queue.index + 1) + ' of ' + queue.total +
+        ' — ' + esc(queue.items[queue.index] ? queue.items[queue.index].name : '') + '</span>' +
+      '<div class="btn-row">' +
+        '<button class="btn-quiet" id="btn-drafts-queue-skip">Skip</button>' +
+        '<button class="btn-quiet" id="btn-drafts-queue-done">Done</button>' +
+      '</div>' +
+    '</div>';
   }
 
   function draftRow(draft, i) {
@@ -2045,18 +2255,39 @@
       // the filter row only draws once there is a real score to filter by.
       var scoresVisible = customers.some(function (c) { return c.credit_score != null; });
       var creditFilter = query.credit || '';
+      var blacklistFilter = false;
       var page = 1;
+      // SECTION 4 — bulk actions. id -> true, so re-rendering (a filter
+      // click, a page change) doesn't lose a selection made on an earlier
+      // page — cleared only by leaving this screen entirely, same lifetime
+      // as projectFilter/leaderboardSort above.
+      var selected = {};
+      var canExportSelected = R.can('reports.export');
+      var canBulkWaive = R.can('payments.waive');
+      var canBulkPortalLink = R.can('customers.bulkPortalLink');
+      var canBlacklist = R.can('customers.blacklist');
+
+      function selectedIds() { return Object.keys(selected).filter(function (id) { return selected[id]; }); }
+      function selectedCustomers() {
+        var ids = selectedIds();
+        return customers.filter(function (c) { return ids.indexOf(c.id) >= 0; });
+      }
 
       function renderPage() {
-        var filtered = creditFilter
-          ? customers.filter(function (c) {
-              var t = creditTier(c.credit_score);
-              return t && t.key === creditFilter;
-            })
-          : customers;
+        var filtered = customers.filter(function (c) {
+          if (creditFilter) {
+            var t = creditTier(c.credit_score);
+            if (!t || t.key !== creditFilter) return false;
+          }
+          if (blacklistFilter && !c.blacklisted) return false;
+          return true;
+        });
 
         var p = paginate(filtered, CUSTOMERS_PER_PAGE, page);
         page = p.page;
+        var ids = selectedIds();
+        var pageIds = p.slice.map(function (c) { return c.id; });
+        var allOnPageSelected = pageIds.length > 0 && pageIds.every(function (id) { return selected[id]; });
 
         view.innerHTML =
           head('Buyers', R.plural(filtered.length, 'buyer') + (search ? ' matching “' + search + '”' : ''),
@@ -2064,30 +2295,55 @@
             '<button class="btn" id="btn-import-buyers">Import CSV</button>' +
             '<button class="btn primary" id="btn-new-buyer">Add buyer</button>') +
 
-          (scoresVisible
-            ? '<div class="filter-row">' +
-                [['', 'All'], ['excellent', 'Excellent'], ['good', 'Good'], ['fair', 'Fair'], ['at_risk', 'At risk']]
+          '<div class="filter-row">' +
+            (scoresVisible
+              ? [['', 'All'], ['excellent', 'Excellent'], ['good', 'Good'], ['fair', 'Fair'], ['at_risk', 'At risk']]
                   .map(function (t) {
                     return '<button class="pill' + (creditFilter === t[0] ? ' is-on' : '') + '" data-credit-filter="' + t[0] + '">' + t[1] + '</button>';
-                  }).join('') +
+                  }).join('')
+              : '') +
+            // SECTION 7 — a plain toggle pill, not a fifth credit tier: a
+            // buyer can be blacklisted at any credit score, so this filters
+            // independently of, not alongside, the tier pills above.
+            '<button class="pill' + (blacklistFilter ? ' is-on' : '') + '" data-blacklist-filter>Blacklisted</button>' +
+          '</div>' +
+
+          // SECTION 4 — only shown once something IS selected, above the
+          // table it acts on. Send WhatsApp has no permission gate (every
+          // role that can see this screen may message a buyer); the other
+          // three each check the tier the spec calls for.
+          (ids.length
+            ? '<div class="bulk-action-bar">' +
+                '<span class="bulk-count">' + R.plural(ids.length, 'buyer') + ' selected</span>' +
+                '<div class="btn-row">' +
+                  '<button class="btn-quiet" id="btn-bulk-whatsapp">Send WhatsApp</button>' +
+                  (canExportSelected ? '<button class="btn-quiet" id="btn-bulk-export">Export selected</button>' : '') +
+                  (canBulkPortalLink ? '<button class="btn-quiet" id="btn-bulk-portal">Send portal link</button>' : '') +
+                  (canBulkWaive ? '<button class="btn danger" id="btn-bulk-waive">Bulk waive next overdue</button>' : '') +
+                  '<button class="btn-quiet" id="btn-bulk-clear">Clear</button>' +
+                '</div>' +
               '</div>'
             : '') +
 
           card(null, table(
-            [{ label: 'Name' }, { label: 'Phone' }, { label: 'Email', hideMobile: true },
+            [{ label: '<input type="checkbox" id="select-all-buyers"' + (allOnPageSelected ? ' checked' : '') + '>', raw: true },
+              { label: 'Name' }, { label: 'Phone' }, { label: 'Email', hideMobile: true },
               { label: 'Source', hideMobile: true }, { label: 'Added', hideMobile: true },
               { label: 'Credit score', hideMobile: true }, { label: '' }],
             p.slice,
             function (c) {
               return '<tr class="is-clickable" data-open="' + esc(c.id) + '">' +
-                '<td class="cell-primary">' + esc(c.full_name) + '</td>' +
+                '<td data-stop><input type="checkbox" class="row-select" data-select="' + esc(c.id) + '"' +
+                  (selected[c.id] ? ' checked' : '') + '></td>' +
+                '<td class="cell-primary">' + esc(c.full_name) +
+                  (c.blacklisted ? ' ' + badge('blacklisted') : '') + '</td>' +
                 '<td class="mono muted">' + esc(c.phone || '—') + '</td>' +
                 '<td class="muted hide-mobile">' + esc(c.email || '—') + '</td>' +
                 '<td class="muted hide-mobile">' + esc(c.source || '—') + '</td>' +
                 '<td class="muted hide-mobile">' + esc(fmtDate(c.created_at)) + '</td>' +
                 '<td class="hide-mobile">' + creditBadge(c.credit_score) + '</td>' +
                 // data-stop keeps the row's own click handler from firing and
-                // opening the drawer behind the confirmation.
+                // opening the drawer behind the confirmation/checkbox.
                 '<td class="right">' + (R.can('recycle.delete')
                   ? '<button class="btn-quiet" data-stop data-delete-customer="' + esc(c.id) +
                     '" data-label="' + esc(c.full_name) + '">Delete</button>'
@@ -2095,7 +2351,7 @@
               '</tr>';
             },
             {
-              emptyTitle: search ? 'Nobody matched that' : creditFilter ? 'Nobody in this tier' : 'No buyers yet',
+              emptyTitle: search ? 'Nobody matched that' : creditFilter ? 'Nobody in this tier' : blacklistFilter ? 'No blacklisted buyers' : 'No buyers yet',
               emptyHint: search ? 'Try a phone number or part of a surname.' : 'Add them one at a time, or import the list you already have.',
             }
           ), { flush: true }) +
@@ -2120,6 +2376,34 @@
           });
         });
 
+        var blacklistPill = R.qs('[data-blacklist-filter]', view);
+        if (blacklistPill) {
+          blacklistPill.addEventListener('click', function () {
+            blacklistFilter = !blacklistFilter;
+            page = 1;
+            renderPage();
+          });
+        }
+
+        // SECTION 4 — every checkbox click just flips `selected` and
+        // re-renders; the whole bar (and the header checkbox's own state)
+        // is derived from that one object, so there is nowhere else for
+        // selection state to drift out of sync.
+        R.qsa('[data-select]', view).forEach(function (box) {
+          box.addEventListener('click', function (event) {
+            event.stopPropagation();
+            selected[box.dataset.select] = box.checked;
+            renderPage();
+          });
+        });
+        var selectAll = R.qs('#select-all-buyers', view);
+        if (selectAll) {
+          selectAll.addEventListener('click', function () {
+            pageIds.forEach(function (id) { selected[id] = selectAll.checked; });
+            renderPage();
+          });
+        }
+
         R.qs('#btn-new-buyer', view).addEventListener('click', customerModal);
         // importCustomersModal now fetches its own Project list before
         // opening — R.onClick gives that fetch a spinner and a toast if it
@@ -2128,6 +2412,40 @@
         R.onClick(view, '#btn-export-buyers', async function () {
           await R.downloadCsv('/reports/export/customers', 'archta-buyers.csv');
           toast('Exported. Check your downloads.', 'ok');
+        });
+
+        R.onClick(view, '#btn-bulk-clear', function () {
+          selected = {};
+          renderPage();
+        });
+
+        R.onClick(view, '#btn-bulk-whatsapp', function () {
+          bulkWhatsAppModal(selectedCustomers());
+        });
+
+        R.onClick(view, '#btn-bulk-export', async function () {
+          await R.downloadCsv('/reports/export/customers?ids=' + selectedIds().join(','), 'archta-buyers-selected.csv');
+          toast('Exported. Check your downloads.', 'ok');
+        });
+
+        R.onClick(view, '#btn-bulk-portal', async function () {
+          var ids2 = selectedIds();
+          var confirmed = await R.confirm({
+            title: 'Send portal link to ' + R.plural(ids2.length, 'buyer') + '?',
+            message: 'Emails a personal payment-account link to every selected buyer who has an email on file. Buyers with no email are skipped.',
+            confirmLabel: 'Send',
+          });
+          if (!confirmed) return;
+          var result = await api.post('/customers/bulk-portal-link', { customer_ids: ids2 });
+          toast(result.sent + ' portal link(s) sent' +
+            (result.skipped_no_email ? ', ' + result.skipped_no_email + ' skipped (no email)' : '') + '.', 'ok');
+        });
+
+        R.onClick(view, '#btn-bulk-waive', async function () {
+          await bulkWaiveModal(selectedIds(), function () {
+            selected = {};
+            renderPage();
+          });
         });
 
         var prev = R.qs('[data-page-prev]', view);
@@ -2139,6 +2457,66 @@
       renderPage();
     },
   };
+
+  // SECTION 4 — bulk WhatsApp. Real anchor clicks, one per buyer, same as
+  // every other WhatsApp link in this app (see the module doc's own note on
+  // R.openFile/popup blockers) — a rep clicks each one themselves rather
+  // than the app trying to auto-sequence window.open calls, which a phone's
+  // popup blocker would drop for every buyer after the first anyway. A
+  // drafted per-buyer message (from the daily brief) is Section 15's job on
+  // the dashboard; this is the plain, always-available generic version.
+  var BULK_WHATSAPP_GENERIC_MESSAGE = 'Hi, this is a quick check-in about your account with us. Please reach out if you have any questions.';
+  function bulkWhatsAppModal(buyers) {
+    R.modal({
+      title: 'Send WhatsApp to ' + R.plural(buyers.length, 'buyer'),
+      body:
+        '<p class="page-sub mb-2">Click each buyer to open their WhatsApp chat with a pre-filled message.</p>' +
+        '<div class="btn-row">' +
+          buyers.map(function (c) {
+            var link = R.waLink(c.phone);
+            if (!link) return '<span class="btn-quiet" title="No valid phone number">' + esc(c.full_name) + ' (no phone)</span>';
+            return '<a class="btn-quiet" target="_blank" rel="noopener" href="' + link +
+              '&text=' + encodeURIComponent(BULK_WHATSAPP_GENERIC_MESSAGE) + '">' + esc(c.full_name) + '</a>';
+          }).join('') +
+        '</div>',
+    });
+  }
+
+  // SECTION 4 — bulk waive. Two-step: a dry run shows the reps exactly what
+  // they are about to write off before the confirmation form even appears
+  // (imports.js's own preview-then-commit shape), so "how much money is
+  // this" is answered before the reason field is filled in, not after.
+  async function bulkWaiveModal(customerIds, onDone) {
+    var preview = await api.post('/payments/bulk-waive-next-overdue', { customer_ids: customerIds, dry_run: true });
+    if (!preview.rows.length) {
+      toast('None of the selected buyers have an overdue installment to waive.', 'err');
+      return;
+    }
+    R.modal({
+      title: 'Bulk waive next overdue installment',
+      body:
+        '<p class="page-sub mb-2">This waives the next overdue installment for ' + R.plural(preview.rows.length, 'buyer') +
+          ', totalling <b>' + esc(naira(preview.total_amount)) + '</b>.' +
+          (preview.skipped_count ? ' ' + R.plural(preview.skipped_count, 'buyer') + ' with no overdue installment will be skipped.' : '') +
+        '</p>' +
+        '<div class="mb-2">' + preview.rows.map(function (r) {
+          return '<div class="flex-row justify-between gap-10 mb-1"><span>' + esc(r.buyer_name) + '</span><span class="mono">' + esc(naira(r.amount)) + '</span></div>';
+        }).join('') + '</div>' +
+        '<div class="field"><label for="bw-reason">Reason</label>' +
+          '<textarea class="textarea" id="bw-reason" name="reason" required rows="2" placeholder="Why are these being waived?"></textarea></div>',
+      submitLabel: 'Waive ' + naira(preview.total_amount),
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        if (!v.reason) throw new Error('A reason is required.');
+        var result = await api.post('/payments/bulk-waive-next-overdue', {
+          customer_ids: customerIds, reason: v.reason, dry_run: false,
+        });
+        close();
+        toast(result.waived_count + ' installment(s) waived, ' + naira(result.total_amount) + ' total.', 'ok');
+        onDone();
+      },
+    });
+  }
 
   function customerModal() {
     R.modal({
@@ -2322,14 +2700,19 @@
 
     try {
       var canSeeMessages = R.can('messages.read');
+      // SECTION 16 — same tier as logging a call (activities.write), so
+      // whoever can already see the Activity section below can see this too.
+      var canScheduleMessages = R.can('activities.write');
       var results = await Promise.all([
         api('/customers/' + id),
         api('/customers/' + id + '/activities'),
         canSeeMessages ? api('/customers/' + id + '/messages') : Promise.resolve([]),
+        canScheduleMessages ? api('/scheduled-messages?customer_id=' + id) : Promise.resolve([]),
       ]);
       var c = results[0];
       var activities = results[1];
       var thread = results[2];
+      var scheduledMessages = results[3];
       var reservations = c.re_reservations || [];
 
       panel.root.querySelector('.page-title').textContent = c.full_name;
@@ -2355,6 +2738,14 @@
         // any amount on this drawer) rather than a fourth "no data" state.
         (c.credit_score != null
           ? '<div class="mb-2">' + creditBadge(c.credit_score) + '</div>'
+          : '') +
+
+        // SECTION 7 — the badge on the Buyers row is a glance; this is the
+        // reason, front and center every time someone opens this specific
+        // buyer, since forgetting WHY somebody was blacklisted is how a
+        // blacklist stops being trusted.
+        (c.blacklisted
+          ? '<div class="notice mb-2">Blacklisted' + (c.blacklist_reason ? ' — ' + esc(c.blacklist_reason) : '') + '</div>'
           : '') +
 
         // A credit from an overpayment that nobody has allocated yet stays
@@ -2384,7 +2775,7 @@
         '<div class="page-sub">' + pct + '% of the plan settled</div></div>' +
 
         '<div class="btn-row mt-2">' +
-          (c.phone ? '<a class="btn-quiet" href="tel:' + esc(c.phone) + '">Call</a>' : '') +
+          (c.phone ? '<a class="btn-quiet" href="tel:' + esc(c.phone) + '" data-customer-id="' + esc(c.id) + '" data-customer-name="' + esc(c.full_name) + '">Call</a>' : '') +
           (R.waLink(c.phone) ? '<a class="btn-quiet" target="_blank" rel="noopener" href="' + esc(R.waLink(c.phone)) + '">WhatsApp</a>' : '') +
           // Two independent actions, not one button with a shared side effect.
           // Emailing and copying used to happen together — send_email was tied
@@ -2394,12 +2785,29 @@
           '<button class="btn-quiet" id="d-portal-email"' +
             (c.email ? '' : ' disabled title="Add buyer email first"') + '>Email link</button>' +
           '<button class="btn-quiet" id="d-portal-copy">Copy for WhatsApp</button>' +
+          (canScheduleMessages
+            ? '<button class="btn-quiet" id="d-schedule-message"' + (c.phone ? '' : ' disabled title="Add buyer phone first"') + '>Schedule message</button>'
+            : '') +
+          // SECTION 7 — owner only (permissions.js's customers.blacklist),
+          // same tier as the routes themselves.
+          (R.can('customers.blacklist')
+            ? (c.blacklisted
+                ? '<button class="btn-quiet" id="d-unblacklist">Unblacklist</button>'
+                : '<button class="btn-quiet" id="d-blacklist">Blacklist buyer</button>')
+            : '') +
         '</div>' +
 
         reservations.map(function (r) {
           var unit = r.re_units || {};
           var project = unit.re_projects || {};
-          var plan = asArray(r.re_installment_plans)[0];
+          // A restructured or renewed reservation carries every plan it has
+          // ever had (migrations/005's uniq_re_active_plan_per_reservation
+          // allows exactly one ACTIVE one, but superseded ones stay in the
+          // array forever) — Supabase gives no ordering guarantee on a nested
+          // embed, so the summary above must pick the active one by status,
+          // not by array position.
+          var allPlans = asArray(r.re_installment_plans);
+          var plan = allPlans.find(function (p) { return p.status === 'active'; }) || allPlans[0];
           var schedule = asArray(plan && plan.re_installment_schedule)
             .slice() // never sort the array the API handed us in place
             .sort(function (a, b) { return a.installment_number - b.installment_number; });
@@ -2445,6 +2853,18 @@
                     '<div class="hidden" data-paid-rows="' + esc(r.id) + '">' + paidRows.map(scheduleRow).join('') + '</div>'
                   : '')
               : '<div class="page-sub mt-1">Outright purchase — no installment plan.</div>') +
+            // SECTION 6 — plan history. Only shown once there IS a history:
+            // a reservation on its first, never-restructured plan has one row
+            // and nothing to compare it against. Newest first — the most
+            // recent restructure is the one someone opening this just asked
+            // "what changed" about.
+            (allPlans.length > 1
+              ? '<div class="mt-2"><button class="btn-quiet" data-toggle-plan-history="' + esc(r.id) + '">Show plan history (' + allPlans.length + ')</button></div>' +
+                '<div class="hidden mt-1" data-plan-history="' + esc(r.id) + '">' +
+                  allPlans.slice().sort(function (a, b) { return (b.created_at || '').localeCompare(a.created_at || ''); })
+                    .map(function (p) { return planHistoryRow(p); }).join('') +
+                '</div>'
+              : '') +
           '</div>';
         }).join('') +
 
@@ -2462,6 +2882,14 @@
             ? '<div class="mt-1">' + activities.map(activityRow).join('') + '</div>'
             : '<p class="page-sub mt-1">No calls, visits or notes logged yet.</p>') +
         '</div>' +
+
+        // SECTION 16 — shown only once there is something to show, same
+        // convention as every other conditional section on this drawer.
+        (canScheduleMessages && scheduledMessages.length
+          ? '<div class="drawer-section"><b>Scheduled messages</b>' +
+              '<div class="mt-1">' + scheduledMessages.map(scheduledMessageRow).join('') + '</div>' +
+            '</div>'
+          : '') +
 
         (canSeeMessages
           ? '<div class="drawer-section">' +
@@ -2519,6 +2947,43 @@
           button.textContent = 'Copy for WhatsApp';
           button.classList.remove('is-done');
         }, 1700);
+      });
+
+      // SECTION 16 — scheduleMessageModal reopens the drawer on success
+      // rather than patching the DOM in place, since a newly-scheduled
+      // message also needs the "Scheduled messages" section itself to
+      // appear (it is only rendered at all once scheduledMessages.length > 0).
+      var scheduleButton = R.qs('#d-schedule-message', panel.body);
+      if (scheduleButton) {
+        scheduleButton.addEventListener('click', function () {
+          scheduleMessageModal(c.id, c.full_name, function () { openCustomer(id); });
+        });
+      }
+
+      R.onClick(panel.body, '[data-cancel-scheduled]', async function (button) {
+        await api('/scheduled-messages/' + button.dataset.cancelScheduled, { method: 'DELETE' });
+        toast('Scheduled message cancelled.', 'ok');
+        openCustomer(id);
+      });
+
+      // SECTION 7 — blacklist. Unblacklist needs no reason (it is reversing
+      // a decision already explained on the way in); blacklisting does, via
+      // blacklistModal, same "require a reason" pattern as waiveModal.
+      R.onClick(panel.body, '#d-blacklist', async function () {
+        await blacklistModal(c.id, c.full_name);
+        openCustomer(id);
+      });
+
+      R.onClick(panel.body, '#d-unblacklist', async function () {
+        var confirmed = await R.confirm({
+          title: 'Unblacklist ' + c.full_name + '?',
+          message: 'They can be added to a new reservation again once this is lifted.',
+          confirmLabel: 'Unblacklist',
+        });
+        if (!confirmed) return;
+        await api.post('/customers/' + c.id + '/unblacklist');
+        toast(c.full_name + ' unblacklisted.', 'ok');
+        openCustomer(id);
       });
 
       R.onClick(panel.body, '[data-pay]', async function (button) {
@@ -2601,6 +3066,31 @@
         });
       });
 
+      // SECTION 6 — plan history, and each historical plan's own schedule,
+      // collapse behind the same show/hide idiom as data-toggle-paid above
+      // rather than a real tab: this drawer has no tab component at all
+      // (it's one continuous scroll of drawer-section blocks), so a second
+      // show/hide toggle nested inside the first is the idiom already
+      // established here, not a new one.
+      R.qsa('[data-toggle-plan-history]', panel.body).forEach(function (button) {
+        button.addEventListener('click', function () {
+          var section = R.qs('[data-plan-history="' + button.dataset.togglePlanHistory + '"]', panel.body);
+          var wasHidden = section.classList.contains('hidden');
+          section.classList.toggle('hidden');
+          button.textContent = (wasHidden ? 'Hide' : 'Show') + ' plan history (' +
+            asArray(reservations.find(function (r) { return r.id === button.dataset.togglePlanHistory; }).re_installment_plans).length + ')';
+        });
+      });
+
+      R.qsa('[data-toggle-plan-schedule]', panel.body).forEach(function (button) {
+        button.addEventListener('click', function () {
+          var rows = R.qs('[data-plan-schedule="' + button.dataset.togglePlanSchedule + '"]', panel.body);
+          var wasHidden = rows.classList.contains('hidden');
+          rows.classList.toggle('hidden');
+          button.textContent = wasHidden ? 'Hide schedule' : 'Show schedule';
+        });
+      });
+
       var creditNotice = R.qs('#d-credit-notice', panel.body);
       if (creditNotice) {
         creditNotice.addEventListener('click', function () {
@@ -2656,6 +3146,50 @@
         (canDelete ? ' · <button class="btn-quiet" data-delete-activity="' + esc(a.id) + '">Delete</button>' : '') +
       '</div>' +
     '</div>';
+  }
+
+  // SECTION 16 — one row per scheduled WhatsApp message. Cancel only ever
+  // shows for a still-pending one — a sent/failed/cancelled row is history,
+  // same "past state, no further action" convention badge() itself already
+  // carries everywhere else in this app.
+  function scheduledMessageRow(m) {
+    return '<div class="sched-history-row flex-row justify-between gap-10">' +
+      '<div><div>' + esc(m.message) + '</div>' +
+        '<div class="page-sub">' + badge(m.status) + ' · for ' + esc(R.fmtDateTime(m.scheduled_for)) + '</div></div>' +
+      (m.status === 'pending'
+        ? '<button class="btn-quiet" data-cancel-scheduled="' + esc(m.id) + '">Cancel</button>'
+        : '') +
+    '</div>';
+  }
+
+  // SECTION 16 — message text + a date/time picker. datetime-local rather
+  // than separate date/time fields: one native control, no timezone-offset
+  // arithmetic to get wrong client-side — the browser hands back a local
+  // wall-clock string and `new Date(...)` on it (done server-side, in
+  // scheduledMessageService.schedule) reads it in the browser's own zone.
+  function scheduleMessageModal(customerId, customerName, onScheduled) {
+    R.modal({
+      title: 'Schedule a message — ' + customerName,
+      body:
+        '<div class="field"><label for="sm-message">Message</label>' +
+          '<textarea class="textarea" id="sm-message" name="message" rows="4" required placeholder="Hi, just a reminder about..."></textarea></div>' +
+        '<div class="field"><label for="sm-when">Send at</label>' +
+          '<input class="input" id="sm-when" name="scheduled_for" type="datetime-local" required></div>',
+      submitLabel: 'Schedule',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        if (!v.message) throw new Error('Enter a message.');
+        if (!v.scheduled_for) throw new Error('Choose a date and time.');
+        await api.post('/scheduled-messages', {
+          customer_id: customerId,
+          message: v.message,
+          scheduled_for: new Date(v.scheduled_for).toISOString(),
+        });
+        close();
+        toast('Message scheduled.', 'ok');
+        onScheduled();
+      },
+    });
   }
 
   /* FEATURE — reviewing a buyer's hardship requests from the drawer's
@@ -2751,6 +3285,34 @@
         : '') +
       (waivable
         ? '<button class="btn-quiet" data-waive="' + esc(s.id) + '" data-installment="' + esc(s.installment_number) + '">Waive</button>'
+        : '') +
+    '</div>';
+  }
+
+  // SECTION 6 — one row per plan in a reservation's Plan history. total_amount
+  // (null for Documentation — see routes/customers.js's stripFinancials) reads
+  // as "—" rather than ₦0, the same convention naira() already uses elsewhere
+  // for a stripped figure. carried_amount_paid only ever appears on a
+  // restructured plan (it is what made the restructure's new total the
+  // BALANCE rather than the full contract value — see CLAUDE.md's
+  // "Renegotiating a plan"), so it is omitted entirely on an original plan.
+  function planHistoryRow(p) {
+    var schedule = asArray(p.re_installment_schedule)
+      .slice().sort(function (a, b) { return a.installment_number - b.installment_number; });
+    return '<div class="sched-history-row">' +
+      '<div class="flex-row justify-between gap-10">' +
+        '<div><b>' + (p.restructured_at ? 'Restructured' : 'Original plan') + '</b>' +
+          '<div class="page-sub">Created ' + esc(fmtDate(p.created_at)) + '</div></div>' +
+        badge(p.status || 'active') +
+      '</div>' +
+      '<div class="page-sub mt-1">' + p.number_of_installments + ' ' + esc(p.frequency) +
+        ' installments · ' + (p.total_amount != null ? naira(p.total_amount) : '—') +
+        (p.carried_amount_paid ? ' (' + naira(p.carried_amount_paid) + ' carried forward, already paid)' : '') +
+      '</div>' +
+      (p.restructure_reason ? '<div class="page-sub mt-1">Reason: ' + esc(p.restructure_reason) + '</div>' : '') +
+      (schedule.length
+        ? '<div class="mt-1"><button class="btn-quiet" data-toggle-plan-schedule="' + esc(p.id) + '">Show schedule</button></div>' +
+          '<div class="hidden mt-1" data-plan-schedule="' + esc(p.id) + '">' + schedule.map(scheduleRow).join('') + '</div>'
         : '') +
     '</div>';
   }
@@ -3977,6 +4539,36 @@
     });
   }
 
+  // SECTION 7 — blacklist. Same shape as waiveModal above: a reason is
+  // required (there is no receipt behind this decision the way a payment
+  // has one, so the reason IS the record), and the buyer's name is shown so
+  // whoever clicked confirms who they are about to blacklist.
+  function blacklistModal(customerId, customerName) {
+    return new Promise(function (resolve) {
+      var panel = R.modal({
+        title: 'Blacklist ' + customerName,
+        body:
+          '<p class="muted mb-2">They cannot be added to a new reservation while blacklisted. ' +
+            'Existing reservations are not affected.</p>' +
+          '<div class="field"><label for="bl-reason">Reason</label>' +
+            '<textarea class="textarea" id="bl-reason" name="reason" rows="3" required ' +
+              'placeholder="Why are they being blacklisted?"></textarea></div>',
+        submitLabel: 'Blacklist buyer',
+        onSubmit: async function (form, close) {
+          var v = R.values(form);
+          if (!v.reason) throw new Error('A reason is required.');
+          await api.post('/customers/' + customerId + '/blacklist', { reason: v.reason });
+          close();
+          toast(customerName + ' blacklisted.', 'ok');
+          resolve(true);
+        },
+      });
+      var submit = R.qs('[type="submit"]', panel.root);
+      if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
+      qsaCloseWatch(panel, resolve);
+    });
+  }
+
   /* ══ VOID A WRONGLY RECORDED PAYMENT ═══════════════════════════════════
      Not a delete — the entry stays in the ledger, dimmed, with the reason
      attached, because a payment is a financial fact even when it was
@@ -4098,13 +4690,44 @@
 
   /* ══ DOCUMENTS ══════════════════════════════════════════════════════════ */
   R.screens.documents = {
-    render: async function (view) {
-      var results = await Promise.all([api('/documents'), api('/reservations')]);
-      var documents = results[0], reservations = results[1];
+    render: async function (view, params, query) {
+      if (query.project) projectFilter = query.project;
+      var results = await Promise.all([api('/documents'), api('/reservations'), api('/projects')]);
+      var allDocuments = results[0], reservations = results[1], projects = results[2];
+      var canBulkGenerate = R.can('documents.bulkGenerate');
+
+      // SECTION 8 — client-side, same as the Dashboard/Units screens'
+      // projectFilter idiom (module-level, shared across screens): both
+      // lists this screen already loads carry project_id now (widened in
+      // routes/documents.js and routes/reservations.js specifically for
+      // this), so there is nothing worth a new server-side query param for.
+      var documents = projectFilter
+        ? allDocuments.filter(function (d) {
+            var unit = d.re_reservations && d.re_reservations.re_units;
+            return unit && unit.project_id === projectFilter;
+          })
+        : allDocuments;
+
+      var projectPills = projects.length > 1
+        ? '<div class="filter-row">' +
+            '<button class="pill' + (projectFilter ? '' : ' is-on') + '" data-project="">All projects</button>' +
+            projects.map(function (p) {
+              return '<button class="pill' + (projectFilter === p.id ? ' is-on' : '') + '" data-project="' + esc(p.id) + '">' + esc(p.name) + '</button>';
+            }).join('') +
+          '</div>'
+        : '';
 
       view.innerHTML =
         head('Documents', 'Allocation letters, legal documents and receipts, stored privately and served through short-lived links.',
-          '<button class="btn primary" id="btn-new-doc">New document</button>') +
+          '<button class="btn primary" id="btn-new-doc">New document</button>' +
+            // SECTION 8 — only shown while filtered to ONE project: "generate
+            // all" needs a project to scope to, the same reason the button
+            // does not appear on the unfiltered "every document" view.
+            (canBulkGenerate && projectFilter
+              ? '<button class="btn" id="btn-generate-all">Generate all</button>'
+              : '')) +
+
+        projectPills +
 
         card(null, table(
           // Type and Buyer used to be two separate columns — on a phone,
@@ -4115,31 +4738,9 @@
           // the same cell-primary/cell-meta idiom already used for
           // Project+Location and Tenant+Unit elsewhere on this screen set.
           [{ label: 'Document' }, { label: 'Unit', hideMobile: true }, { label: 'Status' },
-            { label: 'Generated', hideMobile: true }, { label: '' }],
-          documents,
-          function (d) {
-            var reservation = d.re_reservations || {};
-            var unit = reservation.re_units || {};
-            // SECTION 8 — a generated-but-not-yet-signed legal document can
-            // have its signing link resent (re-runs /generate, which always
-            // re-issues and re-sends one — documentService.generateDocument).
-            var signable = ['deed_of_assignment', 'subscriber_agreement', 'power_of_attorney'].indexOf(d.doc_type) !== -1;
-            return '<tr>' +
-              '<td class="cell-primary">' + esc(formatDocType(d.doc_type)) +
-                '<div class="cell-meta">' + esc((reservation.re_customers && reservation.re_customers.full_name) || '—') + '</div></td>' +
-              '<td class="muted hide-mobile">' + esc(unit.unit_number || '—') + '</td>' +
-              '<td>' + badge(d.status) + '</td>' +
-              '<td class="muted hide-mobile">' + esc(d.generated_at ? fmtDate(d.generated_at) : '—') + '</td>' +
-              '<td class="right nowrap">' +
-                (d.status === 'generated' || d.status === 'signed'
-                  ? '<button class="btn-quiet" data-download="' + esc(d.id) + '">Preview</button>'
-                  : '<button class="btn-quiet" data-generate="' + esc(d.id) + '">Generate</button>') +
-                (signable && d.status === 'generated'
-                  ? ' <button class="btn-quiet" data-generate="' + esc(d.id) + '">Resend link</button>'
-                  : '') +
-              '</td>' +
-            '</tr>';
-          },
+            { label: 'Generated', hideMobile: true }, { label: 'Expiry', hideMobile: true }, { label: '' }],
+          currentDocumentRows(documents),
+          documentRow,
           { emptyTitle: 'No documents yet', emptyHint: 'Allocation letters are generated per reservation; receipts appear automatically when a payment is recorded.' }
         ), { flush: true });
 
@@ -4153,6 +4754,65 @@
       R.onClick(view, '[data-download]', async function (button) {
         var result = await api('/documents/' + button.dataset.download + '/download');
         R.openFile(result.download_url);
+      });
+
+      // SECTION 10 — same collapsed-summary/detail-row pair as buyerRow()
+      // on the Payments screen: table()'s rowFn returns a string, and a
+      // <tbody> does not care whether that is one <tr> or several.
+      R.qsa('[data-toggle-versions]', view).forEach(function (button) {
+        button.addEventListener('click', function () {
+          var row = R.qs('[data-versions-detail="' + button.dataset.toggleVersions + '"]', view);
+          var wasHidden = row.classList.contains('hidden');
+          row.classList.toggle('hidden');
+          button.textContent = wasHidden ? 'Hide previous versions' : button.dataset.versionsLabel;
+        });
+      });
+
+      R.qsa('[data-project]', view).forEach(function (pill) {
+        pill.addEventListener('click', function () {
+          projectFilter = pill.dataset.project || null;
+          R.reload();
+        });
+      });
+
+      // SECTION 8 — the preview count is computed from data already on the
+      // page (reservations + documents, both now carrying project_id), not
+      // a second request: it is the same "active reservations in this
+      // project without a live allocation letter" set the server itself
+      // will process, just counted client-side first so the confirmation
+      // can say a real number before anything is generated.
+      R.onClick(view, '#btn-generate-all', async function (button) {
+        var projectReservations = reservations.filter(function (r) {
+          return r.status !== 'cancelled' && r.re_units && r.re_units.project_id === projectFilter;
+        });
+        var alreadyHas = {};
+        allDocuments.forEach(function (d) {
+          if (d.doc_type === 'allocation_letter') alreadyHas[d.reservation_id] = true;
+        });
+        var toGenerate = projectReservations.filter(function (r) { return !alreadyHas[r.id]; }).length;
+        var projectName = (projects.filter(function (p) { return p.id === projectFilter; })[0] || {}).name || 'this project';
+
+        if (!toGenerate) {
+          toast('Every active reservation in ' + projectName + ' already has an allocation letter.', 'ok');
+          return;
+        }
+
+        var confirmed = await R.confirm({
+          title: 'Generate ' + R.plural(toGenerate, 'allocation letter') + '?',
+          message: 'Generates an allocation letter for every active reservation in ' + projectName +
+            ' that does not already have one. This may take a minute for a large project.',
+          confirmLabel: 'Generate all',
+        });
+        if (!confirmed) return;
+
+        button.textContent = 'Generating ' + toGenerate + ' document(s)…';
+        var result = await api.post('/documents/bulk-generate', { project_id: projectFilter, doc_type: 'allocation_letter' });
+        toast(
+          result.generated + ' generated, ' + result.skipped + ' already existed' +
+            (result.failed ? ', ' + result.failed + ' failed' : '') + '.',
+          result.failed ? 'err' : 'ok'
+        );
+        R.reload();
       });
 
       R.qs('#btn-new-doc', view).addEventListener('click', function () {
@@ -4645,6 +5305,84 @@
     });
   }
 
+  var LEADERBOARD_PERIODS = ['this_month', 'last_3_months', 'this_year', 'all_time'];
+  var LEADERBOARD_PERIOD_LABELS = { this_month: 'This month', last_3_months: 'Last 3 months', this_year: 'This year', all_time: 'All time' };
+  // Column key -> [label shown in the "Sort by" pill, comparator]. Every
+  // comparator sorts DESCENDING (highest first) except default_rate, where
+  // lower is better — sorting a "default rate" column ascending-by-default
+  // would put the worst-performing rep on top, the opposite of every other
+  // column here.
+  var LEADERBOARD_SORTS = {
+    total_collected: ['Collected', function (a, b) { return b.total_collected - a.total_collected; }],
+    total_contracted: ['Contracted', function (a, b) { return b.total_contracted - a.total_contracted; }],
+    deals_closed: ['Deals closed', function (a, b) { return b.deals_closed - a.deals_closed; }],
+    collection_rate: ['Collection rate', function (a, b) { return b.collection_rate - a.collection_rate; }],
+    default_rate: ['Default rate', function (a, b) { return a.default_rate - b.default_rate; }],
+    commission_earned: ['Commission earned', function (a, b) { return b.commission_earned - a.commission_earned; }],
+  };
+  var leaderboardSort = 'total_collected'; // module-level: survives a sort-pill click's local re-render, resets on navigation away like projectFilter above
+
+  function leaderboardTableHtml(rows) {
+    var sorted = rows.slice().sort(LEADERBOARD_SORTS[leaderboardSort][1]);
+    return table(
+      [{ label: 'Rank' }, { label: 'Rep' }, { label: 'Deals closed', num: true, hideMobile: true },
+        { label: 'Contracted', num: true, hideMobile: true }, { label: 'Collected', num: true },
+        { label: 'Collection rate', num: true, hideMobile: true }, { label: 'Default rate', num: true, hideMobile: true },
+        { label: 'Commission earned', num: true }],
+      sorted,
+      function (r, i) {
+        return '<tr>' +
+          '<td class="muted">' + (i + 1) + '</td>' +
+          '<td class="cell-primary">' + esc(r.name) + (r.active ? '' : ' <span class="muted">(inactive)</span>') + '</td>' +
+          '<td class="num hide-mobile">' + r.deals_closed + '</td>' +
+          '<td class="num hide-mobile">' + nairaShort(r.total_contracted) + '</td>' +
+          '<td class="num moss">' + nairaShort(r.total_collected) + '</td>' +
+          '<td class="num hide-mobile ' + (r.collection_rate >= 70 ? 'moss' : r.collection_rate < 40 ? 'clay' : '') + '">' + r.collection_rate + '%</td>' +
+          '<td class="num hide-mobile ' + (r.default_rate > 10 ? 'clay' : '') + '">' + r.default_rate + '%</td>' +
+          '<td class="num gold">' + nairaShort(r.commission_earned) + '</td>' +
+        '</tr>';
+      },
+      { emptyTitle: 'No sales reps with reservations in this period' }
+    );
+  }
+
+  // SECTION 13 — the same 31-day figures the backend hands back
+  // (bucketPaymentsByDayOfMonth), rendered 7-wide. Color intensity buckets
+  // into 5 fixed classes rather than an inline style — this app's CSP has no
+  // 'unsafe-inline' in style-src (see R.applyDynamicStyles's own comment
+  // elsewhere in this file), so a computed color can't be a style attribute
+  // any more than a computed bar height can.
+  function heatmapGrid(heatmap) {
+    var days = (heatmap && heatmap.days) || [];
+    var max = (heatmap && heatmap.max_amount) || 0;
+    if (!max) return R.emptyState('No payments recorded yet');
+    return '<div class="heatmap-grid">' +
+      days.map(function (d) {
+        var bucket = d.amount <= 0 ? 0 : Math.min(4, Math.ceil((d.amount / max) * 4));
+        return '<div class="hm-cell hm-' + bucket + '" title="Day ' + d.day + ': ' + esc(naira(d.amount)) + ' across ' + R.plural(d.count, 'payment') + '">' +
+          '<span class="hm-day">' + d.day + '</span>' +
+        '</div>';
+      }).join('') +
+    '</div>' +
+    '<div class="page-sub mt-1">Darker = more collected on that day of the month, historically.</div>';
+  }
+
+  // SECTION 12 — mirrors routes/reports.js's CUSTOM_REPORT_FIELDS exactly
+  // (key, label). Static on both ends, so duplicating the list here is a
+  // fixed, one-time cost rather than an endpoint whose only job would be
+  // handing back an array that never changes at runtime.
+  var CUSTOM_REPORT_FIELD_OPTIONS = [
+    ['buyer_name', 'Buyer name'], ['email', 'Email'], ['phone', 'Phone'],
+    ['unit_number', 'Unit number'], ['project_name', 'Project name'],
+    ['total_contracted', 'Total contracted'], ['total_paid', 'Total paid'],
+    ['balance', 'Balance'], ['overdue_amount', 'Overdue amount'],
+    ['credit_score', 'Credit score'], ['sales_rep_name', 'Sales rep name'],
+    ['reservation_date', 'Reservation date'], ['last_payment_date', 'Last payment date'],
+    ['next_due_date', 'Next due date'], ['escalation_stage', 'Escalation stage'],
+    ['referral_code', 'Referral code'],
+  ];
+  var CUSTOM_REPORT_DEFAULT_FIELDS = CUSTOM_REPORT_FIELD_OPTIONS.map(function (f) { return f[0]; });
+
   R.screens.reports = {
     render: async function (view, params, query) {
       var scope = query.project ? '?project_id=' + encodeURIComponent(query.project) : '';
@@ -4669,6 +5407,15 @@
       // SECTION 9 — same owner-only tier as legal cases: "Owner can mark the
       // request as submitted... from the financing requests screen."
       var canFinancing = R.can('financing.manage');
+      // SECTION 11/12/13 — leaderboard, custom report builder, payment
+      // heatmap. All three DIRECTORS-tier (permissions.js), same as
+      // reports.collections/reports.rental beside them.
+      var canLeaderboard = R.can('reports.leaderboard');
+      var canCustomExport = R.can('reports.customExport');
+      var canHeatmap = R.can('reports.heatmap');
+      // SECTION 18 — same DIRECTORS tier as the three above.
+      var canSatisfaction = R.can('reports.satisfaction');
+      var leaderboardPeriod = LEADERBOARD_PERIODS.indexOf(query.period) >= 0 ? query.period : 'all_time';
 
       var results = await Promise.all([
         canInvestor ? api('/reports/investor' + scope) : Promise.resolve(null),
@@ -4679,9 +5426,13 @@
         canLegal ? api('/legal-cases/summary') : Promise.resolve(null),
         canLegal ? api('/legal-cases?status=active') : Promise.resolve(null),
         canFinancing ? api('/financing-requests') : Promise.resolve(null),
+        canLeaderboard ? api('/reports/leaderboard?period=' + leaderboardPeriod) : Promise.resolve(null),
+        canHeatmap ? api('/reports/payment-heatmap') : Promise.resolve(null),
+        canSatisfaction ? api('/reports/satisfaction') : Promise.resolve(null),
       ]);
       var report = results[0], collections = results[1], rental = results[2], referralStats = results[3], forecast = results[4];
       var legalSummary = results[5], legalCases = results[6], financingRequests = results[7];
+      var leaderboard = results[8], heatmap = results[9], satisfaction = results[10];
       var t = report && report.totals;
       // Only a developer who actually runs a rental portfolio sees this
       // section — nothing to report on is nothing to show.
@@ -4837,6 +5588,78 @@
               '</div>', { flush: false })
           : '') +
 
+        // SECTION 11 — sales rep leaderboard. Period is a URL query param
+        // (full re-fetch on change, same idiom as query.project's scope
+        // above); sort is a local, in-memory re-order (leaderboardSort,
+        // module-level like projectFilter) so clicking "Sort by" doesn't
+        // cost a network round trip for data already on the page.
+        (canLeaderboard
+          ? card('Sales rep leaderboard',
+              '<div class="filter-row mb-1">' +
+                LEADERBOARD_PERIODS.map(function (p) {
+                  return '<a class="pill' + (leaderboardPeriod === p ? ' is-on' : '') + '" href="#/reports?period=' + p + '">' +
+                    esc(LEADERBOARD_PERIOD_LABELS[p]) + '</a>';
+                }).join('') +
+              '</div>' +
+              '<div class="filter-row mb-1">' +
+                Object.keys(LEADERBOARD_SORTS).map(function (key) {
+                  return '<a class="pill' + (leaderboardSort === key ? ' is-on' : '') + '" data-leaderboard-sort="' + key + '">' +
+                    esc(LEADERBOARD_SORTS[key][0]) + '</a>';
+                }).join('') +
+              '</div>' +
+              '<div id="leaderboard-table">' + leaderboardTableHtml(leaderboard.rows) + '</div>',
+              { flush: true })
+          : '') +
+
+        // SECTION 12 — custom report builder. No preview fetch: the field
+        // list is static (CUSTOM_REPORT_FIELDS on the server), so the whole
+        // card is just a checklist and an Export button.
+        (canCustomExport
+          ? card('Custom report builder',
+              '<p class="page-sub mb-2">Choose the columns you want, then export a CSV with only those.</p>' +
+              '<div class="grid cols-3 mb-2" id="custom-report-fields">' +
+                CUSTOM_REPORT_FIELD_OPTIONS.map(function (f) {
+                  return '<label class="check"><input type="checkbox" value="' + esc(f[0]) + '"' +
+                    (CUSTOM_REPORT_DEFAULT_FIELDS.indexOf(f[0]) >= 0 ? ' checked' : '') + '> ' + esc(f[1]) + '</label>';
+                }).join('') +
+              '</div>' +
+              '<button class="btn primary" id="btn-custom-export">Export selected fields</button>',
+              { flush: false })
+          : '') +
+
+        // SECTION 13 — payment-day heatmap. Day-of-month, not a real
+        // calendar (see routes/reports.js's own comment on
+        // bucketPaymentsByDayOfMonth for why day 15 has no single weekday to
+        // anchor to across a workspace's whole history) — laid out 7-wide in
+        // day order, which reads as calendar-like without claiming a
+        // precision the data doesn't have.
+        (canHeatmap
+          ? card('When buyers pay', heatmapGrid(heatmap), { flush: false })
+          : '') +
+
+        // SECTION 18 — buyer satisfaction. completed_count is the honest
+        // denominator (sent-but-unanswered surveys carry no score), so a
+        // workspace that just started handing over units sees "no
+        // responses yet" rather than a misleading 0.0 average.
+        (canSatisfaction && satisfaction
+          ? card('Buyer satisfaction',
+              satisfaction.completed_count
+                ? '<div class="grid cols-3 mb-2">' +
+                    stat('Overall experience', satisfaction.average_overall_score != null ? satisfaction.average_overall_score + ' / 5' : '—') +
+                    stat('Construction quality', satisfaction.average_construction_quality_score != null ? satisfaction.average_construction_quality_score + ' / 5' : '—') +
+                    stat('Sales experience', satisfaction.average_sales_experience_score != null ? satisfaction.average_sales_experience_score + ' / 5' : '—') +
+                  '</div>' +
+                  '<div class="page-sub mb-1">' + R.plural(satisfaction.completed_count, 'response') + '</div>' +
+                  (satisfaction.recent_comments.length
+                    ? satisfaction.recent_comments.map(function (c) {
+                        return '<div class="sched-history-row"><div class="page-sub">' + esc(c.customer_name) + ' · ' + esc(fmtDate(c.completed_at)) + '</div>' +
+                          '<div>' + esc(c.comments) + '</div></div>';
+                      }).join('')
+                    : '')
+                : R.emptyState('No survey responses yet', 'Sent automatically once a handover checklist is signed off.'),
+              { flush: false })
+          : '') +
+
         // "How full is the building" and "how much sold" are different
         // questions with different answers — folding rental units into the
         // sales occupancy numbers above would answer neither correctly.
@@ -4960,6 +5783,34 @@
         await R.downloadCsv('/reports/export/' + kind, 'archta-' + kind + '.csv');
         toast('Exported. Check your downloads.', 'ok');
       });
+
+      // SECTION 11 — sort is local, in-memory: the data for every rep is
+      // already on the page (leaderboard.rows), so re-ordering it needs no
+      // round trip. Only the table + sort pills re-render, not the period
+      // pills or the rest of the screen.
+      R.onClick(view, '[data-leaderboard-sort]', function (button) {
+        leaderboardSort = button.dataset.leaderboardSort;
+        R.qsa('[data-leaderboard-sort]', view).forEach(function (pill) {
+          pill.classList.toggle('is-on', pill.dataset.leaderboardSort === leaderboardSort);
+        });
+        var target = R.qs('#leaderboard-table', view);
+        if (target) target.innerHTML = leaderboardTableHtml(leaderboard.rows);
+      });
+
+      // SECTION 12 — at least one field required, same rule the server
+      // enforces (buildCustomReportColumns) — checked here first so a click
+      // with nothing selected gets an immediate answer instead of a 400
+      // round trip.
+      R.onClick(view, '#btn-custom-export', async function () {
+        var checked = R.qsa('#custom-report-fields input[type="checkbox"]:checked', view)
+          .map(function (input) { return input.value; });
+        if (!checked.length) {
+          toast('Choose at least one field first.', 'err');
+          return;
+        }
+        await R.downloadCsv('/reports/custom-export?fields=' + checked.join(','), 'archta-custom-report.csv');
+        toast('Exported. Check your downloads.', 'ok');
+      });
     },
   };
 
@@ -5005,10 +5856,66 @@
             '<div class="btn-row"><button class="btn primary" id="tpl-save">Save</button>' +
               '<button class="btn" id="tpl-reset">Reset to default</button></div>' +
             '<p class="page-sub mt-1" id="tpl-status"></p>' +
-          '</div></div>'
+          '</div></div>' +
+
+          // SECTION 5 — receipt header/footer only: what a receipt actually
+          // STATES (amount, receipt number, installment breakdown) is never
+          // editable here, same boundary receiptService.buildReceiptHtml
+          // enforces server-side.
+          '<div class="card"><div class="card-head"><div class="card-title">Receipt template</div></div>' +
+            '<div class="card-body">' +
+              '<p class="field-hint mb-2">Customize the letterhead and footer of your payment receipts. ' +
+                'The amount, receipt number and installment details are never editable.</p>' +
+              '<label class="check mb-1"><input type="checkbox" id="rtpl-logo" checked> Show company logo in the default header</label>' +
+              '<label class="check mb-2"><input type="checkbox" id="rtpl-address" checked> Show company address/phone in the default footer</label>' +
+              '<div class="grid cols-2">' +
+                '<div class="field"><label for="rtpl-header">Header HTML <span class="muted">(optional — replaces the default letterhead)</span></label>' +
+                  '<textarea class="textarea mono-input" id="rtpl-header" rows="6" maxlength="2000" placeholder="Leave blank to use the default company name + logo"></textarea></div>' +
+                '<div class="field"><label>Preview</label><div class="receipt-preview" id="rtpl-header-preview"></div></div>' +
+              '</div>' +
+              '<div class="grid cols-2">' +
+                '<div class="field"><label for="rtpl-footer">Footer HTML <span class="muted">(optional — replaces the default disclaimer/contact line)</span></label>' +
+                  '<textarea class="textarea mono-input" id="rtpl-footer" rows="4" maxlength="1000" placeholder="Leave blank to use the default disclaimer"></textarea></div>' +
+                '<div class="field"><label>Preview</label><div class="receipt-preview" id="rtpl-footer-preview"></div></div>' +
+              '</div>' +
+              '<button class="btn primary" id="rtpl-save">Save receipt template</button>' +
+            '</div></div>'
         : '<div class="card"><div class="card-body"><p class="muted">Only the workspace owner can customize document templates.</p></div></div>');
 
     if (!R.can('settings.write')) return;
+
+    var receiptTemplate = await api('/settings/receipt-template');
+    R.el('rtpl-logo').checked = receiptTemplate.show_logo !== false;
+    R.el('rtpl-address').checked = receiptTemplate.show_developer_address !== false;
+    R.el('rtpl-header').value = receiptTemplate.header_html || '';
+    R.el('rtpl-footer').value = receiptTemplate.footer_html || '';
+
+    function refreshReceiptPreview() {
+      // The developer's own content, previewed in their own browser as
+      // they type it — the same trust boundary the template actually
+      // renders under server-side (receiptService's own comment: owner-
+      // authored HTML, not buyer-supplied), so innerHTML here is fine.
+      R.el('rtpl-header-preview').innerHTML = R.el('rtpl-header').value || '<span class="muted">Default letterhead</span>';
+      R.el('rtpl-footer-preview').innerHTML = R.el('rtpl-footer').value || '<span class="muted">Default disclaimer</span>';
+    }
+    refreshReceiptPreview();
+    R.el('rtpl-header').addEventListener('input', refreshReceiptPreview);
+    R.el('rtpl-footer').addEventListener('input', refreshReceiptPreview);
+
+    R.onClick(view, '#rtpl-save', async function () {
+      var headerHtml = R.el('rtpl-header').value;
+      var footerHtml = R.el('rtpl-footer').value;
+      if (headerHtml.length > 2000) throw new Error('Header HTML must be 2000 characters or fewer.');
+      if (footerHtml.length > 1000) throw new Error('Footer HTML must be 1000 characters or fewer.');
+
+      await api.patch('/settings/receipt-template', {
+        header_html: headerHtml,
+        footer_html: footerHtml,
+        show_logo: R.el('rtpl-logo').checked,
+        show_developer_address: R.el('rtpl-address').checked,
+      });
+      toast('Receipt template saved.', 'ok');
+    });
 
     var templates = await api('/documents/templates');
     var select = R.el('tpl-select');
@@ -5135,6 +6042,15 @@
                   ? 'Configured.'
                   : 'Not configured — referral notifications will not reach buyers over WhatsApp.') +
                 ' Only the workspace owner can change this.</p>')) +
+
+          // SECTION 25 — owner only, same tier as everything else this
+          // workspace's whole book is worth (the investor report, the full
+          // audit export).
+          (R.can('settings.backup')
+            ? card('Data backup', '<p class="field-hint mb-2">Every buyer, reservation, payment, document, unit, project, ' +
+                'commission, activity and audit entry as one CSV each, zipped. Once a day.</p>' +
+                '<button class="btn" type="button" id="btn-workspace-backup">Download backup</button>')
+            : '') +
         '</div>' +
       '</div>';
 
@@ -5185,6 +6101,19 @@
         R.reload();
       });
     }
+
+    // R.onClick already disables the button and shows is-working for the
+    // duration, and toasts a thrown error — no manual try/catch needed here,
+    // same as every other button on this screen.
+    R.onClick(view, '#btn-workspace-backup', async function () {
+      var result = await api.post('/settings/backup', {});
+      // R.openFile clicks a real anchor — CLAUDE.md's own "Downloads go
+      // through R.openFile()" gotcha: a bare window.open here would be
+      // dropped by a mobile popup blocker since the signed URL had to be
+      // awaited first.
+      R.openFile(result.url, 'archta-backup-' + R.todayISO() + '.zip');
+      toast('Backup ready — ' + result.tables.length + ' files, ' + Math.round(result.size_bytes / 1024) + ' KB.', 'ok');
+    });
   }
 
   // TASK 2.11 — split out of workspaceTab: escalation email, reply-to,
@@ -5192,8 +6121,52 @@
   // used to live on the Workspace tab. Every field, every endpoint and every
   // test button here is unchanged from workspaceTab's own — this is a move,
   // not a rebuild, since all of it already worked.
+  // SECTION 14 — labels + a one-line description of when each type sends,
+  // so a developer editing "document_ready" without opening the code still
+  // knows what triggers it. overdue_reminder and welcome are shown as
+  // "Not yet sent automatically" — see notificationService.js's own
+  // comment on why those two are configurable but not wired to a live send.
+  var EMAIL_TEMPLATE_META = {
+    receipt: ['Payment receipt', 'Sent to the buyer every time a payment is recorded.'],
+    portal_link: ['Portal link', 'Sent when staff email a buyer their payment-account link.'],
+    document_ready: ['Document ready to sign', 'Sent when a deed, subscriber’s agreement or power of attorney is generated.'],
+    overdue_reminder: ['Overdue reminder', 'Not yet sent automatically — buyer reminders currently go by SMS only.'],
+    welcome: ['Welcome', 'Not yet sent automatically — this deployment sends no email at sign-up.'],
+  };
+  var EMAIL_TEMPLATE_VARIABLES = ['buyer_name', 'amount', 'unit', 'due_date', 'portal_link'];
+
+  function emailTemplateRow(t) {
+    var meta = EMAIL_TEMPLATE_META[t.template_type] || [t.template_type, ''];
+    return '<div class="drawer-section">' +
+      '<div class="flex-row justify-between gap-10">' +
+        '<div><b>' + esc(meta[0]) + '</b><div class="page-sub">' + esc(meta[1]) + '</div></div>' +
+        (t.is_custom ? badge('generated') : badge('pending')) +
+      '</div>' +
+      '<div class="mt-1"><button class="btn-quiet" data-toggle-email-template="' + esc(t.template_type) + '">' +
+        (t.is_custom ? 'Edit' : 'Customize') + '</button></div>' +
+      '<div class="hidden mt-2" data-email-template-editor="' + esc(t.template_type) + '">' +
+        '<div class="field"><label for="et-subject-' + esc(t.template_type) + '">Subject</label>' +
+          '<input class="input" id="et-subject-' + esc(t.template_type) + '" value="' + esc(t.subject) + '" maxlength="200"></div>' +
+        '<div class="field"><label for="et-body-' + esc(t.template_type) + '">Body (HTML)</label>' +
+          '<textarea class="textarea mono-input" id="et-body-' + esc(t.template_type) + '" rows="8" maxlength="5000">' + esc(t.body_html) + '</textarea>' +
+          '<p class="field-hint">Available variables: ' +
+            EMAIL_TEMPLATE_VARIABLES.map(function (v) { return '<code>{{' + v + '}}</code>'; }).join(', ') + '</p></div>' +
+        '<div class="field-row">' +
+          '<button class="btn primary" data-save-email-template="' + esc(t.template_type) + '">Save</button>' +
+          (t.is_custom ? '<button class="btn" data-reset-email-template="' + esc(t.template_type) + '">Reset to default</button>' : '') +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
   async function notificationsTab(view, tabs) {
-    var settings = await api('/settings');
+    var canManageTemplates = R.can('settings.write');
+    var results = await Promise.all([
+      api('/settings'),
+      canManageTemplates ? api('/settings/email-templates') : Promise.resolve([]),
+    ]);
+    var settings = results[0];
+    var emailTemplates = results[1];
 
     view.innerHTML = head('Settings', 'Who gets told what, and which of your own providers send it.') + tabs +
       '<div class="grid cols-2">' +
@@ -5267,6 +6240,10 @@
                   ? 'Configured, sender ID ' + esc(settings.termii_sender_id || '—') + '.'
                   : 'Not configured — texts send from Archta\'s default sender ID.') +
                 ' Only the workspace owner can change this.</p>')) +
+
+          (canManageTemplates
+            ? card('Email templates', emailTemplates.map(emailTemplateRow).join(''), { flush: true })
+            : '') +
         '</div>' +
       '</div>';
 
@@ -5315,6 +6292,43 @@
       if (!to) { toast('Enter a phone number to send the test to.', 'err'); return; }
       var result = await api.post('/settings/termii/test', { termii_api_key: apiKey, termii_sender_id: senderId, to: to });
       toast(result.valid ? 'Test text sent — check your phone.' : (result.reason || 'Could not send the test text.'), result.valid ? 'ok' : 'err');
+    });
+
+    // SECTION 14 — same show/hide-behind-a-toggle idiom as every other
+    // "expand for detail" control on this screen set (plan history, previous
+    // document versions), not a real tab: five editors on screen at once
+    // would be a wall of textareas nobody scrolls past.
+    R.qsa('[data-toggle-email-template]', view).forEach(function (button) {
+      button.addEventListener('click', function () {
+        var editor = R.qs('[data-email-template-editor="' + button.dataset.toggleEmailTemplate + '"]', view);
+        editor.classList.toggle('hidden');
+      });
+    });
+
+    R.onClick(view, '[data-save-email-template]', async function (button) {
+      var type = button.dataset.saveEmailTemplate;
+      var subject = R.qs('#et-subject-' + type, view).value.trim();
+      var bodyHtml = R.qs('#et-body-' + type, view).value.trim();
+      if (!subject || !bodyHtml) {
+        toast('Both a subject and a body are required.', 'err');
+        return;
+      }
+      await api.patch('/settings/email-templates/' + type, { subject: subject, body_html: bodyHtml });
+      toast('Template saved.', 'ok');
+      R.reload();
+    });
+
+    R.onClick(view, '[data-reset-email-template]', async function (button) {
+      var type = button.dataset.resetEmailTemplate;
+      var confirmed = await R.confirm({
+        title: 'Reset this template?',
+        message: 'This deletes your customization and goes back to the built-in email.',
+        confirmLabel: 'Reset',
+      });
+      if (!confirmed) return;
+      await api.patch('/settings/email-templates/' + type, { subject: '', body_html: '' });
+      toast('Reset to the default.', 'ok');
+      R.reload();
     });
   }
 
@@ -5899,8 +6913,17 @@
   async function activityTab(view, tabs) {
     var results = await Promise.all([api('/audit?limit=150'), api('/audit/notifications?limit=60')]);
     var entries = results[0], notifications = results[1];
+    // SECTION 24 — owner only (permissions.js's audit.export), narrower than
+    // audit.read itself: a sales director may look at this screen, but
+    // walking away with the whole log as a file is a different decision.
+    var canExportAudit = R.can('audit.export');
 
-    view.innerHTML = head('Activity log', 'Who did what, when. Append-only — nothing in this product can edit or delete it.') + tabs +
+    view.innerHTML = head('Activity log', 'Who did what, when. Append-only — nothing in this product can edit or delete it.',
+      canExportAudit ? '<button class="btn" id="btn-export-audit">Export audit log</button>' : '') + tabs +
+
+      (canExportAudit
+        ? '<p class="page-sub clay mb-2">This file may contain sensitive information. Do not share it unless required for legal purposes.</p>'
+        : '') +
 
       card('Actions', table(
         [{ label: 'When' }, { label: 'Who', hideMobile: true }, { label: 'Action' }, { label: 'Detail' }],
@@ -5933,5 +6956,150 @@
           emptyHint: 'Receipts and alerts appear here whether they were delivered, failed, or skipped because email is not configured.',
         }
       ), { flush: true });
+
+    var exportButton = R.qs('#btn-export-audit', view);
+    if (exportButton) {
+      exportButton.addEventListener('click', async function () {
+        try {
+          await R.downloadCsv('/audit/export', 'archta-audit-log.csv');
+          toast('Exported. Check your downloads.', 'ok');
+        } catch (err) {
+          toast(err.message || 'Export failed.', 'err');
+        }
+      });
+    }
+  }
+
+  // SECTION 2 — 2FA setup/disable, opened from openAccountModal (realestate.js)
+  // via RE.twoFactorModal. No QR code image: rendering one would mean either
+  // sending the TOTP secret to a third-party QR API (defeats the point of a
+  // secret that is supposed to never leave a trusted channel) or vendoring a
+  // QR-encoding library into a frontend that deliberately has no build step
+  // and no dependency manager. Manual entry — the secret plus the same
+  // otpauth:// URL a QR code would have encoded, both copyable — is every
+  // authenticator app's own fallback for exactly this case, so nothing is
+  // actually unreachable, just one tap slower.
+  R.twoFactorModal = async function (me) {
+    if (me.totp_enabled) return disable2faModal();
+    return setup2faModal();
+  };
+
+  async function setup2faModal() {
+    var setup;
+    try {
+      setup = await api.post('/auth/2fa/setup');
+    } catch (err) {
+      toast(err.message, 'err');
+      return;
+    }
+
+    var panel = R.modal({
+      title: 'Set up two-factor authentication',
+      body: setup2faStepOneBody(setup),
+      submitLabel: 'Verify code',
+      onSubmit: async function (form, close) {
+        var code = R.qs('#tfa-code', form).value.trim();
+        if (!code) throw new Error('Enter the 6-digit code from your authenticator app.');
+        var result = await api.post('/auth/2fa/verify', { code: code });
+
+        // Step two, in the same dialog: the backup codes, shown exactly
+        // once. Swapping the modal body in place rather than closing and
+        // reopening keeps this one continuous flow the owner cannot
+        // accidentally dismiss between "verified" and "codes saved".
+        form.innerHTML = setup2faStepTwoBody(result.backup_codes);
+        var submitBtn = R.qs('[type="submit"]', panel.root);
+        if (submitBtn) submitBtn.classList.add('hidden');
+        var cancelBtn = R.qs('[data-close]', panel.root);
+        if (cancelBtn) cancelBtn.textContent = 'Done';
+
+        R.state.user.totp_enabled = true;
+        toast('Two-factor authentication is now on.', 'ok');
+      },
+    });
+  }
+
+  function setup2faStepOneBody(setup) {
+    return '<p class="page-sub mb-2">Scan or enter this manually in Google Authenticator, Authy, or any TOTP app.</p>' +
+      '<div class="field"><label for="tfa-secret">Secret key</label>' +
+        '<input class="input mono" id="tfa-secret" value="' + esc(setup.secret) + '" readonly></div>' +
+      '<div class="field"><label for="tfa-url">Setup link</label>' +
+        '<input class="input mono" id="tfa-url" value="' + esc(setup.otpauth_url) + '" readonly>' +
+        '<p class="field-hint">Some authenticator apps and password managers can open this link directly.</p></div>' +
+      '<div class="field"><label for="tfa-code">Code from your app</label>' +
+        '<input class="input mono" id="tfa-code" name="code" autocomplete="one-time-code" inputmode="numeric" ' +
+          'maxlength="6" placeholder="123456" required></div>';
+  }
+
+  function setup2faStepTwoBody(backupCodes) {
+    return '<div class="notice mb-2">Save these backup codes now. Each works once if you ever lose access to your ' +
+        'authenticator app, and they will not be shown again.</div>' +
+      '<div class="mono mb-2" style="line-height:1.9">' + backupCodes.map(esc).join('<br>') + '</div>';
+  }
+
+  // SECTION 3 — session management, opened from openAccountModal
+  // (realestate.js) via RE.sessionsModal. Re-fetches and re-renders its own
+  // body in place after every revoke, the same "one continuous flow, not a
+  // close-and-reopen" idiom setup2faModal already uses.
+  R.sessionsModal = async function () {
+    var panel = R.modal({ title: 'Sessions', cancelLabel: 'Close', body: R.skeleton(3) });
+
+    async function renderSessions() {
+      var sessions = await api('/auth/sessions');
+      var otherCount = sessions.filter(function (s) { return !s.is_current; }).length;
+
+      panel.form.innerHTML =
+        '<p class="page-sub mb-2">Every device currently signed in as you.</p>' +
+        sessions.map(sessionRow).join('') +
+        (otherCount
+          ? '<button class="btn mt-2" type="button" id="btn-sessions-revoke-all">Sign out all other devices (' + otherCount + ')</button>'
+          : '');
+
+      R.onClick(panel.form, '[data-revoke-session]', async function (button) {
+        await api('/auth/sessions/' + button.dataset.revokeSession, { method: 'DELETE' });
+        toast('Session revoked.', 'ok');
+        await renderSessions();
+      });
+
+      var revokeAll = R.qs('#btn-sessions-revoke-all', panel.form);
+      if (revokeAll) {
+        revokeAll.addEventListener('click', async function () {
+          await api('/auth/sessions', { method: 'DELETE' });
+          toast('Signed out of all other devices.', 'ok');
+          await renderSessions();
+        });
+      }
+    }
+
+    await renderSessions();
+  };
+
+  function sessionRow(s) {
+    return '<div class="sched-history-row flex-row justify-between gap-10">' +
+      '<div><b>' + esc(s.device_info || 'Unknown device') + (s.is_current ? ' <span class="muted">(this device)</span>' : '') + '</b>' +
+        '<div class="page-sub">' + esc(s.ip_address || 'Unknown location') +
+          ' · last active ' + esc(R.fmtRelative(s.last_used_at)) + '</div></div>' +
+      (s.is_current ? '' : '<button class="btn-quiet" data-revoke-session="' + esc(s.id) + '">Sign out</button>') +
+    '</div>';
+  }
+
+  async function disable2faModal() {
+    R.modal({
+      title: 'Disable two-factor authentication',
+      body:
+        '<p class="page-sub mb-2">Requires your password and a current code — this removes the extra step from every future sign-in.</p>' +
+        '<div class="field"><label for="tfa-off-password">Current password</label>' +
+          '<input class="input" id="tfa-off-password" name="current_password" type="password" autocomplete="current-password" required></div>' +
+        '<div class="field"><label for="tfa-off-code">Authenticator code</label>' +
+          '<input class="input mono" id="tfa-off-code" name="code" autocomplete="one-time-code" inputmode="numeric" ' +
+            'maxlength="6" placeholder="123456" required></div>',
+      submitLabel: 'Disable 2FA',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        await api.post('/auth/2fa/disable', { current_password: v.current_password, code: v.code });
+        R.state.user.totp_enabled = false;
+        close();
+        toast('Two-factor authentication is off.', 'ok');
+      },
+    });
   }
 })();

@@ -330,6 +330,63 @@ async function getStats(orgId) {
   };
 }
 
+// SECTION 19 — the portal Community tab's own referral leaderboard.
+// "Buyers by successful referrals in that project" reads as this project's
+// COMMUNITY (whoever holds a live reservation here — the same set
+// communityService.assertBuyerInProject/listPosts already scope posts to),
+// ranked by their total COMPLETED referrals, not scoped to referrals that
+// also landed in this same project — a buyer motivating others to buy
+// anywhere in the developer's portfolio still deserves the credit in the
+// community they themselves are part of.
+//
+// First name and count ONLY — no id, no phone, no financial figure. This is
+// shown to other buyers, not staff, and "no financial details" in the spec
+// is the same boundary financial.view draws for staff, just stricter: a
+// buyer sees nobody's money, ever, not even their own referral reward
+// amount here.
+async function projectReferralLeaderboard(orgId, projectId) {
+  const { data: reservations, error: resErr } = await supabaseAdmin
+    .from('re_reservations')
+    .select('customer_id, re_units!inner(project_id)')
+    .eq('organization_id', orgId)
+    .eq('re_units.project_id', projectId)
+    .neq('status', 'cancelled');
+  if (resErr) throw resErr;
+
+  const customerIds = [...new Set((reservations || []).map((r) => r.customer_id))];
+  if (!customerIds.length) return [];
+
+  const { data: referrals, error: refErr } = await supabaseAdmin
+    .from('re_customer_referrals')
+    .select('referring_customer_id')
+    .eq('organization_id', orgId)
+    .eq('status', 'completed')
+    .in('referring_customer_id', customerIds);
+  if (refErr) throw refErr;
+
+  const counts = new Map();
+  for (const r of referrals || []) {
+    counts.set(r.referring_customer_id, (counts.get(r.referring_customer_id) || 0) + 1);
+  }
+  if (!counts.size) return [];
+
+  const topIds = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([id]) => id);
+
+  const { data: customers, error: custErr } = await supabaseAdmin
+    .from('re_customers')
+    .select('id, full_name')
+    .in('id', topIds);
+  if (custErr) throw custErr;
+  const nameById = new Map((customers || []).map((c) => [c.id, c.full_name]));
+
+  return topIds
+    .map((id) => ({
+      first_name: (nameById.get(id) || 'A buyer').trim().split(/\s+/)[0],
+      referral_count: counts.get(id),
+    }))
+    .sort((a, b) => b.referral_count - a.referral_count);
+}
+
 module.exports = {
   findByCode,
   linkReferral,
@@ -337,4 +394,5 @@ module.exports = {
   applyCreditToOutstandingBalance,
   handleFirstPayment,
   getStats,
+  projectReferralLeaderboard,
 };

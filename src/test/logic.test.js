@@ -40,8 +40,8 @@ const { resolveBranding } = require('../services/brandingService');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { amountInWords } = require('../utils/amountInWords');
 const { parseCsvToObjects, parseAmount, parseDate, toCsv } = require('../utils/csv');
-const { stageForOverdueCount, describeStage, isAtRisk } = require('../services/escalationService');
-const { normalizeNigerianPhone } = require('../services/notificationService');
+const { STAGES, stageForOverdueCount, describeStage, isAtRisk } = require('../services/escalationService');
+const { normalizeNigerianPhone, substituteTemplateVariables, EMAIL_TEMPLATE_TYPES } = require('../services/notificationService');
 const auth = require('../services/authService');
 const portal = require('../services/portalService');
 const env = require('../config/env');
@@ -60,7 +60,7 @@ const {
   MILESTONE_NAMES, sequenceProgressPercent, currentMilestoneSummary,
 } = require('../services/constructionService');
 const {
-  WEIGHTS, computeFromHistory, tier,
+  WEIGHTS, computeFromHistory, tier, assessDefaultRisk, OVERDUE_RISK_OVERRIDE_THRESHOLD,
 } = require('../services/creditScoreService');
 const { allocateCredit } = require('../services/referralService');
 const { buildFallbackForecast, resolveRefs: resolveForecastRefs } = require('../services/forecastService');
@@ -88,6 +88,7 @@ const { authenticate } = require('../middleware/auth');
 const reservationsRouter = require('../routes/reservations');
 const auditRouter = require('../routes/audit');
 const webhooksRouter = require('../routes/webhooks');
+const reportsRouter = require('../routes/reports');
 
 // frontend/realestate.js is a browser script, not a CommonJS module — it
 // assigns onto `window.RE` rather than `module.exports`, and its very last
@@ -549,6 +550,24 @@ test('reports an all-clear day without inventing work', () => {
   assert.strictEqual(brief.recommendations.length, 0);
 });
 
+// SECTION 15 — carried through from the overdue row so the dashboard's
+// "Send all" WhatsApp queue has a number to open per draft, with no second
+// buyer lookup.
+test('follow_ups carries customer_phone through from the overdue row', () => {
+  const withPhone = {
+    today: '2026-07-26',
+    overdue: [{ reservation_id: 'r1', customer_name: 'Mr Bello', customer_phone: '08031234567', project: 'Lekki Gardens', unit_number: 'A3', amount: 500_000, days_late: 40 }],
+    upcomingWeek: [], pendingDocuments: [],
+  };
+  const brief = buildFallbackBrief(withPhone);
+  assert.strictEqual(brief.follow_ups[0].customer_phone, '08031234567');
+});
+
+test('follow_ups: a buyer with no phone on file resolves to null, not undefined', () => {
+  const brief = buildFallbackBrief(overdueState); // this fixture's rows carry no customer_phone at all
+  assert.strictEqual(brief.follow_ups[0].customer_phone, null);
+});
+
 // SECTION 2 — yesterday's call/visit notes feed the summary.
 test('the summary mentions a buyer called yesterday, and their promise', () => {
   const brief = buildFallbackBrief({
@@ -865,6 +884,30 @@ test('resolveRefs falls back to a safe phrase for a ref the model invents or dro
   assert.strictEqual(resolved.risks[0].customer_id, null, 'an unrecognized ref must not resolve to some OTHER buyer\'s id');
 });
 
+// SECTION 15 — the dashboard's "Send all" WhatsApp queue needs a phone
+// number per draft; phoneByRef carries it through the same never-sent-to-
+// OpenAI path idByRef already does for customer_id.
+test('resolveRefs carries customer_phone through from phoneByRef, same as customer_id from idByRef', () => {
+  const nameByRef = new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo']]);
+  const idByRef = new Map([['BUYER_1', 'cust-1']]);
+  const phoneByRef = new Map([['BUYER_1', '08031234567']]);
+  const resolved = resolveRefs({
+    follow_ups: [{ customer_ref: 'BUYER_1', reservation_id: 'r1', whatsapp_draft: 'Hi', email_subject: 'x', email_draft: 'x' }],
+    risks: [], recommendations: [], summary: '',
+  }, nameByRef, idByRef, phoneByRef);
+  assert.strictEqual(resolved.follow_ups[0].customer_phone, '08031234567');
+});
+
+test('resolveRefs: a buyer with no phone on file resolves to null, not undefined or a missing key', () => {
+  const nameByRef = new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo']]);
+  const idByRef = new Map([['BUYER_1', 'cust-1']]);
+  const resolved = resolveRefs({
+    follow_ups: [{ customer_ref: 'BUYER_1', reservation_id: 'r1', whatsapp_draft: 'Hi', email_subject: 'x', email_draft: 'x' }],
+    risks: [], recommendations: [], summary: '',
+  }, nameByRef, idByRef); // phoneByRef omitted entirely — the default-empty-Map path
+  assert.strictEqual(resolved.follow_ups[0].customer_phone, null);
+});
+
 // ── Rental tenancies ─────────────────────────────────────────────────────
 // A rental's monthly-rent schedule is an installment plan in every sense
 // installmentService already understands one; these two are the only pieces
@@ -1131,6 +1174,51 @@ test('omits the reference row rather than printing an empty one', () => {
 test('ignores a non-https logo url', () => {
   const html = buildReceiptHtml(receiptContext, { logo_url: 'file:///etc/passwd' }, 'RCPT-1');
   assert.ok(!html.includes('etc/passwd'));
+});
+
+// SECTION 5 — receipt header/footer customization. What a receipt actually
+// STATES (amount, receipt number, installment breakdown) is never part of
+// either override — only these two tests assert the boundary; every test
+// above already proves the stated facts still render normally regardless.
+test('a workspace header_html override replaces the default letterhead, rendered as-is (owner-authored, not escaped)', () => {
+  const html = buildReceiptHtml(receiptContext, { company_name: 'Adron Homes' }, 'RCPT-1', {
+    header_html: '<div class="my-letterhead"><b>Adron Homes Ltd</b></div>',
+  });
+  assert.ok(html.includes('<div class="my-letterhead"><b>Adron Homes Ltd</b></div>'), 'the override renders unescaped');
+  assert.ok(!html.includes('<div class="company">Adron Homes</div>'), 'the default header is fully replaced, not appended alongside it');
+  // What the receipt actually states is untouched by the header override.
+  assert.ok(html.includes('₦3,750,000'));
+  assert.ok(html.includes('RCPT-1'));
+});
+
+test('a workspace footer_html override replaces the default disclaimer/contact line', () => {
+  const html = buildReceiptHtml(receiptContext, { address: '12 Admiralty Way, Lekki' }, 'RCPT-1', {
+    footer_html: 'Queries: accounts@adronhomes.com',
+  });
+  assert.ok(html.includes('Queries: accounts@adronhomes.com'));
+  assert.ok(!html.includes('12 Admiralty Way'), 'the default contact line is fully replaced');
+  assert.ok(!html.includes('computer-generated receipt'), 'the default disclaimer is fully replaced too, not appended alongside the override');
+});
+
+test('show_logo: false hides the logo even when the branding has a valid https logo', () => {
+  const withLogo = { company_name: 'Adron Homes', logo_url: 'https://cdn.example.com/logo.png' };
+  const shown = buildReceiptHtml(receiptContext, withLogo, 'RCPT-1', { show_logo: true });
+  const hidden = buildReceiptHtml(receiptContext, withLogo, 'RCPT-1', { show_logo: false });
+  assert.ok(shown.includes('cdn.example.com/logo.png'));
+  assert.ok(!hidden.includes('cdn.example.com/logo.png'));
+});
+
+test('show_developer_address: false drops the contact line but keeps the disclaimer sentence', () => {
+  const branding = { company_name: 'Adron Homes', address: '12 Admiralty Way, Lekki', phone: '0803...' };
+  const html = buildReceiptHtml(receiptContext, branding, 'RCPT-1', { show_developer_address: false });
+  assert.ok(!html.includes('12 Admiralty Way'));
+  assert.ok(html.includes('computer-generated receipt and is valid without alteration'));
+});
+
+test('no receiptTemplate row (a workspace that never customized this) renders exactly the stock layout', () => {
+  const withTemplate = buildReceiptHtml(receiptContext, { company_name: 'Adron Homes' }, 'RCPT-1', null);
+  const withoutArg = buildReceiptHtml(receiptContext, { company_name: 'Adron Homes' }, 'RCPT-1');
+  assert.strictEqual(withTemplate, withoutArg, 'an explicit null and an omitted 4th argument must behave identically');
 });
 
 // ── CSV import ───────────────────────────────────────────────────────────
@@ -1449,7 +1537,7 @@ async function runAuthMiddlewareTests() {
     return { req, res, outcome: () => ({ statusCode, body }) };
   }
 
-  function withFakeAuthLookup({ usersRow, teamMembersError }, fn) {
+  function withFakeAuthLookup({ usersRow, teamMembersError, sessionRow = null }, fn) {
     const original = supabaseAdmin.from;
     supabaseAdmin.from = (table) => {
       if (table === 'users') {
@@ -1464,6 +1552,18 @@ async function runAuthMiddlewareTests() {
               }),
             }),
           }),
+        };
+      }
+      // SECTION 3 — re_sessions. Defaults to "no existing row" (not
+      // revoked) and a harmless no-op thenable for the fire-and-forget
+      // upsert — without this branch, the real supabaseAdmin.from would
+      // reach out over the network to the dummy Supabase URL every
+      // logic.test.js run sets at the top of this file. sessionRow lets an
+      // individual test simulate a revoked session.
+      if (table === 're_sessions') {
+        return {
+          select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: sessionRow, error: null }) }) }),
+          upsert: () => Promise.resolve({ data: null, error: null }),
         };
       }
       return original(table);
@@ -1505,6 +1605,49 @@ async function runAuthMiddlewareTests() {
     assert.strictEqual(req.user.team_id, null);
     assert.strictEqual(req.user.role, null);
     assert.strictEqual(outcome().statusCode, null, 'no error response was sent — the request proceeded as a solo account');
+  });
+
+  // SECTION 3 — a revoked session must 401 even though the JWT signature is
+  // still valid and unexpired, the same "a valid signature is not a live
+  // session" guarantee token_version already gives every token this user
+  // holds, scoped here to just the one token DELETE /auth/sessions/:id
+  // targeted.
+  section('Session middleware — a revoked session is rejected even with a valid, unexpired signature (src/middleware/auth.js)');
+
+  await testAsync('a token whose re_sessions row is revoked gets 401, and next() never runs', async () => {
+    const token = jwt.sign({ id: 'user-1', tv: 0 }, env.jwt.secret, { algorithm: 'HS256' });
+    const { req, res, outcome } = fakeReqRes(token);
+    let nextCalled = false;
+
+    await withFakeAuthLookup(
+      {
+        usersRow: { token_version: 0, email_verified_at: '2026-01-01' },
+        teamMembersError: null,
+        sessionRow: { revoked_at: '2026-01-01T00:00:00.000Z' },
+      },
+      () => authenticate(req, res, () => { nextCalled = true; }),
+    );
+
+    assert.strictEqual(nextCalled, false, 'a revoked session must never reach a route handler');
+    assert.strictEqual(outcome().statusCode, 401);
+  });
+
+  await testAsync('a token with no re_sessions row yet (first-ever request) proceeds normally', async () => {
+    const token = jwt.sign({ id: 'user-1', tv: 0 }, env.jwt.secret, { algorithm: 'HS256' });
+    const { req, res, outcome } = fakeReqRes(token);
+    let nextCalled = false;
+
+    await withFakeAuthLookup(
+      {
+        usersRow: { token_version: 0, email_verified_at: '2026-01-01' },
+        teamMembersError: null,
+        sessionRow: null,
+      },
+      () => authenticate(req, res, () => { nextCalled = true; }),
+    );
+
+    assert.strictEqual(nextCalled, true);
+    assert.strictEqual(outcome().statusCode, null);
   });
 }
 
@@ -1836,6 +1979,85 @@ test('computeFromHistory: an approved hardship request costs 15 points off an ot
   // Stacks per use, but the final score never goes negative.
   const usedFiveTimes = computeFromHistory({ reservations: [], promises: [], hardshipCount: 10 });
   assert.strictEqual(usedFiveTimes.score, 0);
+});
+
+// THE BUG — credit_score reading 100 for every buyer regardless of payment
+// history. The pure formula below was already correct (these two cases both
+// pass against unmodified computeFromHistory); the actual defect was that
+// re_customers.credit_score, the STORED column the Buyers list and this
+// forecast both read, was only ever refreshed by creditScoreService.recompute
+// — and recompute() was wired to a payment being recorded, a promise
+// resolving, or a hardship being approved, never to the daily overdue sweep
+// itself (overdueService.markOverdue). A buyer who simply stopped paying —
+// no payment, no promise, no hardship request against them — never triggered
+// any of those, so their score sat at the re_customers default of 100
+// forever, no matter how many installments piled up overdue underneath it.
+// Fixed by having markOverdue recompute every buyer it just flipped to
+// overdue (see overdueService.js's own comment on the fix).
+test('computeFromHistory: 16 overdue installments, worst escalation stage, no promises kept scores below 20', () => {
+  const rows = Array.from({ length: 16 }, (_, i) => schedRow('overdue', `2026-0${(i % 9) + 1}-01`, null));
+  // "No promises kept" is modelled as promises that were made and broken,
+  // not as an absence of promises — an absence gets the benefit of the
+  // doubt (full 20 points, by design, see the "no history" test above) and
+  // could not by itself pull a score under 20. STAGES' worst entry is used
+  // rather than a hardcoded index so this stays correct if a stage is ever
+  // added or removed.
+  const promises = [{ status: 'broken' }, { status: 'broken' }];
+  const worstStage = STAGES[STAGES.length - 1].key; // 'legal' — this product's floor
+  const { score, breakdown } = computeFromHistory({
+    reservations: [reservation(worstStage, rows)],
+    promises,
+  });
+  assert.ok(score < 20, `expected a score below 20 for 16 overdue / worst stage / no promises kept, got ${score}`);
+  assert.strictEqual(breakdown.payment_consistency.points, 0);
+  assert.strictEqual(breakdown.response_rate.points, 0);
+  assert.strictEqual(breakdown.promise_reliability.points, 0);
+});
+
+test('computeFromHistory: every payment on time, nothing overdue, scores above 85', () => {
+  const rows = Array.from({ length: 12 }, (_, i) => schedRow('paid', `2026-0${(i % 9) + 1}-01`, `2026-0${(i % 9) + 1}-01`));
+  const { score } = computeFromHistory({ reservations: [reservation('none', rows)], promises: [] });
+  assert.ok(score > 85, `expected a score above 85 for a buyer with a perfect on-time record, got ${score}`);
+});
+
+// SECTION 6 — forecastService's default-risk override. A stored
+// credit_score can lag a buyer's most recent overdue installments (the bug
+// above); assessDefaultRisk is what stops that lag from ever reading as
+// reassuring in the forecast text, by forcing 'high' the moment overdue
+// installments cross the threshold, independent of the score's own tier.
+test('assessDefaultRisk: 3+ overdue installments is high risk regardless of tier', () => {
+  assert.strictEqual(OVERDUE_RISK_OVERRIDE_THRESHOLD, 3);
+  assert.strictEqual(assessDefaultRisk(3, 'excellent'), 'high');
+  assert.strictEqual(assessDefaultRisk(16, 'excellent'), 'high');
+  assert.strictEqual(assessDefaultRisk(2, 'excellent'), 'low');
+});
+
+test('assessDefaultRisk: below the override threshold, risk follows the credit tier', () => {
+  assert.strictEqual(assessDefaultRisk(0, 'excellent'), 'low');
+  assert.strictEqual(assessDefaultRisk(0, 'good'), 'low');
+  assert.strictEqual(assessDefaultRisk(0, 'fair'), 'medium');
+  assert.strictEqual(assessDefaultRisk(0, 'at_risk'), 'high');
+});
+
+test('buildFallbackForecast: a buyer over the overdue-risk threshold reads HIGH DEFAULT RISK even with a stale, high credit score', () => {
+  const state = {
+    today: '2026-01-01',
+    overall: { total_overdue_amount: 500_000, default_rate_percent: 12, monthly_collections_last_12: [] },
+    projects: [],
+    risk_candidates: [
+      // credit_score/tier deliberately still read "excellent" — exactly the
+      // stale-score state the bug produced — but risk_level was already
+      // computed (as gatherForecastState now does) as the override.
+      { customer_ref: 'BUYER_1', credit_score: 100, tier: 'excellent', risk_level: 'high', overdue_installments: 16, overdue_amount: 500_000, escalation_stage: 'legal' },
+    ],
+  };
+  const forecast = buildFallbackForecast(state);
+  const reason = forecast.default_risks[0].risk_reason;
+  assert.match(reason, /^HIGH DEFAULT RISK/, 'must lead with the risk flag, not a reassuring credit score');
+  assert.match(reason, /16 installment\(s\) currently overdue/);
+  // The raw score/tier still appears further in, for transparency — but not
+  // as the FIRST thing read, which is what made the old text misleading.
+  assert.match(reason, /credit score 100 \(excellent\)/i);
 });
 
 test('tier() matches the product spec\'s four bands exactly at their boundaries', () => {
@@ -2818,6 +3040,154 @@ test('FINANCIAL_ENTITY_TYPES names exactly the money-carrying entity types the f
   }
   assert.ok(!auditRouter.FINANCIAL_ENTITY_TYPES.has('re_reservations'), 'a status change alone is not financial');
   assert.ok(!auditRouter.FINANCIAL_ENTITY_TYPES.has('re_customers'));
+});
+
+// ── Reporting features (routes/reports.js) — leaderboard date-range, custom
+// report field selection, and payment-heatmap day-of-month bucketing. Every
+// one of these is pure by design specifically so it is assertable here, the
+// same reasoning the rest of this file's "pure core, thin Express wrapper"
+// pattern already follows.
+section('Reporting features (routes/reports.js)');
+
+test('periodRange: this_month starts on the 1st of the current month, open-ended', () => {
+  assert.deepStrictEqual(reportsRouter.periodRange('this_month', '2026-08-16'), { from: '2026-08-01', to: null });
+});
+
+test('periodRange: last_3_months spans this month plus the two before it', () => {
+  // Aug + Jul + Jun = 3 months, so "from" lands on 1 Jun, not 1 May.
+  assert.deepStrictEqual(reportsRouter.periodRange('last_3_months', '2026-08-16'), { from: '2026-06-01', to: null });
+});
+
+test('periodRange: last_3_months crosses a year boundary correctly', () => {
+  assert.deepStrictEqual(reportsRouter.periodRange('last_3_months', '2026-01-16'), { from: '2025-11-01', to: null });
+});
+
+test('periodRange: this_year starts 1 January of the current year', () => {
+  assert.deepStrictEqual(reportsRouter.periodRange('this_year', '2026-08-16'), { from: '2026-01-01', to: null });
+});
+
+test('periodRange: all_time, and anything unrecognised, applies no filter at all', () => {
+  assert.deepStrictEqual(reportsRouter.periodRange('all_time', '2026-08-16'), { from: null, to: null });
+  assert.deepStrictEqual(reportsRouter.periodRange('nonsense', '2026-08-16'), { from: null, to: null });
+});
+
+test('buildCustomReportColumns: keeps only real field ids, in the order the caller asked for', () => {
+  const columns = reportsRouter.buildCustomReportColumns('phone,buyer_name,not_a_real_field');
+  assert.strictEqual(columns.length, 2);
+  assert.strictEqual(columns[0][0], 'Phone', 'phone was listed first by the caller, so it comes first in the CSV');
+  assert.strictEqual(columns[1][0], 'Buyer name');
+});
+
+test('buildCustomReportColumns: an empty or all-invalid fields param yields zero columns', () => {
+  assert.strictEqual(reportsRouter.buildCustomReportColumns('').length, 0);
+  assert.strictEqual(reportsRouter.buildCustomReportColumns('made_up,also_fake').length, 0);
+});
+
+test('CUSTOM_REPORT_FIELDS names exactly the sixteen fields the spec lists, no more, no fewer', () => {
+  const expected = [
+    'buyer_name', 'email', 'phone', 'unit_number', 'project_name', 'total_contracted',
+    'total_paid', 'balance', 'overdue_amount', 'credit_score', 'sales_rep_name',
+    'reservation_date', 'last_payment_date', 'next_due_date', 'escalation_stage', 'referral_code',
+  ];
+  assert.deepStrictEqual(Object.keys(reportsRouter.CUSTOM_REPORT_FIELDS).sort(), expected.sort());
+});
+
+test('bucketPaymentsByDayOfMonth: sums amounts and counts onto the day-of-month a payment landed on, across different months', () => {
+  const days = reportsRouter.bucketPaymentsByDayOfMonth([
+    { amount: 100000, paid_at: '2026-01-15T10:00:00Z' },
+    { amount: 50000, paid_at: '2026-03-15T10:00:00Z' }, // same day-of-month, different month — must add, not overwrite
+    { amount: 20000, paid_at: '2026-02-01T10:00:00Z' },
+  ]);
+  assert.strictEqual(days.length, 31);
+  assert.strictEqual(days[14].day, 15);
+  assert.strictEqual(days[14].amount, 150000);
+  assert.strictEqual(days[14].count, 2);
+  assert.strictEqual(days[0].amount, 20000);
+  assert.strictEqual(days[0].count, 1);
+  assert.strictEqual(days[1].amount, 0, 'a day nothing was ever collected on stays at zero, not missing');
+});
+
+test('bucketPaymentsByDayOfMonth: a payment with no paid_at is silently skipped, not a NaN bucket', () => {
+  const days = reportsRouter.bucketPaymentsByDayOfMonth([{ amount: 100000, paid_at: null }]);
+  assert.ok(days.every((d) => d.amount === 0 && d.count === 0));
+});
+
+test('reports.leaderboard/customExport/heatmap and audit.export match the permission tiers the feature calls for', () => {
+  // DIRECTORS — same tier as reports.collections/reports.rental beside them.
+  for (const action of ['reports.leaderboard', 'reports.customExport', 'reports.heatmap']) {
+    assert.ok(canAccess('owner', action));
+    assert.ok(canAccess('sales_director', action));
+    assert.strictEqual(canAccess('sales_rep', action), false);
+    assert.strictEqual(canAccess('collections', action), false);
+  }
+  // audit.export is narrower than audit.read — owner only.
+  assert.ok(canAccess('owner', 'audit.export'));
+  assert.strictEqual(canAccess('sales_director', 'audit.export'), false);
+});
+
+// SECTION 7 — buyer blacklist. Owner only, same weight as waiving debt or
+// deleting a record (permissions.js's own reasoning for customers.blacklist).
+test('customers.blacklist is owner-only', () => {
+  assert.ok(canAccess('owner', 'customers.blacklist'));
+  assert.strictEqual(canAccess('sales_director', 'customers.blacklist'), false);
+  assert.strictEqual(canAccess('sales_rep', 'customers.blacklist'), false);
+});
+
+// SECTION 4 — bulk portal-link send is narrower than the single-buyer send:
+// owner + sales director only, where customers.portalAccess also reaches a
+// sales rep and collections.
+test('customers.bulkPortalLink is narrower than the single-buyer customers.portalAccess', () => {
+  assert.ok(canAccess('owner', 'customers.bulkPortalLink'));
+  assert.ok(canAccess('sales_director', 'customers.bulkPortalLink'));
+  assert.strictEqual(canAccess('sales_rep', 'customers.bulkPortalLink'), false);
+  assert.strictEqual(canAccess('collections', 'customers.bulkPortalLink'), false);
+  // The single-buyer send DOES reach a sales rep and collections — the two
+  // permissions are deliberately different widths, not the same rule twice.
+  assert.ok(canAccess('sales_rep', 'customers.portalAccess'));
+  assert.ok(canAccess('collections', 'customers.portalAccess'));
+});
+
+// SECTION 8 — bulk document generation. Owner + documentation officer only —
+// narrower than documents.generate (PAPERWORK, which also includes
+// sales_director) since no existing group constant is exactly that pair.
+test('documents.bulkGenerate is owner + documentation only, narrower than documents.generate', () => {
+  assert.ok(canAccess('owner', 'documents.bulkGenerate'));
+  assert.ok(canAccess('documentation', 'documents.bulkGenerate'));
+  assert.strictEqual(canAccess('sales_director', 'documents.bulkGenerate'), false);
+  assert.strictEqual(canAccess('sales_rep', 'documents.bulkGenerate'), false);
+  // documents.generate DOES reach sales_director.
+  assert.ok(canAccess('sales_director', 'documents.generate'));
+});
+
+// SECTION 14 — customizable email content (notificationService.js).
+section('Email template variable substitution (notificationService.js)');
+
+test('substituteTemplateVariables: replaces every known {{var}} token', () => {
+  const result = substituteTemplateVariables(
+    'Hi {{buyer_name}}, you paid {{amount}} for {{unit}}.',
+    { buyer_name: 'Mrs Adeyemi', amount: '₦500,000', unit: 'Unit 4B' }
+  );
+  assert.strictEqual(result, 'Hi Mrs Adeyemi, you paid ₦500,000 for Unit 4B.');
+});
+
+test('substituteTemplateVariables: an unknown {{token}} is left exactly as written, not blanked', () => {
+  const result = substituteTemplateVariables('Hi {{buyer_name}}, {{not_a_real_var}}.', { buyer_name: 'Tunde' });
+  assert.strictEqual(result, 'Hi Tunde, {{not_a_real_var}}.');
+});
+
+test('substituteTemplateVariables: escapes HTML-significant characters by default (body_html context)', () => {
+  const result = substituteTemplateVariables('<p>{{buyer_name}}</p>', { buyer_name: "O'Brien & Co <script>" });
+  assert.strictEqual(result, '<p>O&#x27;Brien &amp; Co &lt;script&gt;</p>');
+});
+
+test('substituteTemplateVariables: escape:false leaves the value raw (subject-line context)', () => {
+  const result = substituteTemplateVariables('Receipt for {{buyer_name}}', { buyer_name: "O'Brien & Co" }, { escape: false });
+  assert.strictEqual(result, "Receipt for O'Brien & Co");
+});
+
+test('EMAIL_TEMPLATE_TYPES names exactly the five types the spec lists', () => {
+  assert.deepStrictEqual(EMAIL_TEMPLATE_TYPES.slice().sort(),
+    ['document_ready', 'overdue_reminder', 'portal_link', 'receipt', 'welcome'].sort());
 });
 
 // ── Input validation — UUID shape + numeric clamps (audit.js, reports.js, ──

@@ -30,6 +30,10 @@ const generateLimiter = rateLimit({
 // SIGNABLE_DOC_TYPES is documentService's own list of exactly those three.
 const DOC_TYPES = ['allocation_letter', 'deed_of_assignment', 'lease_agreement',
   'subscriber_agreement', 'power_of_attorney', 'receipt', 'other'];
+// SECTION 10 — 'superseded' is a valid status at the database level
+// (migrations/043) but deliberately absent here: it is a side effect of
+// regenerating a document (documentService.writeGeneratedVersion), never a
+// state PATCH /:id/status should be able to set or clear by hand.
 const DOC_STATUSES = ['pending', 'generated', 'sent', 'signed'];
 
 // A Sales Executive's own reservation ids — documents are scoped to them
@@ -50,7 +54,7 @@ router.get('/', requirePermission('documents.read'), async (req, res, next) => {
   try {
     let query = supabaseAdmin
       .from('re_documents')
-      .select('*, re_reservations(re_customers(full_name), re_units(unit_number, re_projects(name)))')
+      .select('*, re_reservations(re_customers(full_name), re_units(unit_number, project_id, re_projects(name)))')
       .eq('organization_id', req.orgId)
       .order('created_at', { ascending: false });
 
@@ -100,15 +104,20 @@ router.post('/', requirePermission('documents.create'), async (req, res, next) =
       .select()
       .single();
     if (error) {
-      // uniq_re_allocation_letter_per_reservation (migrations/005) blocks a
-      // second live allocation letter for the same reservation — point the
-      // caller at the one that already exists instead of a raw 500.
+      // uniq_re_allocation_letter_per_reservation (migrations/005, widened
+      // by 043 to "one LIVE row") blocks a second live allocation letter for
+      // the same reservation — point the caller at the one that already
+      // exists instead of a raw 500. superseded_at filtered to null: a
+      // superseded row from an earlier version can coexist with the live
+      // one now, and without this filter .maybeSingle() would find both and
+      // error on more than one row.
       if (error.code === '23505') {
         const { data: existingDoc } = await supabaseAdmin
           .from('re_documents')
           .select()
           .eq('reservation_id', reservation_id)
           .eq('doc_type', doc_type)
+          .is('superseded_at', null)
           .maybeSingle();
         return res.status(409).json({
           error: 'An allocation letter already exists for this reservation. Regenerate it instead of creating a new one.',
@@ -118,6 +127,88 @@ router.post('/', requirePermission('documents.create'), async (req, res, next) =
       throw error;
     }
     res.status(201).json(data);
+  } catch (e) { next(e); }
+});
+
+// SECTION 8 — one project at a time: for every active (non-cancelled)
+// reservation in the project that does not already have a live document of
+// this type, create the row and render it, exactly the same two steps
+// POST / then POST /:id/generate already do one at a time. Owner +
+// documentation officer only (permissions.js's documents.bulkGenerate).
+//
+// Sequential, not concurrent — generateDocument renders through a real
+// headless Chromium per call (see generateLimiter's own comment above);
+// running several at once on a constrained host risks the whole request
+// timing out instead of finishing slower but reliably. generateLimiter
+// itself (40/15min) still applies, so this cannot be used to hammer the
+// renderer either.
+router.post('/bulk-generate', generateLimiter, requirePermission('documents.bulkGenerate'), async (req, res, next) => {
+  try {
+    const projectId = req.body?.project_id;
+    const docType = req.body?.doc_type || 'allocation_letter';
+    if (!projectId) return res.status(400).json({ error: 'project_id is required' });
+    if (!DOC_TYPES.includes(docType)) {
+      return res.status(400).json({ error: `doc_type must be one of: ${DOC_TYPES.join(', ')}` });
+    }
+
+    const { data: reservations, error } = await supabaseAdmin
+      .from('re_reservations')
+      .select('id, re_units!inner(project_id)')
+      .eq('organization_id', req.orgId)
+      .eq('re_units.project_id', projectId)
+      .neq('status', 'cancelled');
+    if (error) throw error;
+
+    if (!reservations?.length) {
+      return res.json({ generated: 0, skipped: 0, failed: 0, failures: [] });
+    }
+
+    // SECTION 10 — superseded_at filtered to null: a reservation whose
+    // allocation letter was regenerated (and therefore superseded) still
+    // has a LIVE version, and "already has one" must be judged against
+    // that, not against every version that has ever existed for it.
+    const { data: existingDocs, error: existingErr } = await supabaseAdmin
+      .from('re_documents')
+      .select('reservation_id')
+      .eq('organization_id', req.orgId)
+      .eq('doc_type', docType)
+      .is('superseded_at', null)
+      .in('reservation_id', reservations.map((r) => r.id));
+    if (existingErr) throw existingErr;
+    const alreadyHas = new Set((existingDocs || []).map((d) => d.reservation_id));
+
+    let generated = 0;
+    let skipped = 0;
+    const failures = [];
+
+    for (const reservation of reservations) {
+      if (alreadyHas.has(reservation.id)) { skipped += 1; continue; }
+
+      try {
+        const { data: doc, error: createErr } = await supabaseAdmin
+          .from('re_documents')
+          .insert({ organization_id: req.orgId, reservation_id: reservation.id, doc_type: docType })
+          .select('id')
+          .single();
+        if (createErr) throw createErr;
+
+        const result = await generateDocument(req.orgId, doc.id);
+        if (result.unsupported) throw new Error(`No template for "${docType}" yet.`);
+
+        audit(req, {
+          action: 'document.generated',
+          entityType: 're_documents',
+          entityId: doc.id,
+          summary: `${docType.replace(/_/g, ' ')} generated — bulk (project)`,
+          metadata: { reservation_id: reservation.id, doc_type: docType },
+        });
+        generated += 1;
+      } catch (err) {
+        failures.push({ reservation_id: reservation.id, reason: err.message });
+      }
+    }
+
+    res.json({ generated, skipped, failed: failures.length, failures });
   } catch (e) { next(e); }
 });
 
@@ -140,7 +231,11 @@ router.post('/:id/generate', generateLimiter, requirePermission('documents.gener
     audit(req, {
       action: result.was_regeneration ? 'document.regenerated' : 'document.generated',
       entityType: 're_documents',
-      entityId: req.params.id,
+      // SECTION 10 — a regeneration now writes a NEW row (result.document.id
+      // may differ from req.params.id, the OLD, now-superseded row) rather
+      // than rewriting the one the URL named — the audit entry has to point
+      // at the row that actually carries the new content.
+      entityId: result.document.id,
       summary: `${result.document.doc_type.replace(/_/g, ' ')} ${result.was_regeneration ? 'regenerated' : 'generated'}`
         // SECTION 8 — a signing link only exists for the three signable
         // types (documentService.notifySigningLink), so this only appends
@@ -150,6 +245,7 @@ router.post('/:id/generate', generateLimiter, requirePermission('documents.gener
         reservation_id: result.document.reservation_id,
         doc_type: result.document.doc_type,
         previous_storage_path: result.previous_storage_path || undefined,
+        superseded_document_id: result.was_regeneration ? req.params.id : undefined,
       },
     });
 

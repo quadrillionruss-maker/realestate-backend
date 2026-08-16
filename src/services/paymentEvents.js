@@ -30,6 +30,9 @@ const { auditSystem } = require('./auditService');
 const { escapeHtml } = require('../utils/escapeHtml');
 const creditScore = require('./creditScoreService');
 const referrals = require('./referralService');
+const pushService = require('./pushService');
+const portalNotifications = require('./portalNotificationService');
+const featureUsage = require('./featureUsageService');
 
 const naira = (amount) => {
   const n = Number(amount || 0);
@@ -89,7 +92,7 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
       .filter(Boolean).join(' · ');
 
     if (customer.email) {
-      const html = notify.emailShell({
+      const defaultHtml = notify.emailShell({
         heading: 'Payment received',
         intro: `We have received ${naira(payment.amount)} towards ${projectLine || 'your purchase'}. Your receipt is attached.`,
         rows: [
@@ -101,12 +104,23 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
         body: nextDueBlock(context),
         footer: `${settings.company_name || 'Your developer'} · Keep this receipt for your records.`,
       });
+      const defaultSubject = `Receipt for ${naira(payment.amount)} — ${projectLine || 'your purchase'}`;
+
+      // SECTION 14 — a workspace's own template, if it saved one, wins;
+      // otherwise the built-in email above is exactly what always sent.
+      const content = await notify.resolveEmailContent(orgId, 'receipt', {
+        buyer_name: customer.full_name || '',
+        amount: naira(payment.amount),
+        unit: unit.unit_number || '',
+        due_date: '',
+        portal_link: '',
+      }, { subject: defaultSubject, html: defaultHtml });
 
       const result = await notify.sendEmail({
         orgId,
         to: customer.email,
-        subject: `Receipt for ${naira(payment.amount)} — ${projectLine || 'your purchase'}`,
-        html,
+        subject: content.subject,
+        html: content.html,
         text: `We received ${naira(payment.amount)}. Total paid: ${naira(context.totalPaid)}. Balance: ${naira(context.balance)}.`,
         template: 'payment_receipt',
         replyTo: settings.reply_to_email || null,
@@ -166,7 +180,30 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
   // payment — see referralService.handleFirstPayment's own comment for how
   // that is detected without counting payments. Never throws, per this
   // file's own rule.
-  await referrals.handleFirstPayment(orgId, customer.id);
+  const referralCompleted = await referrals.handleFirstPayment(orgId, customer.id);
+  if (referralCompleted) featureUsage.track(orgId, 'referral_made');
+
+  // ── Push notification (SECTION 1) ────────────────────────────────────────
+  // Owner + whichever sales rep is assigned to this reservation (a reservation
+  // with no rep assigned notifies the owner only — resolveUserIdsByRole
+  // already returns nothing for a role with no members). pushService itself
+  // never throws (a configured-but-unreachable push service degrades the
+  // same way a bounced email does), so no try/catch is needed here either.
+  const pushRecipientIds = await pushService.resolveUserIdsByRole(orgId, ['owner']);
+  if (salesRep?.users?.id) pushRecipientIds.push(salesRep.users.id);
+  await pushService.notify(orgId, pushRecipientIds, {
+    title: 'Payment received',
+    body: `${naira(payment.amount)} from ${customer.full_name || 'a buyer'}`,
+    url: '/#/payments',
+  });
+
+  // SECTION 20 — the buyer's own portal bell, separate from the staff push
+  // above: the recipient, the channel and the wording are all different,
+  // which is why this is its own call rather than folded into the one above.
+  await portalNotifications.notify(orgId, customer.id, 'payment_recorded',
+    'Payment received', `We received ${naira(payment.amount)}. Thank you!`);
+
+  featureUsage.track(orgId, 'payment_recorded');
 
   // ── History ──────────────────────────────────────────────────────────────
   await auditSystem({

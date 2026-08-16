@@ -50,7 +50,7 @@ async function loadPaymentContext(orgId, paymentId) {
             id, commission_rate,
             re_customers(id, full_name, email, phone),
             re_units(unit_number, unit_type, list_price, re_projects(name, location)),
-            re_sales_reps(id, commission_rate, users(full_name))
+            re_sales_reps(id, commission_rate, users(id, full_name))
           )
         )
       )`)
@@ -102,8 +102,11 @@ async function loadPaymentContext(orgId, paymentId) {
 }
 
 // Exported so the offline suite can assert on a rendered receipt without a
-// browser, a database or a network.
-function buildReceiptHtml(context, branding = {}, receiptNumber) {
+// browser, a database or a network. receiptTemplate is the workspace's own
+// row from re_receipt_templates (SECTION 5), or null/undefined for the
+// stock Archta layout — every caller already tolerates the 4th argument
+// being absent, so nothing else that calls this had to change.
+function buildReceiptHtml(context, branding = {}, receiptNumber, receiptTemplate = null) {
   const template = fs.readFileSync(TEMPLATE_PATH, 'utf8');
   const { payment, schedule, plan, customer, unit, project, totalPaid, balance } = context;
 
@@ -111,9 +114,30 @@ function buildReceiptHtml(context, branding = {}, receiptNumber) {
     || branding.full_name || 'Our Company';
 
   const logo = safeLogoUrl(branding.logo_url || branding.brand_logo_url);
-  const logoBlock = logo
+  // show_logo only governs the DEFAULT header — a workspace that supplied
+  // its own header_html has already decided for itself whether a logo
+  // appears, and where.
+  const showLogo = receiptTemplate?.show_logo !== false;
+  const logoBlock = (showLogo && logo)
     ? `<img src="${escapeHtml(logo)}" alt="${escapeHtml(companyName)}">`
     : '';
+
+  // header_html/footer_html are the workspace owner's OWN authored HTML
+  // (re_receipt_templates), rendered as-is — the same trust boundary
+  // documentService's re_document_templates.template_html already
+  // established for legal documents (an owner's own letterhead, not
+  // buyer-supplied text). Only the surrounding letterhead/fineprint DIVs
+  // stay fixed; everything a receipt actually STATES (amount, receipt
+  // number, installment breakdown) is never part of either override.
+  const defaultHeaderBlock = `<div class="company">${escapeHtml(companyName)}</div>${logoBlock}`;
+  const headerBlock = receiptTemplate?.header_html || defaultHeaderBlock;
+
+  const showAddress = receiptTemplate?.show_developer_address !== false;
+  const defaultFooterBlock = [
+    showAddress ? contactLine(branding) : '',
+    'This is a computer-generated receipt and is valid without alteration.',
+  ].filter(Boolean).join(' · ');
+  const footerBlock = receiptTemplate?.footer_html || defaultFooterBlock;
 
   // A bank reference is buyer-supplied text. It is escaped like everything
   // else, and the row is omitted rather than printed empty.
@@ -129,14 +153,10 @@ function buildReceiptHtml(context, branding = {}, receiptNumber) {
     ? `Installment ${schedule.installment_number} settled in full`
     : `Installment ${schedule.installment_number} part-paid — ${naira(Number(schedule.amount_due) )} was due`;
 
-  const fineprint = [
-    contactLine(branding),
-    'This is a computer-generated receipt and is valid without alteration.',
-  ].filter(Boolean).join(' · ');
-
   return template
     .replace(/{{COMPANY_NAME}}/g, escapeHtml(companyName))
-    .replace(/{{LOGO_BLOCK}}/g, logoBlock)
+    .replace(/{{HEADER_BLOCK}}/g, headerBlock)
+    .replace(/{{FOOTER_BLOCK}}/g, footerBlock)
     .replace(/{{RECEIPT_NUMBER}}/g, escapeHtml(receiptNumber))
     .replace(/{{DATE}}/g, formatDate(new Date()))
     .replace(/{{CUSTOMER_NAME}}/g, escapeHtml(customer.full_name || ''))
@@ -151,8 +171,19 @@ function buildReceiptHtml(context, branding = {}, receiptNumber) {
     .replace(/{{INSTALLMENT_STATUS}}/g, escapeHtml(installmentStatus))
     .replace(/{{TOTAL_PAID}}/g, naira(totalPaid))
     .replace(/{{PLAN_TOTAL}}/g, naira(plan.total_amount))
-    .replace(/{{BALANCE_OUTSTANDING}}/g, naira(balance))
-    .replace(/{{FINEPRINT}}/g, fineprint);
+    .replace(/{{BALANCE_OUTSTANDING}}/g, naira(balance));
+}
+
+// SECTION 5 — a workspace's own header/footer override, if it saved one.
+// null (not an empty row) for a workspace that never opened Settings →
+// Documents, which buildReceiptHtml above reads as "use the stock layout".
+async function resolveReceiptTemplate(orgId) {
+  const { data } = await supabaseAdmin
+    .from('re_receipt_templates')
+    .select('header_html, footer_html, show_logo, show_developer_address')
+    .eq('organization_id', orgId)
+    .maybeSingle();
+  return data || null;
 }
 
 // Idempotent: the unique partial index on (payment_id) where doc_type =
@@ -203,8 +234,11 @@ async function generateReceipt(orgId, paymentId) {
   if (!documentId) return { notFound: true };
 
   const receiptNumber = `RCPT-${String(documentId).slice(0, 8).toUpperCase()}`;
-  const branding = await resolveBranding(orgId);
-  const pdf = await renderHtmlToPdf(buildReceiptHtml(context, branding, receiptNumber));
+  const [branding, receiptTemplate] = await Promise.all([
+    resolveBranding(orgId),
+    resolveReceiptTemplate(orgId),
+  ]);
+  const pdf = await renderHtmlToPdf(buildReceiptHtml(context, branding, receiptNumber, receiptTemplate));
 
   // Timestamped rather than a deterministic {documentId}.pdf — see
   // documentService.generateDocument for why: the DB row is correctly
@@ -234,4 +268,8 @@ async function generateReceipt(orgId, paymentId) {
   };
 }
 
-module.exports = { generateReceipt, buildReceiptHtml, loadPaymentContext, naira, METHOD_LABELS };
+module.exports = {
+  generateReceipt, buildReceiptHtml, loadPaymentContext, naira, METHOD_LABELS,
+  // SECTION 5
+  resolveReceiptTemplate,
+};

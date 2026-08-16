@@ -29,6 +29,7 @@ const { requirePermission } = require('../middleware/rbac');
 const { parseCsvToObjects, parseAmount, parseDate } = require('../utils/csv');
 const { createPlanWithSchedule } = require('../services/installmentService');
 const { audit } = require('../services/auditService');
+const featureUsage = require('../services/featureUsageService');
 const router = express.Router();
 
 const MAX_ROWS = 1000;
@@ -178,6 +179,7 @@ router.post('/units', importLimiter, requirePermission('imports.write'), async (
       metadata: { project_id, by_project: byProject, created: data.length, skipped: errors.length },
     });
 
+    featureUsage.track(req.orgId, 'import_used');
     res.status(201).json({ created: data.length, errors, by_project: byProject, units: data });
   } catch (e) { next(e); }
 });
@@ -611,6 +613,7 @@ router.post('/customers', importLimiter, requirePermission('imports.write'), asy
       metadata: { ...result, imported_payment_ids: importedPaymentIds },
     });
 
+    featureUsage.track(req.orgId, 'import_used');
     res.status(201).json(result);
   } catch (e) { next(e); }
 });

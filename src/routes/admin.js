@@ -14,6 +14,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const env = require('../config/env');
 const adminService = require('../services/adminService');
+const onboarding = require('../services/onboardingService');
 
 const router = express.Router();
 
@@ -133,6 +134,18 @@ router.get('/health', wrap(async (req, res) => {
 
 router.get('/migrations', wrap(async (req, res) => {
   res.json(await adminService.migrationStatus());
+}));
+
+router.get('/revenue', wrap(async (req, res) => {
+  res.json(await adminService.revenue());
+}));
+
+router.get('/feature-usage', wrap(async (req, res) => {
+  res.json(await adminService.featureUsage());
+}));
+
+router.get('/workspaces/:id/onboarding', wrap(async (req, res) => {
+  res.json(await onboarding.checklist(req.params.id));
 }));
 
 module.exports = router;

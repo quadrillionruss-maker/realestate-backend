@@ -25,6 +25,8 @@ const { notifyOverdue, remindUpcoming } = require('../services/overdueAlerts');
 const { checkTenancyRenewals } = require('../services/rentalService');
 const { sweepOverdueContractorPayments } = require('../services/contractorService');
 const { computeAndStoreForAllProjects } = require('../services/projectHealthService');
+const { sweepExpiredDocuments } = require('../services/documentService');
+const { checkScheduledMessages } = require('../services/scheduledMessageService');
 const { mapWithConcurrency } = require('../utils/concurrency');
 const collectionsAgent = require('../services/collectionsAgent');
 const documentAgent = require('../services/documentAgent');
@@ -223,7 +225,23 @@ async function runDailyJob() {
 
   console.log(`[re-daily] briefed ${succeeded}/${orgIds.length} org(s), ${alerted} alert(s), ${reminded} reminder(s), `
     + `${renewals.filed} renewal flag(s)`);
-  return { flipped, promises, escalations, renewals, orgs: orgIds.length, succeeded, alerted, reminded };
+
+  // SECTION 9 — deliberately AFTER every org's brief above, not alongside
+  // the other platform-wide sweeps near the top of this function: an
+  // expired-document warning is housekeeping the brief has no use for, not
+  // something it needs to read the way markOverdue's freshly-swept counts
+  // are. Platform-wide, same shape as the contractor/tenancy sweeps —
+  // there is no per-org loop for this either, since the query is already
+  // global and idempotent (see sweepExpiredDocuments' own comment).
+  const expiry = await sweepExpiredDocuments().catch((err) => {
+    console.error('[re-daily] document expiry sweep failed:', err.message);
+    return { evaluated: 0, filed: 0 };
+  });
+  if (expiry.filed) {
+    console.log(`[re-daily] flagged ${expiry.filed} expired unsigned document(s)`);
+  }
+
+  return { flipped, promises, escalations, renewals, expiry, orgs: orgIds.length, succeeded, alerted, reminded };
 }
 
 // The evening sweep. Installments are due by 18:00 Africa/Lagos
@@ -252,6 +270,18 @@ async function runEveningSweep() {
   return { flipped, promises, escalations };
 }
 
+// SECTION 16 — hourly, independent of the 07:00/18:05 pair above: a
+// message scheduled for 2pm must not sit unsent until the next sweep.
+const SCHEDULED_MESSAGES_SCHEDULE = env.cron.scheduledMessagesSchedule;
+
+async function runScheduledMessagesCheck() {
+  const result = await checkScheduledMessages();
+  if (result.evaluated) {
+    console.log(`[re-scheduled-messages] ${result.sent} sent, ${result.failed} failed (fallback task filed for each)`);
+  }
+  return result;
+}
+
 // TASK 1 — wraps a scheduled run (not every direct call of runDailyJob/
 // runEveningSweep, which tests and smoke scripts also make) with a
 // re_cron_runs row, so the admin dashboard's Health section has something to
@@ -276,6 +306,7 @@ async function recordedRun(jobName, fn) {
 
 let task = null;
 let eveningTask = null;
+let scheduledMessagesTask = null;
 
 function start() {
   if (env.cron.disabled) {
@@ -292,8 +323,14 @@ function start() {
     recordedRun('evening_sweep', runEveningSweep).catch((err) => console.error('[re-evening] sweep failed:', err.message));
   }, { timezone: 'Africa/Lagos' });
 
+  scheduledMessagesTask = cron.schedule(SCHEDULED_MESSAGES_SCHEDULE, () => {
+    recordedRun('scheduled_messages', runScheduledMessagesCheck)
+      .catch((err) => console.error('[re-scheduled-messages] check failed:', err.message));
+  }, { timezone: 'Africa/Lagos' });
+
   console.log(`[re-daily] scheduled "${SCHEDULE}" Africa/Lagos (brief)`);
   console.log(`[re-daily] scheduled "${EVENING_SCHEDULE}" Africa/Lagos (post-cutoff sweep)`);
+  console.log(`[re-daily] scheduled "${SCHEDULED_MESSAGES_SCHEDULE}" Africa/Lagos (scheduled messages)`);
   return task;
 }
 

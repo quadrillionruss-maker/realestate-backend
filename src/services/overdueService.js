@@ -31,6 +31,9 @@
 
 const { supabaseAdmin } = require('../middleware/orgContext');
 const env = require('../config/env');
+const { mapWithConcurrency } = require('../utils/concurrency');
+
+const RECOMPUTE_CONCURRENCY = 8;
 
 // Close of business, Lagos. 0–23.
 const DUE_CUTOFF_HOUR = env.overdue.cutoffHour;
@@ -112,8 +115,53 @@ async function markOverdue(orgId = null) {
 
   if (orgId) query = query.eq('organization_id', orgId);
 
-  const { data, error } = await query.select('id');
+  const { data, error } = await query.select(
+    'id, organization_id, re_installment_plans(re_reservations(customer_id))'
+  );
   if (error) throw error;
+
+  // THE BUG — every row this sweep just flipped changes that buyer's credit
+  // score (payment-consistency and default-history both read overdue rows
+  // directly, creditScoreService.js), but creditScoreService.recompute() was
+  // previously only ever called from a payment, a promise resolving, or a
+  // hardship approval. A buyer who simply stopped paying — no payment, no
+  // promise, no hardship request logged against them — never triggered any
+  // of those, so their score sat at whatever it last was (the re_customers
+  // default of 100, for a buyer who had never triggered a computation at
+  // all) no matter how many installments piled up underneath it. This is
+  // what actually closes that gap. One recompute per buyer, not per row.
+  //
+  // Required lazily: creditScoreService itself requires overdueService (for
+  // isPastDue), so a top-level require here would be circular.
+  const creditScore = require('./creditScoreService');
+  const affected = new Map();
+  for (const row of data || []) {
+    const customerId = row.re_installment_plans?.re_reservations?.customer_id;
+    if (customerId) affected.set(customerId, row.organization_id);
+  }
+  await mapWithConcurrency([...affected.entries()], RECOMPUTE_CONCURRENCY,
+    ([customerId, oid]) => creditScore.recompute(oid, customerId));
+
+  // SECTION 1 — push, owner + collections officer, one notification per org
+  // per sweep rather than one per buyer: a bad morning with a dozen buyers
+  // freshly overdue should read as one alert to act on, not a dozen
+  // separate pushes. Required lazily for the same reason creditScoreService
+  // is above — pushService has no reverse dependency on this file, but
+  // keeping every cross-service require in this function lazy is one
+  // consistent rule rather than two different ones for two different
+  // modules.
+  const pushService = require('./pushService');
+  const buyersByOrg = new Map(); // orgId -> count of newly-overdue buyers
+  for (const orgId of affected.values()) {
+    buyersByOrg.set(orgId, (buyersByOrg.get(orgId) || 0) + 1);
+  }
+  await Promise.all([...buyersByOrg.entries()].map(([oid, count]) =>
+    pushService.notifyByRole(oid, ['owner', 'collections'], {
+      title: 'New overdue buyer' + (count > 1 ? 's' : ''),
+      body: count === 1 ? '1 buyer just went overdue.' : `${count} buyers just went overdue.`,
+      url: '/#/payments?tab=overdue',
+    })));
+
   return data?.length || 0;
 }
 

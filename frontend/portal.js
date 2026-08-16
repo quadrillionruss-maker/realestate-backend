@@ -48,6 +48,14 @@
   var fragmentToken = (/[#&]token=([^&]+)/.exec(window.location.hash) || [])[1] || '';
   var token = fragmentToken || session(STORE_KEY) || '';
 
+  // SECTION 18 — portal.html#survey. Same fragment as the token (a survey
+  // link is always the token PLUS this, never sent bare) — read alongside
+  // it at the top, same "never transmitted to a server" reasoning the
+  // token's own comment already gives, since a reservation id in a URL
+  // fragment carries no more exposure risk than the token sitting right
+  // next to it.
+  var surveyReservationId = (/[#&]survey=([^&]+)/.exec(window.location.hash) || [])[1] || '';
+
   if (fragmentToken) {
     session(STORE_KEY, fragmentToken);
     try {
@@ -224,6 +232,92 @@
       '</div></div>';
   }
 
+  // SECTION 18 — three star ratings + an open comment, submitted once. A
+  // reservation not in account.reservations (a stale/forwarded link, or one
+  // for a different buyer entirely) reads as a plain "link not valid"
+  // rather than confirming a reservation id exists at all.
+  var SURVEY_QUESTIONS = [
+    ['overall_score', 'Overall, how was your experience with us?'],
+    ['construction_quality_score', 'How would you rate the construction quality?'],
+    ['sales_experience_score', 'How would you rate your experience with our sales team?'],
+  ];
+
+  function starRatingHtml(fieldName) {
+    var stars = '';
+    for (var i = 1; i <= 5; i++) {
+      stars += '<button type="button" class="star-btn" data-star-field="' + fieldName + '" data-star-value="' + i + '" aria-label="' + i + ' star' + (i > 1 ? 's' : '') + '">★</button>';
+    }
+    return '<div class="star-row" data-star-group="' + fieldName + '">' + stars + '</div>';
+  }
+
+  function renderSurvey(account, reservationId) {
+    var reservation = account.reservations.filter(function (r) { return r.id === reservationId; })[0];
+    if (!reservation) {
+      return fail('This survey link is not valid', 'It may be for a different account, or the link is incomplete.');
+    }
+
+    var unit = reservation.re_units || {};
+    var project = unit.re_projects || {};
+    var context = [project.name, unit.unit_number ? 'Unit ' + unit.unit_number : ''].filter(Boolean).map(esc).join(' · ');
+
+    el('portal-view').innerHTML =
+      '<div class="card"><div class="card-body">' +
+        '<div class="serif portal-empty-title mb-1">How was your experience?</div>' +
+        (context ? '<p class="muted fs-13-5 mb-2">' + context + '</p>' : '') +
+        SURVEY_QUESTIONS.map(function (q) {
+          return '<div class="field mb-2"><label>' + esc(q[1]) + '</label>' + starRatingHtml(q[0]) + '</div>';
+        }).join('') +
+        '<div class="field mb-2"><label for="survey-comments">Anything else you would like to share? (optional)</label>' +
+          '<textarea class="textarea" id="survey-comments" rows="3"></textarea></div>' +
+        '<button class="btn primary" type="button" id="survey-submit">Submit</button>' +
+        '<p class="field-error hidden" id="survey-error" role="alert"></p>' +
+      '</div></div>';
+
+    var scores = {};
+    document.querySelectorAll('[data-star-field]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var field = button.dataset.starField;
+        var value = Number(button.dataset.starValue);
+        scores[field] = value;
+        var group = document.querySelector('[data-star-group="' + field + '"]');
+        group.querySelectorAll('[data-star-field]').forEach(function (b) {
+          b.classList.toggle('is-filled', Number(b.dataset.starValue) <= value);
+        });
+      });
+    });
+
+    el('survey-submit').addEventListener('click', async function () {
+      var button = el('survey-submit');
+      button.disabled = true;
+      button.classList.add('is-working');
+      var errorEl = el('survey-error');
+      errorEl.classList.add('hidden');
+
+      try {
+        await api('/survey/' + reservationId, {
+          method: 'POST',
+          body: JSON.stringify({
+            overall_score: scores.overall_score || null,
+            construction_quality_score: scores.construction_quality_score || null,
+            sales_experience_score: scores.sales_experience_score || null,
+            comments: el('survey-comments').value.trim() || null,
+          }),
+        });
+        el('portal-view').innerHTML =
+          '<div class="card"><div class="card-body portal-empty-body">' +
+            '<div class="portal-empty-icon">◇</div>' +
+            '<div class="serif portal-empty-title">Thank you</div>' +
+            '<p class="muted fs-13-5 lh-loose">Your feedback has been recorded.</p>' +
+          '</div></div>';
+      } catch (err) {
+        errorEl.textContent = err.message;
+        errorEl.classList.remove('hidden');
+        button.disabled = false;
+        button.classList.remove('is-working');
+      }
+    });
+  }
+
   async function load() {
     if (!API_BASE) {
       return fail('This page could not start up', 'A configuration file did not load. Please refresh, or ask your developer to send the link again.');
@@ -251,6 +345,16 @@
       account = await api('/me');
     } catch (err) {
       return fail(err.message);
+    }
+
+    // SECTION 18 — the whole page becomes the survey when this fragment is
+    // present, rather than one more card jammed into the normal scroll: a
+    // buyer who was texted a survey link is answering ONE question set, not
+    // browsing their account. renderSurvey checks the reservation actually
+    // belongs to this buyer itself (account.reservations, already scoped to
+    // them by GET /portal/me) before showing anything.
+    if (surveyReservationId) {
+      return renderSurvey(account, surveyReservationId);
     }
 
     // Never blocks the page — a buyer's balance and schedule matter far more
@@ -470,6 +574,10 @@
             '<div class="card-head"><div class="card-title">Community</div></div>' +
             '<div class="card-body">' +
               '<div id="community-thread"><p class="page-sub">Loading…</p></div>' +
+              // SECTION 19 — "below the posts", inside the same card: this
+              // motivates posting/referring in the same breath the buyer is
+              // already reading the community, not a separate destination.
+              '<div id="community-referrers" class="mt-2"></div>' +
               '<div class="field mt-2"><textarea class="input" id="community-post-input" rows="2" maxlength="500" placeholder="Share something with other buyers in this project"></textarea></div>' +
               '<button class="btn brass" id="btn-post-community">Post</button>' +
             '</div>' +
@@ -479,8 +587,115 @@
     applyDynamicStyles(el('portal-view'));
     wire();
     if (account.reservations.length) loadMessages(account.reservations[0].id);
-    if (activeProjectId) loadCommunity();
+    if (activeProjectId) { loadCommunity(); loadReferralLeaderboard(); }
     if (justPaidSchedule) watchForConfirmation(account);
+
+    // SECTION 20 — needs a reservation id the same way Messages does (there
+    // is no picker on this single-column page — see that section's own
+    // comment for why the first reservation stands in for "this account").
+    if (account.reservations.length) {
+      activeReservationId = activeReservationId || account.reservations[0].id;
+      el('btn-portal-notifications').classList.remove('hidden');
+      wirePortalBell();
+      refreshPortalNotifBell();
+    }
+  }
+
+  // SECTION 20 — the portal bell. Same shape as the staff-side one
+  // (realestate.js's refreshNotifBell/openNotifDropdown) but its own copy:
+  // this file shares nothing else with the operator app's JS, per this
+  // file's own header comment, so duplicating a hundred lines here is more
+  // in keeping with that boundary than reaching across to reuse it.
+  var portalNotifItems = [];
+  var portalNotifDropdownOpen = false;
+
+  async function refreshPortalNotifBell() {
+    var badge = el('portal-notif-count');
+    if (!badge || !activeReservationId) return;
+    try {
+      var result = await api('/notifications/' + activeReservationId);
+      portalNotifItems = result.items;
+      badge.textContent = result.unread_count > 9 ? '9+' : String(result.unread_count);
+      badge.classList.toggle('hidden', !result.unread_count);
+    } catch (err) { /* the bell degrades quietly — it is not core account functionality */ }
+  }
+
+  function closePortalNotifDropdown() {
+    var dropdown = el('portal-notif-dropdown');
+    if (dropdown) dropdown.classList.add('hidden');
+    portalNotifDropdownOpen = false;
+    document.removeEventListener('mousedown', onPortalNotifDocClick);
+  }
+
+  function onPortalNotifDocClick(e) {
+    var dropdown = el('portal-notif-dropdown');
+    var button = el('btn-portal-notifications');
+    if (dropdown && !dropdown.contains(e.target) && button && !button.contains(e.target)) closePortalNotifDropdown();
+  }
+
+  function openPortalNotifDropdown() {
+    var dropdown = el('portal-notif-dropdown');
+    if (!dropdown) return;
+    dropdown.innerHTML = portalNotifItems.length
+      ? portalNotifItems.map(function (n) {
+          return '<button class="notif-row' + (n.read_at ? '' : ' is-unread') + '" data-portal-notif-id="' + esc(n.id) + '" data-portal-notif-type="' + esc(n.type) + '">' +
+            '<div class="notif-title">' + esc(n.title) + '</div>' +
+            (n.body ? '<div class="notif-body">' + esc(n.body) + '</div>' : '') +
+          '</button>';
+        }).join('')
+      : '<div class="notif-row"><div class="notif-body">Nothing yet.</div></div>';
+    dropdown.classList.remove('hidden');
+    portalNotifDropdownOpen = true;
+
+    document.querySelectorAll('[data-portal-notif-id]').forEach(function (row) {
+      row.addEventListener('click', async function () {
+        closePortalNotifDropdown();
+        var id = row.dataset.portalNotifId;
+        try { await api('/notifications/' + activeReservationId + '/' + id + '/read', { method: 'POST' }); } catch (e) { /* not worth blocking navigation over */ }
+        refreshPortalNotifBell();
+        // SECTION 20 — "navigate to the relevant section": each type maps
+        // to the one card already on this single-column page that answers
+        // it, scrolled into view rather than a route change (there is no
+        // router on this page — see this file's own header).
+        var targetId = { payment_recorded: null, document_ready: null,
+          hardship_approved: null, message_received: 'message-thread', developer_update: 'community-thread' }[row.dataset.portalNotifType];
+        var target = targetId ? el(targetId) : null;
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+
+    setTimeout(function () { document.addEventListener('mousedown', onPortalNotifDocClick); }, 0);
+  }
+
+  function wirePortalBell() {
+    var button = el('btn-portal-notifications');
+    if (!button || button.dataset.wired) return;
+    button.dataset.wired = 'true';
+    button.addEventListener('click', function () {
+      if (portalNotifDropdownOpen) closePortalNotifDropdown();
+      else openPortalNotifDropdown();
+    });
+  }
+
+  var REFERRAL_MEDALS = ['🥇', '🥈', '🥉'];
+
+  async function loadReferralLeaderboard() {
+    var host = el('community-referrers');
+    if (!host) return;
+    try {
+      var leaders = await api('/community/' + activeProjectId + '/referral-leaderboard');
+      host.innerHTML = leaders.length
+        ? '<div class="page-sub label-caps mb-1">Top referrers</div>' +
+          leaders.map(function (l, i) {
+            return '<div class="flex-row justify-between gap-10 mb-1">' +
+              '<span>' + (i < 3 ? REFERRAL_MEDALS[i] + ' ' : (i + 1) + '. ') + esc(l.first_name) + '</span>' +
+              '<span class="muted">' + l.referral_count + ' referral' + (l.referral_count === 1 ? '' : 's') + '</span>' +
+            '</div>';
+          }).join('')
+        : '';
+    } catch (err) {
+      host.innerHTML = ''; // quietly absent rather than an error box under the posts — this is a motivational extra, not core functionality
+    }
   }
 
   var activeReservationId = null;

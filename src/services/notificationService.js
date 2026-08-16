@@ -23,6 +23,7 @@ const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { escapeHtml } = require('../utils/escapeHtml');
 const { decrypt } = require('../utils/credentials');
+const featureUsage = require('./featureUsageService');
 
 const RESEND_URL = 'https://api.resend.com/emails';
 const TERMII_URL = 'https://api.ng.termii.com/api/sms/send';
@@ -465,6 +466,7 @@ async function sendWhatsApp({ orgId, to, body, template = null, relatedType = nu
     }
 
     await record({ ...base, status: 'sent', provider_id: json?.messages?.[0]?.id || null });
+    featureUsage.track(orgId, 'whatsapp_sent');
     return { status: 'sent', id: json?.messages?.[0]?.id || null };
   } catch (err) {
     await record({ ...base, status: 'failed', error: err.message });
@@ -528,6 +530,7 @@ async function sendWhatsAppDocument({ orgId, to, mediaUrl, filename, caption = n
     }
 
     await record({ ...base, status: 'sent', provider_id: json?.messages?.[0]?.id || null });
+    featureUsage.track(orgId, 'whatsapp_sent');
     return { status: 'sent', id: json?.messages?.[0]?.id || null };
   } catch (err) {
     await record({ ...base, status: 'failed', error: err.message });
@@ -585,6 +588,52 @@ function emailShell({ heading, intro, rows = [], body = '', ctaLabel, ctaUrl, fo
 </body></html>`;
 }
 
+// SECTION 14 — customizable email content. The five types a workspace may
+// override: receipt, portal_link, document_ready (all three actually wired
+// into a live send below/at their call sites), plus overdue_reminder and
+// welcome (configurable in Settings so a developer can prepare them ahead
+// of time, but not yet wired to an automatic send — see routes/settings.js
+// for why: the existing buyer-facing overdue channel is SMS by deliberate
+// design, and this deployment's registration flow sends no email at all on
+// purpose, per CLAUDE.md's "Sign-up and sign-in").
+const EMAIL_TEMPLATE_TYPES = ['receipt', 'portal_link', 'overdue_reminder', 'document_ready', 'welcome'];
+
+// {{key}} tokens only — anything not present in `variables` is left exactly
+// as written rather than blanked, so a typo'd variable name in a saved
+// template reads as "this didn't substitute" instead of silently vanishing.
+// escape:false for the subject line (plain text, not HTML — escaping an
+// apostrophe in a buyer's name would print the literal entity in an inbox);
+// escape:true for the HTML body, the same reasoning every other buyer-name
+// interpolation in this codebase already escapes for.
+function substituteTemplateVariables(text, variables, { escape } = { escape: true }) {
+  return String(text || '').replace(/\{\{\s*(\w+)\s*\}\}/g, (match, key) => {
+    if (!Object.prototype.hasOwnProperty.call(variables, key)) return match;
+    const value = String(variables[key] ?? '');
+    return escape ? escapeHtml(value) : value;
+  });
+}
+
+// Callers keep building their own default subject/html exactly as before
+// (the `fallback` argument) — this only checks whether the workspace has
+// SAVED its own template for this type and, if so, substitutes `variables`
+// into IT instead. A workspace that never opens Settings → Email templates
+// keeps getting the exact built-in email it always has.
+async function resolveEmailContent(orgId, templateType, variables, fallback) {
+  const { data: custom } = await supabaseAdmin
+    .from('re_email_templates')
+    .select('subject, body_html')
+    .eq('organization_id', orgId)
+    .eq('template_type', templateType)
+    .maybeSingle();
+
+  if (!custom) return fallback;
+
+  return {
+    subject: substituteTemplateVariables(custom.subject, variables, { escape: false }),
+    html: substituteTemplateVariables(custom.body_html, variables, { escape: true }),
+  };
+}
+
 module.exports = {
   sendEmail,
   sendSms,
@@ -599,4 +648,8 @@ module.exports = {
   normalizeNigerianPhone,
   naira,
   stripTags,
+  // SECTION 14
+  EMAIL_TEMPLATE_TYPES,
+  substituteTemplateVariables,
+  resolveEmailContent,
 };

@@ -39,9 +39,12 @@
 </style>
 </head>
 <body>
+  <!-- SECTION 5 — HEADER_BLOCK is either the default company name + logo
+       below, or a workspace's own header_html override
+       (receiptService.buildReceiptHtml/re_receipt_templates), rendered
+       as-is in exactly this position. -->
   <div class="letterhead">
-    <div class="company">{{COMPANY_NAME}}</div>
-    {{LOGO_BLOCK}}
+    {{HEADER_BLOCK}}
   </div>
 
   <h1>Official Payment Receipt</h1>
@@ -83,6 +86,9 @@
     <div class="signature-line">Official Stamp</div>
   </div>
 
-  <div class="fineprint">{{FINEPRINT}}</div>
+  <!-- SECTION 5 — FOOTER_BLOCK, same override shape as HEADER_BLOCK above:
+       a workspace's own footer_html, or the default disclaimer/contact
+       line below. -->
+  <div class="fineprint">{{FOOTER_BLOCK}}</div>
 </body>
 </html>

@@ -9,6 +9,7 @@
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { audit, auditSystem } = require('./auditService');
 const notify = require('./notificationService');
+const portalNotifications = require('./portalNotificationService');
 
 async function listForCustomer(orgId, customerId) {
   const { data, error } = await supabaseAdmin
@@ -148,6 +149,12 @@ async function sendFromStaff(req, customer, message) {
       relatedId: customer.id,
     });
   }
+
+  // SECTION 20 — the portal bell, independent of whether WhatsApp is even
+  // configured for this workspace (unlike the send above, which only fires
+  // when there's a phone on file).
+  await portalNotifications.notify(req.orgId, customer.id, 'message_received',
+    'New reply from your developer', trimmed.slice(0, 200));
 
   return data;
 }

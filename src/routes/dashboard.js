@@ -5,6 +5,7 @@ const { lagosToday } = require('../services/overdueService');
 const { describeStage, isAtRisk } = require('../services/escalationService');
 const { canAccess } = require('../services/permissions');
 const projectHealth = require('../services/projectHealthService');
+const onboarding = require('../services/onboardingService');
 const router = express.Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -319,6 +320,15 @@ router.get('/at-risk', requirePermission('atRisk.read'), async (req, res, next) 
         const brokenDiff = Number(b.promise?.status === 'broken') - Number(a.promise?.status === 'broken');
         return brokenDiff || b.overdue_amount - a.overdue_amount;
       }));
+  } catch (e) { next(e); }
+});
+
+// SECTION 23 — the workspace's own setup checklist, same permission gate as
+// the main dashboard: every role that may see the dashboard may see how
+// finished the workspace's own setup is.
+router.get('/onboarding', requirePermission('dashboard.read'), async (req, res, next) => {
+  try {
+    res.json(await onboarding.checklist(req.orgId));
   } catch (e) { next(e); }
 });
 

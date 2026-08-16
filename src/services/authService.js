@@ -21,8 +21,10 @@
 
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
+const speakeasy = require('speakeasy');
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { encrypt, decrypt } = require('../utils/credentials');
 
 // Cost parameters — OWASP's current scrypt minimum (N=2^16, r=8, p=1) or
 // stronger; p=2 here for extra resistance to parallel (GPU/ASIC) attack
@@ -234,7 +236,7 @@ async function findUserByEmail(email) {
   // should.
   const { data, error } = await supabaseAdmin
     .from('users')
-    .select(`${PUBLIC_USER_COLUMNS}, password_hash, google_sub, email_verified_at, failed_login_count, locked_until`)
+    .select(`${PUBLIC_USER_COLUMNS}, password_hash, google_sub, email_verified_at, failed_login_count, locked_until, totp_enabled`)
     .eq('email', normalizeEmail(email))
     .maybeSingle();
   if (error) throw error;
@@ -327,6 +329,19 @@ async function login({ email, password }) {
     throw unauthorized('Incorrect email or password.');
   }
 
+  // SECTION 2 — 2FA, checked BEFORE last_login_at/lockout are cleared below:
+  // the password just verified is real, but the session is not fully
+  // established until the second factor does too, so this account's
+  // "successful login" bookkeeping waits for loginWithTotp to do it instead.
+  // A short-lived, narrow-purpose token stands in for the real session in
+  // the meantime — aud:'re-2fa-pending' means src/middleware/auth.js
+  // rejects it outright against every real /api/re/* route, the same
+  // boundary a buyer-portal token already relies on (see
+  // portalService.js's own comment on aud:'re-portal').
+  if (user.totp_enabled) {
+    return { requires_2fa: true, partial_token: issue2faPendingToken(user) };
+  }
+
   await supabaseAdmin
     .from('users')
     .update({ last_login_at: new Date().toISOString(), failed_login_count: 0, locked_until: null })
@@ -335,6 +350,183 @@ async function login({ email, password }) {
   // email_verified_at is read here only for accounts that predate this
   // deployment's removal of the verification gate — nothing in the app
   // branches on it any more, but it stays true to what the column says.
+  return {
+    token: issueToken(user),
+    user: publicUser(user),
+    email_verified: Boolean(user.email_verified_at),
+  };
+}
+
+// ── Two-factor authentication (SECTION 2) ───────────────────────────────────
+// Owner role only — enforced by routes/auth.js at setup/verify/disable time
+// (permissions.js has no per-account, cross-workspace notion of "owner" to
+// check here), not by anything in this file. Once enabled, totp_enabled is
+// an ACCOUNT property, not a per-workspace one — it protects the person
+// signing in, independent of which workspace they are about to select.
+const TOTP_PENDING_AUDIENCE = 're-2fa-pending';
+const TOTP_PENDING_TTL = '5m';
+const TOTP_ISSUER = 'Archta';
+const BACKUP_CODE_COUNT = 8;
+
+function issue2faPendingToken(user) {
+  return jwt.sign({ id: user.id }, env.jwt.secret, {
+    algorithm: 'HS256',
+    audience: TOTP_PENDING_AUDIENCE,
+    expiresIn: TOTP_PENDING_TTL,
+  });
+}
+
+function verify2faPendingToken(token) {
+  try {
+    return jwt.verify(token, env.jwt.secret, { algorithms: ['HS256'], audience: TOTP_PENDING_AUDIENCE });
+  } catch (err) {
+    throw unauthorized(err.name === 'TokenExpiredError'
+      ? 'That took too long. Sign in again.'
+      : 'This 2FA session is not valid. Sign in again.');
+  }
+}
+
+// XXXXX-XXXXX, uppercase hex — easy to read back off a screen once, easy to
+// type once. Never shown again after verifyTotpSetup returns them.
+function generateBackupCodes() {
+  return Array.from({ length: BACKUP_CODE_COUNT }, () => {
+    const raw = crypto.randomBytes(5).toString('hex').toUpperCase();
+    return `${raw.slice(0, 5)}-${raw.slice(5, 10)}`;
+  });
+}
+
+// Generates a NEW secret and stores it encrypted, but leaves totp_enabled
+// false — 2FA only actually turns on once verifyTotpSetup below confirms
+// the owner scanned it correctly. Calling this again before verifying just
+// replaces the pending secret; nothing is enabled by this step alone.
+async function setupTotp(userId, email) {
+  const secret = speakeasy.generateSecret({ length: 20, name: `${TOTP_ISSUER} (${email})`, issuer: TOTP_ISSUER });
+
+  const { error } = await supabaseAdmin
+    .from('users')
+    .update({ totp_secret_encrypted: encrypt(secret.base32), totp_enabled: false, totp_backup_codes: [] })
+    .eq('id', userId);
+  if (error) throw error;
+
+  return { secret: secret.base32, otpauth_url: secret.otpauth_url };
+}
+
+// Confirms enrollment. Only once the code verifies against the PENDING
+// secret setupTotp just stored does 2FA actually turn on and backup codes
+// get minted — generating working bypass codes for a secret nobody has
+// confirmed they can actually read yet would be backwards.
+async function verifyTotpSetup(userId, code) {
+  const { data: user, error } = await supabaseAdmin
+    .from('users')
+    .select('totp_secret_encrypted')
+    .eq('id', userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!user?.totp_secret_encrypted) {
+    throw badRequest('No 2FA setup is in progress. Start setup again.');
+  }
+
+  const secret = decrypt(user.totp_secret_encrypted);
+  const valid = speakeasy.totp.verify({ secret, encoding: 'base32', token: String(code || '').trim(), window: 1 });
+  if (!valid) throw badRequest('That code is not correct. Check your authenticator app and try again.');
+
+  const backupCodes = generateBackupCodes();
+  const hashedCodes = await Promise.all(backupCodes.map((c) => hashPassword(c)));
+
+  const { error: enableError } = await supabaseAdmin
+    .from('users')
+    .update({ totp_enabled: true, totp_backup_codes: hashedCodes })
+    .eq('id', userId);
+  if (enableError) throw enableError;
+
+  return { backup_codes: backupCodes };
+}
+
+// Shared by disableTotp and loginWithTotp below. Tries a real TOTP code
+// first, then falls back to matching (and reporting the index of) a backup
+// code — the two live in different columns but read as one "prove you
+// still hold the second factor" check to every caller.
+async function verifyTotpOrBackupCode(user, code) {
+  const trimmed = String(code || '').trim();
+  if (!trimmed) return { valid: false, usedBackupCode: null };
+
+  if (user.totp_secret_encrypted) {
+    const secret = decrypt(user.totp_secret_encrypted);
+    if (speakeasy.totp.verify({ secret, encoding: 'base32', token: trimmed, window: 1 })) {
+      return { valid: true, usedBackupCode: null };
+    }
+  }
+
+  const codes = Array.isArray(user.totp_backup_codes) ? user.totp_backup_codes : [];
+  for (let i = 0; i < codes.length; i += 1) {
+    // codes.length is 8 at most — a plain sequential loop, not worth the
+    // ceremony of mapWithConcurrency for eight scrypt comparisons.
+    if (await verifyPassword(trimmed, codes[i])) {
+      return { valid: true, usedBackupCode: i };
+    }
+  }
+  return { valid: false, usedBackupCode: null };
+}
+
+// Requires the current password AND a valid code — disabling 2FA removes
+// the account's second factor entirely, so it needs proof of both factors,
+// the same reasoning PATCH /auth/me already requires current_password to
+// change an email or password.
+async function disableTotp(userId, { currentPassword, code }) {
+  const { data: user, error } = await supabaseAdmin
+    .from('users')
+    .select('password_hash, totp_secret_encrypted, totp_backup_codes')
+    .eq('id', userId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!user) throw unauthorized('Account not found.');
+
+  if (user.password_hash && !(await verifyPassword(currentPassword, user.password_hash))) {
+    throw unauthorized('Current password is incorrect.');
+  }
+
+  const result = await verifyTotpOrBackupCode(user, code);
+  if (!result.valid) throw badRequest('That code is not correct.');
+
+  const { error: disableError } = await supabaseAdmin
+    .from('users')
+    .update({ totp_enabled: false, totp_secret_encrypted: null, totp_backup_codes: [] })
+    .eq('id', userId);
+  if (disableError) throw disableError;
+}
+
+// The second step of login, after login() above has already answered
+// requires_2fa: true. partialToken is what that response handed back;
+// exchanging it here for a real session token is exactly what a normal
+// login() call would have returned had 2FA not been in the way.
+async function loginWithTotp({ partialToken, code }) {
+  const claims = verify2faPendingToken(partialToken);
+
+  const { data: user, error } = await supabaseAdmin
+    .from('users')
+    .select(`${PUBLIC_USER_COLUMNS}, totp_secret_encrypted, totp_backup_codes, totp_enabled, email_verified_at`)
+    .eq('id', claims.id)
+    .maybeSingle();
+  if (error) throw error;
+  if (!user || !user.totp_enabled) throw unauthorized('2FA is not enabled on this account.');
+
+  const result = await verifyTotpOrBackupCode(user, code);
+  if (!result.valid) throw unauthorized('That code is not correct.');
+
+  // A used backup code is burned immediately — single-use by design, the
+  // same reasoning a payment promise or an invite token is consumed the
+  // moment it is acted on elsewhere in this codebase.
+  if (result.usedBackupCode !== null) {
+    const remaining = user.totp_backup_codes.slice();
+    remaining.splice(result.usedBackupCode, 1);
+    await supabaseAdmin.from('users').update({ totp_backup_codes: remaining }).eq('id', user.id);
+  }
+
+  await supabaseAdmin
+    .from('users')
+    .update({ last_login_at: new Date().toISOString(), failed_login_count: 0, locked_until: null })
+    .eq('id', user.id);
+
   return {
     token: issueToken(user),
     user: publicUser(user),
@@ -551,4 +743,9 @@ module.exports = {
   assertValidEmail,
   verifyGoogleIdToken,
   MIN_PASSWORD_LENGTH,
+  // SECTION 2
+  setupTotp,
+  verifyTotpSetup,
+  disableTotp,
+  loginWithTotp,
 };

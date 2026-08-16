@@ -15,7 +15,7 @@
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { lagosToday } = require('./overdueService');
-const { tier: creditTier } = require('./creditScoreService');
+const { tier: creditTier, assessDefaultRisk } = require('./creditScoreService');
 const { STAGES } = require('./escalationService');
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
@@ -26,6 +26,7 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 // with a perfect record and nothing overdue is not a "risk" worth asking a
 // model to rank.
 const MAX_RISK_CANDIDATES = 25;
+const RISK_RANK = { high: 0, medium: 1, low: 2 };
 
 const round2 = (value) => Math.round(Number(value) * 100) / 100;
 const asArray = (value) => (Array.isArray(value) ? value : value ? [value] : []);
@@ -247,25 +248,37 @@ async function gatherForecastState(orgId) {
         if (idx > worstStageIndex) worstStageIndex = idx;
       }
       const worstStage = STAGES[worstStageIndex]?.key || 'none';
+      const tierKey = creditTier(c.credit_score).key;
       return {
         id: c.id,
         full_name: c.full_name,
         credit_score: c.credit_score,
-        tier: creditTier(c.credit_score).key,
+        tier: tierKey,
+        // OVERRIDE — a stored credit_score can lag a buyer's most recent
+        // overdue installments (see creditScoreService.assessDefaultRisk's
+        // own comment for why). Computed here, not left to whichever
+        // consumer reads risk_candidates next, so the model prompt and the
+        // deterministic fallback both see the same signal.
+        risk_level: assessDefaultRisk(overdue.count, tierKey),
         overdue_count: overdue.count,
         overdue_amount: overdue.amount,
         escalation_stage: worstStage,
       };
     })
     .filter((c) => c.credit_score < 80 || c.overdue_count > 0)
-    // Worst first — lowest score, then most overdue — so truncating to
-    // MAX_RISK_CANDIDATES never drops someone more at-risk than someone kept.
-    .sort((a, b) => a.credit_score - b.credit_score || b.overdue_amount - a.overdue_amount)
+    // Worst first: high-risk-override candidates before anyone else, then
+    // lowest score, then most overdue amount — so truncating to
+    // MAX_RISK_CANDIDATES never drops someone more at-risk than someone
+    // kept, even when their stored score hasn't caught up to their overdue
+    // installments yet.
+    .sort((a, b) => RISK_RANK[a.risk_level] - RISK_RANK[b.risk_level]
+      || a.credit_score - b.credit_score || b.overdue_amount - a.overdue_amount)
     .slice(0, MAX_RISK_CANDIDATES)
     .map((c) => ({
       customer_ref: refForCustomer(c.id, c.full_name),
       credit_score: c.credit_score,
       tier: c.tier,
+      risk_level: c.risk_level,
       overdue_installments: c.overdue_count,
       overdue_amount: c.overdue_amount,
       escalation_stage: c.escalation_stage,
@@ -323,12 +336,24 @@ function buildFallbackForecast(state) {
         ? `At the last 6 months' average of ₦${p.avg_monthly_collection_last_6mo.toLocaleString('en-NG')}/month against a ₦${p.remaining_balance.toLocaleString('en-NG')} remaining balance.`
         : 'No collections in the last 6 months to project a rate from.',
     })),
-    default_risks: state.risk_candidates.slice(0, 5).map((c) => ({
-      customer_ref: c.customer_ref,
-      risk_reason: c.overdue_installments > 0
-        ? `${c.overdue_installments} installment(s) currently overdue totalling ₦${c.overdue_amount.toLocaleString('en-NG')}; credit score ${c.credit_score} (${c.tier}).`
-        : `Credit score ${c.credit_score} (${c.tier}), no installments currently overdue.`,
-    })),
+    default_risks: state.risk_candidates.slice(0, 5).map((c) => {
+      // THE BUG — this text used to read the stored credit_score/tier
+      // uncritically, so a buyer with a dozen-plus overdue installments but
+      // a score that had not yet been recomputed (see overdueService's own
+      // fix) could come out "credit score 100 (Excellent)" right next to a
+      // list of the very installments they missed. risk_level is the
+      // override: it is HIGH the moment overdue_installments crosses
+      // OVERDUE_RISK_OVERRIDE_THRESHOLD, independent of what the score says
+      // — see creditScoreService.assessDefaultRisk.
+      const riskLevel = c.risk_level || assessDefaultRisk(c.overdue_installments, c.tier);
+      const prefix = riskLevel === 'high' ? 'HIGH DEFAULT RISK — ' : '';
+      return {
+        customer_ref: c.customer_ref,
+        risk_reason: c.overdue_installments > 0
+          ? `${prefix}${c.overdue_installments} installment(s) currently overdue totalling ₦${c.overdue_amount.toLocaleString('en-NG')}; credit score ${c.credit_score} (${c.tier}).`
+          : `Credit score ${c.credit_score} (${c.tier}), no installments currently overdue.`,
+      };
+    }),
     recommended_actions: [
       state.overall.total_overdue_amount > 0
         ? `₦${state.overall.total_overdue_amount.toLocaleString('en-NG')} is currently overdue across the workspace — prioritize collections calls on the buyers above this week.`
@@ -391,7 +416,12 @@ async function requestForecastFromModel(state) {
             'in reasoning.\n\n' +
             'default_risks: choose up to 5 of the given risk_candidates most likely to default in the next 60 ' +
             'days, ranked worst first, using credit_score, overdue_installments/overdue_amount and ' +
-            'escalation_stage together — never pick a buyer not present in risk_candidates.\n\n' +
+            'escalation_stage together — never pick a buyer not present in risk_candidates. Each candidate ' +
+            'carries risk_level ("high"/"medium"/"low"), already computed to override a stale credit_score: a ' +
+            'buyer can show a high numeric score while several installments sit overdue underneath it, because ' +
+            'that score has not been recomputed since. Treat risk_level "high" as a real default risk and say so ' +
+            'plainly in risk_reason — never describe a risk_level "high" buyer as low-risk or "excellent" on the ' +
+            'strength of credit_score alone.\n\n' +
             'recommended_actions: concrete, prioritized steps a Nigerian sales/collections team could act on this ' +
             'week to accelerate collections, grounded in the actual numbers given.',
         },

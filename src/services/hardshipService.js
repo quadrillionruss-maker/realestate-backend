@@ -16,6 +16,9 @@ const { addMonthsUTC } = require('./installmentService');
 const { audit, auditSystem } = require('./auditService');
 const creditScore = require('./creditScoreService');
 const notify = require('./notificationService');
+const pushService = require('./pushService');
+const portalNotifications = require('./portalNotificationService');
+const featureUsage = require('./featureUsageService');
 
 const MIN_REASON_LENGTH = 20;
 const PAUSE_MONTHS_MAX = 3;
@@ -78,6 +81,19 @@ async function requestPause(customer, reservationId, { reason, pauseMonths }) {
     entityId: data.id,
     summary: `${customer.full_name} requested a ${months}-month payment pause from the buyer portal`,
     metadata: { reservation_id: reservationId, pause_months: months },
+  });
+
+  featureUsage.track(customer.organization_id, 'hardship_requested');
+
+  // SECTION 1 — push, owner only. requestPause is the buyer portal's only
+  // entry point into this table (requested_by_portal is hardcoded true
+  // above), so every hardship request that ever reaches here is exactly
+  // the event the spec means by "submitted".
+  const ownerIds = await pushService.resolveUserIdsByRole(customer.organization_id, ['owner']);
+  await pushService.notify(customer.organization_id, ownerIds, {
+    title: 'Payment pause requested',
+    body: `${customer.full_name || 'A buyer'} asked for a ${months}-month pause.`,
+    url: '/#/customers',
   });
 
   return data;
@@ -157,6 +173,14 @@ async function reviewRequest(req, hardshipId, decision) {
         + 'it is simply due later. Thank you for letting us know.',
     });
 
+    // SECTION 20 — the portal bell. Both outcomes (approved/denied) use the
+    // one 'hardship_approved' type the spec's own enum names — the title
+    // text is what actually distinguishes them for the buyer reading it.
+    if (customer?.id) {
+      await portalNotifications.notify(req.orgId, customer.id, 'hardship_approved',
+        'Your payment pause was approved', `${request.pause_months} month(s) — your schedule has been updated.`);
+    }
+
     return updated;
   }
 
@@ -183,6 +207,11 @@ async function reviewRequest(req, hardshipId, decision) {
       + `(reason given: "${request.reason}") and are not able to approve it at this time. `
       + 'Please contact us to discuss your options.',
   });
+
+  if (customer?.id) {
+    await portalNotifications.notify(req.orgId, customer.id, 'hardship_approved',
+      'Your payment pause request was reviewed', 'It was not approved this time. Contact us to discuss your options.');
+  }
 
   return updated;
 }

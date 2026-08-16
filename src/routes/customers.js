@@ -11,6 +11,41 @@ const referrals = require('../services/referralService');
 const messages = require('../services/messageService');
 const router = express.Router();
 
+// Shared by the single-buyer send (POST /:id/portal-link) and the bulk send
+// (POST /bulk-portal-link) — one place building this email so the two never
+// drift into slightly different wording for the same link.
+async function sendPortalLinkEmail(orgId, customer, url, settings) {
+  const defaultHtml = notify.emailShell({
+    heading: 'Your account is online',
+    intro: 'See what you have paid, what is next, and download your documents — any time, without calling the office.',
+    ctaLabel: 'Open my account',
+    ctaUrl: url,
+    footer: 'This link is personal to you. Do not forward it.',
+  });
+  const defaultSubject = `Your payment account with ${settings?.company_name || 'us'}`;
+
+  // SECTION 14 — a workspace's own portal_link template, if saved, wins.
+  const content = await notify.resolveEmailContent(orgId, 'portal_link', {
+    buyer_name: customer.full_name || '',
+    amount: '',
+    unit: '',
+    due_date: '',
+    portal_link: url,
+  }, { subject: defaultSubject, html: defaultHtml });
+
+  return notify.sendEmail({
+    orgId,
+    to: customer.email,
+    subject: content.subject,
+    html: content.html,
+    text: `View your payment account: ${url}`,
+    template: 'portal_link',
+    replyTo: settings?.reply_to_email || null,
+    relatedType: 're_customers',
+    relatedId: customer.id,
+  });
+}
+
 router.get('/', requirePermission('customers.read'), async (req, res, next) => {
   try {
     // Unbounded until now — a developer several years in has thousands of
@@ -70,7 +105,9 @@ router.get('/:id', requirePermission('customers.read'), async (req, res, next) =
           re_sales_reps(id, active, users(full_name, email)),
           re_units(unit_number, list_price, re_projects(name, location)),
           re_installment_plans(
-            id, total_amount, number_of_installments, frequency, start_date,
+            id, total_amount, number_of_installments, frequency, start_date, created_at,
+            status, superseded_by, restructured_at, restructure_reason,
+            original_total_amount, carried_amount_paid,
             re_installment_schedule(id, installment_number, due_date, amount_due, status, paid_at)
           )
         )`)
@@ -140,6 +177,11 @@ function stripFinancials(customer) {
       : [reservation.re_installment_plans].filter(Boolean);
     for (const plan of plans) {
       plan.total_amount = null;
+      // FEATURE — plan history tab surfaces these two alongside total_amount;
+      // same boundary, same reasoning: a naira figure, stripped rather than
+      // the plan itself omitted, so status/dates still show.
+      plan.original_total_amount = null;
+      plan.carried_amount_paid = null;
       for (const row of plan.re_installment_schedule || []) row.amount_due = null;
     }
   }
@@ -267,6 +309,65 @@ router.patch('/:id', requirePermission('customers.update'), async (req, res, nex
     const { data, error } = await query.select().maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'Customer not found' });
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
+// SECTION 7 — blacklist. Owner only (permissions.js's customers.blacklist).
+// Blacklisting an already-blacklisted buyer (or unblacklisting one who
+// isn't) is a no-op 200, not a 409 — the caller asked for a STATE, not a
+// transition, and a double-click on the button must not error.
+router.post('/:id/blacklist', requirePermission('customers.blacklist'), async (req, res, next) => {
+  try {
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason) return res.status(400).json({ error: 'A reason is required to blacklist a buyer.' });
+
+    const { data, error } = await supabaseAdmin
+      .from('re_customers')
+      .update({
+        blacklisted: true,
+        blacklist_reason: reason,
+        blacklisted_at: new Date().toISOString(),
+        blacklisted_by: req.userId,
+      })
+      .eq('id', req.params.id)
+      .eq('organization_id', req.orgId)
+      .select('id, full_name, blacklisted, blacklist_reason, blacklisted_at')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Customer not found' });
+
+    audit(req, {
+      action: 'customer.blacklisted',
+      entityType: 're_customers',
+      entityId: data.id,
+      summary: `${data.full_name || 'Buyer'} blacklisted — ${reason}`,
+      metadata: { reason },
+    });
+
+    res.json(data);
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/unblacklist', requirePermission('customers.blacklist'), async (req, res, next) => {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('re_customers')
+      .update({ blacklisted: false, blacklist_reason: null, blacklisted_at: null, blacklisted_by: null })
+      .eq('id', req.params.id)
+      .eq('organization_id', req.orgId)
+      .select('id, full_name, blacklisted')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Customer not found' });
+
+    audit(req, {
+      action: 'customer.unblacklisted',
+      entityType: 're_customers',
+      entityId: data.id,
+      summary: `${data.full_name || 'Buyer'} unblacklisted`,
+    });
+
     res.json(data);
   } catch (e) { next(e); }
 });
@@ -475,24 +576,7 @@ router.post('/:id/portal-link', requirePermission('customers.portalAccess'), asy
       const { data: settings } = await supabaseAdmin
         .from('re_org_settings').select('company_name, reply_to_email')
         .eq('organization_id', req.orgId).maybeSingle();
-
-      const result = await notify.sendEmail({
-        orgId: req.orgId,
-        to: customer.email,
-        subject: `Your payment account with ${settings?.company_name || 'us'}`,
-        html: notify.emailShell({
-          heading: 'Your account is online',
-          intro: 'See what you have paid, what is next, and download your documents — any time, without calling the office.',
-          ctaLabel: 'Open my account',
-          ctaUrl: url,
-          footer: 'This link is personal to you. Do not forward it.',
-        }),
-        text: `View your payment account: ${url}`,
-        template: 'portal_link',
-        replyTo: settings?.reply_to_email || null,
-        relatedType: 're_customers',
-        relatedId: customer.id,
-      });
+      const result = await sendPortalLinkEmail(req.orgId, customer, url, settings);
       emailed = result.status;
     }
 
@@ -505,6 +589,51 @@ router.post('/:id/portal-link', requirePermission('customers.portalAccess'), asy
     });
 
     res.json({ url, token, emailed, expires_in_days: require('../config/env').portal.tokenTtlDays });
+  } catch (e) { next(e); }
+});
+
+// SECTION 4 — bulk send. Owner + sales director only (permissions.js's
+// customers.bulkPortalLink) — narrower than the single-buyer send above
+// (customers.portalAccess, which a rep or collections officer also has):
+// emailing dozens of buyers in one click is a different, more consequential
+// decision than handing one buyer their own link, the same reasoning
+// audit.export sits narrower than audit.read.
+router.post('/bulk-portal-link', requirePermission('customers.bulkPortalLink'), async (req, res, next) => {
+  try {
+    const customerIds = Array.isArray(req.body?.customer_ids) ? req.body.customer_ids : [];
+    if (!customerIds.length) return res.status(400).json({ error: 'customer_ids is required.' });
+
+    const { data: customers, error } = await supabaseAdmin
+      .from('re_customers')
+      .select('id, organization_id, full_name, email, portal_token_version')
+      .eq('organization_id', req.orgId)
+      .in('id', customerIds);
+    if (error) throw error;
+
+    const { data: settings } = await supabaseAdmin
+      .from('re_org_settings').select('company_name, reply_to_email')
+      .eq('organization_id', req.orgId).maybeSingle();
+
+    let sent = 0;
+    let skippedNoEmail = 0;
+    for (const customer of customers || []) {
+      if (!customer.email) { skippedNoEmail += 1; continue; }
+
+      const token = issuePortalToken(customer);
+      const url = portalUrl(token);
+      const result = await sendPortalLinkEmail(req.orgId, customer, url, settings);
+      if (result.status === 'sent') sent += 1;
+
+      audit(req, {
+        action: 'portal.link_issued',
+        entityType: 're_customers',
+        entityId: customer.id,
+        summary: `Portal link issued for ${customer.full_name} — bulk send`,
+        metadata: { emailed: result.status },
+      });
+    }
+
+    res.json({ sent, skipped_no_email: skippedNoEmail, total: (customers || []).length });
   } catch (e) { next(e); }
 });
 

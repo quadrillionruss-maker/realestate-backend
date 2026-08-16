@@ -159,3 +159,44 @@ self.addEventListener('fetch', function (event) {
 
   // Everything else: no caching, straight through.
 });
+
+// SECTION 1 — browser push. The payload is exactly what pushService.js's
+// notify() sends: { title, body, url }. A malformed/empty payload (some
+// push services deliver an empty "wake up and check" ping with no data)
+// still shows something rather than silently doing nothing, which on some
+// platforms is what makes the browser start showing its own generic
+// "this site has been updated" notification instead.
+self.addEventListener('push', function (event) {
+  var data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (err) { data = {}; }
+
+  var title = data.title || 'Archta';
+  var options = {
+    body: data.body || '',
+    icon: './apple-touch-icon.png',
+    data: { url: data.url || './' },
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+// Focuses an already-open tab rather than always opening a new one — a
+// notification arriving while the app is already open in another tab
+// should not pile up duplicate tabs every time one is clicked.
+self.addEventListener('notificationclick', function (event) {
+  event.notification.close();
+  var url = (event.notification.data && event.notification.data.url) || './';
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (clientList) {
+      for (var i = 0; i < clientList.length; i++) {
+        var client = clientList[i];
+        if ('focus' in client) {
+          if ('navigate' in client) client.navigate(url);
+          return client.focus();
+        }
+      }
+      if (self.clients.openWindow) return self.clients.openWindow(url);
+    })
+  );
+});

@@ -11,6 +11,7 @@
 // reservation, payment or credit score.
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { audit, auditSystem } = require('./auditService');
+const featureUsage = require('./featureUsageService');
 
 const POST_MAX_LENGTH = 500;
 const REPLY_MAX_LENGTH = 300;
@@ -91,6 +92,8 @@ async function createPost(customer, projectId, content) {
     summary: `${customer.full_name} posted in the project community`,
     metadata: { project_id: projectId },
   });
+
+  featureUsage.track(customer.organization_id, 'community_posted');
 
   return { ...data, author_name: customer.full_name, replies: [] };
 }

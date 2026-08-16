@@ -8,9 +8,44 @@
 // The contract it produces is what orgContext consumes:
 //   req.user = { id, email, team_id, role }
 
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const env = require('../config/env');
 const { supabaseAdmin } = require('./orgContext');
+const { callerIp } = require('../services/auditService');
+
+// SECTION 3 — session visibility. Hashed, never the raw token: this table
+// is readable from GET /auth/sessions, and a token_hash is useless to
+// anyone without the original bearer token, where the token itself would
+// not be.
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// A short "Browser on OS" string, parsed once at session creation and never
+// re-parsed. Heuristic, not a real UA-parsing library — good enough for "is
+// this the session on my phone or my laptop", which is the whole job.
+function parseDeviceInfo(userAgent) {
+  const ua = String(userAgent || '');
+  if (!ua) return 'Unknown device';
+
+  let browser = 'Unknown browser';
+  if (/Edg\//.test(ua)) browser = 'Edge';
+  else if (/OPR\//.test(ua)) browser = 'Opera';
+  else if (/Chrome\//.test(ua) && !/Chromium/.test(ua)) browser = 'Chrome';
+  else if (/CriOS\//.test(ua)) browser = 'Chrome';
+  else if (/Firefox\//.test(ua)) browser = 'Firefox';
+  else if (/Version\/.*Safari\//.test(ua) || /Safari\//.test(ua)) browser = 'Safari';
+
+  let os = 'Unknown OS';
+  if (/Windows/.test(ua)) os = 'Windows';
+  else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
+  else if (/Mac OS X/.test(ua)) os = 'macOS';
+  else if (/Android/.test(ua)) os = 'Android';
+  else if (/Linux/.test(ua)) os = 'Linux';
+
+  return `${browser} on ${os}`;
+}
 
 async function authenticate(req, res, next) {
   const header = req.headers.authorization;
@@ -183,6 +218,60 @@ async function authenticate(req, res, next) {
     role = chosen.role;
   }
 
+  // SECTION 3 — session revocation. Checked BEFORE next() so a session
+  // ended from another tab/device (DELETE /auth/sessions/:id) stops working
+  // on its very next request, the same "a valid signature is not a live
+  // session" guarantee token_version already gives every token this user
+  // has ever held — this one just scopes to a single token instead of all
+  // of them.
+  const tokenHash = hashToken(token);
+  try {
+    const { data: session, error: sessionError } = await supabaseAdmin
+      .from('re_sessions')
+      .select('revoked_at')
+      .eq('token_hash', tokenHash)
+      .maybeSingle();
+
+    if (sessionError) {
+      // 42703/42P01 = migration 047 not yet applied — same fail-open shape
+      // as the token_version/team_members checks above for exactly the
+      // same reason: a database mid-deploy must not lock every user out.
+      if (sessionError.code !== '42703' && sessionError.code !== '42P01') {
+        console.error('[auth] session lookup failed, refusing the request:', sessionError.message);
+        return res.status(503).json({ success: false, error: 'Could not verify this session. Try again shortly.' });
+      }
+    } else if (session?.revoked_at) {
+      return res.status(401).json({ success: false, error: 'This session has been ended. Please sign in again.' });
+    } else {
+      // Fire-and-forget: never blocks the request, never fails it — a
+      // dropped write here costs one stale last_used_at, not a 500 on
+      // every single API call. device_info is only ever set on the INSERT
+      // branch (a device does not change mid-session); ip_address and
+      // last_used_at are refreshed every time regardless.
+      const orgIdForSession = teamId || userId;
+      supabaseAdmin
+        .from('re_sessions')
+        .upsert(
+          {
+            token_hash: tokenHash,
+            user_id: userId,
+            organization_id: orgIdForSession,
+            device_info: parseDeviceInfo(req.headers['user-agent']),
+            ip_address: callerIp(req),
+            last_used_at: new Date().toISOString(),
+          },
+          { onConflict: 'token_hash', ignoreDuplicates: false }
+        )
+        .then(
+          () => {},
+          (err) => console.warn('[auth] could not record session activity:', err.message)
+        );
+    }
+  } catch (err) {
+    console.error('[auth] session check threw, refusing the request:', err.message);
+    return res.status(503).json({ success: false, error: 'Could not verify this session. Try again shortly.' });
+  }
+
   req.user = {
     id: userId,
     email: decoded.email || null,
@@ -195,6 +284,10 @@ async function authenticate(req, res, next) {
     // unverified address. Set here so there is one users lookup, not two.
     email_verified_at: emailVerifiedAt,
   };
+  // SECTION 3 — so a route can identify (and revoke) THIS request's own
+  // session without the client ever having to know or send its id — see
+  // GET /auth/me's current_session_id and the sign-out flow that uses it.
+  req.tokenHash = tokenHash;
 
   next();
 }

@@ -133,6 +133,14 @@ const env = {
   storage: {
     documentsBucket: process.env.RE_DOCUMENTS_BUCKET || 're-documents',
     mediaBucket: process.env.RE_MEDIA_BUCKET || 're-media',
+    // Its own bucket rather than reusing documentsBucket (SECTION 25) — that
+    // bucket's allowedMimeTypes is a fixed list set at CREATE time on
+    // Supabase's side; a bucket already provisioned in production before
+    // this feature existed would keep rejecting a ZIP's content-type
+    // forever, no matter what this file says. A backup is also a full
+    // workspace export, not one document — worth its own bucket on that
+    // basis alone.
+    backupsBucket: process.env.RE_BACKUPS_BUCKET || 're-backups',
     // Provisioned directly in Supabase, not created by this app — unlike the
     // two buckets above, a missing public-assets bucket is a deploy-config
     // problem to surface, not one to silently paper over by creating it.
@@ -145,6 +153,10 @@ const env = {
     // The post-cutoff marking-only sweep — see overdueService for why the day
     // needs both a 07:00 and an 18:05 run.
     eveningSchedule: process.env.RE_EVENING_SWEEP_CRON || '5 18 * * *',
+    // SECTION 16 — how often scheduledMessageService.checkScheduledMessages
+    // runs. Hourly, not daily: a message scheduled for 2pm should not sit
+    // unsent until the next morning's brief run.
+    scheduledMessagesSchedule: process.env.RE_SCHEDULED_MESSAGES_CRON || '0 * * * *',
   },
 
   // 'core' | 'full' | '' — pdfAdapter picks by platform when this is unset;
@@ -164,6 +176,19 @@ const env = {
   // Whether this process serves frontend/ itself. Set false when the
   // frontend is deployed separately (Vercel) and this process is API-only.
   serveFrontend: process.env.SERVE_FRONTEND !== 'false',
+
+  // SECTION 1 — Web Push. Absent → push notifications are recorded
+  // 'skipped', same degrade shape as every other optional provider above.
+  // Generate a pair once with `npx web-push generate-vapid-keys` — the
+  // private key never leaves the server, the public one is handed to the
+  // browser's own PushManager.subscribe() call.
+  vapid: {
+    publicKey: process.env.VAPID_PUBLIC_KEY || '',
+    privateKey: process.env.VAPID_PRIVATE_KEY || '',
+    // web-push requires a contact URI (mailto: or https:) so a push service
+    // that needs to reach the sender about abuse has somewhere to go.
+    subject: process.env.VAPID_SUBJECT || 'mailto:support@archta.example',
+  },
 
   // Platform-operator access — every re_* table across every workspace, at
   // once, with no org filter. Not a user role: there is no user row and no
