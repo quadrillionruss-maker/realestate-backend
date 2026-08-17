@@ -80,12 +80,12 @@
          each other.
 
          The floor plan is the one exception, and it is handled completely
-         differently on purpose: archta_exact_reference.svg is not a vector
-         drawing to redraw — it is an SVG wrapper around a single embedded
-         raster PNG (view the file directly: one <image href="data:image/
-         png;base64,...">). There is no path data to import. Composited as
-         an image below (position/scale/crop via a clipping container,
-         opacity) instead of traced, per the brief. -->
+         differently on purpose: the reference assets supplied for it
+         (archta_exact_reference.svg, before that archta_blueprint_
+         background.png — both since removed from frontend/, superseded
+         by bankai.png below) were raster images with no vector path data
+         to import. Composited as an image (position/scale/crop via a
+         clipping container, opacity) instead of traced, per the brief. -->
 
     <!-- Section 3 — two parallel vertical guides at the panel's left edge,
          spanning its full height via top/bottom:0 rather than a fixed
@@ -106,11 +106,16 @@
         <!-- Horizontal ticks — shorter than the vertical ones. -->
         <line x1="0" y1="48" x2="12" y2="48" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
         <line x1="84" y1="48" x2="96" y2="48" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-        <!-- Vertical ticks, longer, each ending in an arrow. -->
+        <!-- Vertical ticks, longer than the horizontal ones, each ending in
+             a small perpendicular cross-tick (a survey benchmark mark, the
+             same vocabulary as the compasses elsewhere on this panel) —
+             not a solid triangular arrowhead, which is what the reference
+             actually shows despite the original text brief calling them
+             "arrow/marker". -->
         <line x1="48" y1="12" x2="48" y2="-20" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-        <path d="M42 -12l6-12 6 12z" fill="rgba(230,236,242,0.55)"/>
+        <line x1="41" y1="-20" x2="55" y2="-20" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
         <line x1="48" y1="84" x2="48" y2="116" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-        <path d="M42 108l6 12 6-12z" fill="rgba(230,236,242,0.55)"/>
+        <line x1="41" y1="116" x2="55" y2="116" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
       </svg>
       <span>ARCHTA</span>
     </div>
@@ -127,20 +132,24 @@
       <line x1="-5" y1="18" x2="41" y2="18" stroke="rgba(230,236,242,0.4)" stroke-width="1"/>
     </svg>
 
-    <!-- Section 7-9 — the floor plan, composited from
-         archta_exact_reference.svg's own embedded image. right:0;bottom:0
-         with a fixed width/height keeps it anchored to the lower-right
-         corner (bleeding off both edges, same as the reference) while
-         preserving the large center-left negative space (section 14).
-         overflow:hidden on the wrapper is the crop; object-fit:cover +
-         transform:scale on the image itself is what zooms into the source's
-         own lower-right (where its floor-plan detail concentrates) without
-         distorting it — object-fit alone establishes an aspect-correct
-         base fit for ANY container shape, and a uniform transform:scale
-         from a corner origin only ever zooms, never stretches one axis
-         independently of the other (the one hard requirement in the brief). -->
+    <!-- Section 7-9 — the floor plan, composited from bankai.png's own
+         lower-right region (archta_exact_reference.svg and
+         archta_blueprint_background.png, the two earlier reference assets,
+         are gone from frontend/ — bankai.png is the only one left, so it is
+         now this layer's image source too). right:0;bottom:0 with a fixed
+         width/height keeps it anchored to the lower-right corner (bleeding
+         off both edges, same as the reference) while preserving the large
+         center-left negative space (section 14). overflow:hidden on the
+         wrapper is the crop; object-fit:cover + transform:scale on the
+         image itself is what zooms into the source's own lower-right
+         (where its floor-plan detail concentrates, not the logo/coordinate
+         text near its top) without distorting it — object-fit alone
+         establishes an aspect-correct base fit for ANY container shape,
+         and a uniform transform:scale from a corner origin only ever
+         zooms, never stretches one axis independently of the other (the
+         one hard requirement in the brief). -->
     <div class="gate-floorplan-crop" aria-hidden="true">
-      <img class="gate-floorplan-img" src="./archta_exact_reference.svg" alt="">
+      <img class="gate-floorplan-img" src="./bankai.png" alt="">
     </div>
 
     <!-- Section 13 — REGISTERED SYSTEM block, well clear of the floor plan

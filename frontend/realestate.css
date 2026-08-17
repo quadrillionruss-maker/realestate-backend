@@ -240,13 +240,19 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .gate-guide-solid { position: absolute; left: 23px; top: 30px; bottom: 79px; width: 1px; background: rgba(201,164,92,0.55); }
 .gate-guide-dashed { position: absolute; left: 44px; top: 30px; bottom: 79px; width: 0; border-left: 1px dashed rgba(230,236,242,0.35); }
 
-/* BM - 01, beside the dashed guide (not centered on it) — rotated as one
-   block, default transform-origin (its own center), so it does not need a
-   second offset to land in the right place after turning. */
+/* BM - 01, beside the dashed guide (44px), not centered on it or sitting
+   between the two guides — the reference places it in the UPPER portion of
+   the panel, roughly level with the logo, not near the bottom.
+   transform-origin:left center pivots on the text's own left edge (where
+   "B" starts); rotate(90deg), not -90 — clockwise around that left-edge
+   pivot swings the text DOWNWARD from that point, landing "B" at the top
+   and "1" at the bottom, matching the reference's actual reading order.
+   -90 here would have put "1" at the top instead, upside down relative to
+   the reference. */
 .gate-benchmark {
   position: absolute;
-  left: 30px; top: 76%;
-  transform: rotate(-90deg);
+  left: 54px; top: 14%;
+  transform: rotate(90deg);
   transform-origin: left center;
   white-space: nowrap;
   font-family: var(--mono);
@@ -261,7 +267,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
    top. Fixed px placement mirrors the reference's own margins exactly. */
 .gate-logo-mark {
   position: absolute;
-  top: 88px; left: 40px;
+  top: 118px; left: 40px;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -278,7 +284,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 /* Section 5-6 — coordinates, right-aligned, top-right corner. */
 .gate-coordinates {
   position: absolute;
-  top: 32px; right: 40px;
+  top: 52px; right: 40px;
   font-family: var(--mono);
   font-size: 13px;
   letter-spacing: 0.03em;
@@ -297,16 +303,17 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 /* Centered under the coordinates' own right edge (right:40px there) — the
    compass box is 36px wide, so its right edge sits 18px further out
    (half its own width) to land its CENTER under that same alignment line. */
-.gate-compass-top { top: 92px; right: 22px; }
+.gate-compass-top { top: 112px; right: 22px; }
 /* Centered on the guides' intersection: guide-solid is left:23px, the
    bottom guide is bottom:79px — this box is 32px, so it's offset by half
    that (16px) from each so its own center lands exactly on that point. */
 .gate-compass-bottom { left: 7px; bottom: 63px; }
 
-/* Section 7-9 — the floor plan, composited from the actual asset
-   (archta_exact_reference.svg) rather than redrawn. Anchored to the
-   panel's own lower-right corner, sized to a fixed fraction of the panel
-   so the large center-left region (section 14) stays empty. */
+/* Section 7-9 — the floor plan, composited from bankai.png (the only
+   reference asset still present in frontend/) rather than redrawn.
+   Anchored to the panel's own lower-right corner, sized to a fixed
+   fraction of the panel so the large center-left region (section 14)
+   stays empty. */
 .gate-floorplan-crop {
   position: absolute;
   right: 0; bottom: 0;
@@ -322,15 +329,17 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   height: 100%;
   /* object-fit:cover gives an aspect-correct base fit for ANY panel shape
      first (no distortion, ever); the scale+origin on top of that is what
-     actually zooms into the source's own lower-right, where its
-     floor-plan detail concentrates, rather than showing the whole
-     1600x1000 composition (logo, coordinates and all) shrunk to fit here —
-     a uniform scale from a fixed origin only ever magnifies, it can never
-     stretch one axis independently of the other. */
+     actually zooms into the source's own lower-right — bankai.png's floor
+     plan concentrates toward ITS bottom-right corner, not its top (that's
+     the logo/coordinates), so both the base anchor (object-position) and
+     the extra zoom (transform-origin) point at 100% 100%, not 100% 0% —
+     rather than showing the whole composition (logo, headline and all)
+     shrunk to fit here. A uniform scale from a fixed origin only ever
+     magnifies; it can never stretch one axis independently of the other. */
   object-fit: cover;
-  object-position: 100% 0%;
-  transform: scale(1.7);
-  transform-origin: 100% 0%;
+  object-position: 100% 100%;
+  transform: scale(2.1);
+  transform-origin: 100% 100%;
 }
 
 /* Section 13 — REGISTERED SYSTEM block, bottom-left, clear of the floor
@@ -343,9 +352,15 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 }
 .gate-registered-text { font-family: var(--mono); font-size: 13px; color: rgba(230,236,242,0.6); line-height: 1.7; }
 
-/* Section 11-12 — bottom guide + scale bar. */
-.gate-bottom-guide { position: absolute; left: 23px; bottom: 79px; width: 390px; height: 0; border-top: 1px dashed rgba(230,236,242,0.25); }
-.gate-scale-bar { position: absolute; left: 118px; bottom: 66px; }
+/* Section 11-12 — bottom guide + scale bar. The reference places the scale
+   bar well right of center-left (not near the left guides) — left:40%,
+   not a fixed px value, since this element is positioned relative to the
+   overall composition rather than pinned to one edge the way the guides
+   or the registered-system block are. The guide's own width is a calc()
+   ending at that same 40% mark, so the two always meet regardless of the
+   panel's actual pixel width. */
+.gate-bottom-guide { position: absolute; left: 23px; bottom: 79px; width: calc(40% - 23px); height: 0; border-top: 1px dashed rgba(230,236,242,0.25); }
+.gate-scale-bar { position: absolute; left: 40%; bottom: 66px; }
 /* Each label positioned to sit under its own tick exactly (0/65/130/220px,
    matching the SVG above) — the ticks are NOT evenly spaced (the 20-30M
    gap is wider than 0-10 or 10-20), so flexbox's space-between would have
@@ -364,10 +379,11 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 /* The headline and blurb sit on top of everything above, positioned
    independently — the reference is explicit that they are not part of the
    background composition ("nothing should compete with the future
-   headline that will sit above this background"). top:26% clears the mark
-   (ends around 88+72=160px from the top) with the same kind of breathing
-   room the reference leaves before its own center-left empty region ends. */
-.gate-headline-block { position: absolute; top: 26%; left: 40px; right: 40px; z-index: 1; }
+   headline that will sit above this background"). top:31%, matched
+   against bankai.png (the reference that shows the full composition
+   together, headline included) rather than estimated from the gap below
+   the mark alone. */
+.gate-headline-block { position: absolute; top: 31%; left: 40px; right: 40px; z-index: 1; }
 
 /* The tagline — Archivo Black, stacked, stencilled caps, the same display
    face as every other headline moment in the product now (greeting,
