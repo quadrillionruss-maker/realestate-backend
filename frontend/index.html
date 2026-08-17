@@ -67,6 +67,15 @@
      still exists — it is a debugging tool now, not the only way in. -->
 <main class="gate" id="gate" hidden>
   <section class="gate-brand">
+    <!-- The blueprint asset — real architectural linework, not CSS-drawn.
+         Sits first in the DOM (and pinned to z-index:0 in CSS) so it is the
+         lowest layer above the panel's own navy background: every other
+         child of .gate-brand shares z-index:1 via the ".gate-brand > *"
+         rule further down, so this is the one deliberate exception. Purely
+         decorative — alt="" and aria-hidden so a screen reader skips it
+         entirely rather than announcing an unlabelled image. -->
+    <img class="gate-blueprint-layer" src="./archta_blueprint_background.png" alt="" aria-hidden="true">
+
     <!-- Item 28 — a corner stamp, top-left, in the same gold the ◆ mark
          itself uses — the one recurring signature colour in this palette. -->
     <div class="gate-record-number">
@@ -99,22 +108,6 @@
       <circle cx="15" cy="15" r="7" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
       <line x1="15" y1="0" x2="15" y2="30" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
       <line x1="0" y1="15" x2="30" y2="15" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
-    </svg>
-
-    <!-- Item 9 — an abstract floor plan, the one piece of the "drawing"
-         motif that is actually figurative rather than a survey instrument.
-         Purely decorative: room labels A4/B2 are not a real unit plan. -->
-    <svg class="gate-floorplan" viewBox="0 0 280 220" width="280" height="220" aria-hidden="true"
-         fill="none" stroke="rgba(100,180,210,0.6)" stroke-width="0.8">
-      <rect x="10" y="10" width="260" height="200"/>
-      <line x1="140" y1="10" x2="140" y2="120"/>
-      <line x1="10" y1="120" x2="140" y2="120"/>
-      <line x1="190" y1="10" x2="190" y2="210"/>
-      <line x1="140" y1="160" x2="270" y2="160"/>
-      <path d="M140 120 A20 20 0 0 1 160 140"/>
-      <path d="M190 160 A18 18 0 0 0 208 178"/>
-      <text x="55" y="70" font-size="8" fill="rgba(100,180,210,0.6)" stroke="none" font-family="monospace">A4</text>
-      <text x="215" y="90" font-size="8" fill="rgba(100,180,210,0.6)" stroke="none" font-family="monospace">B2</text>
     </svg>
 
     <div class="gate-mark"><i>◆</i> ARCHTA</div>

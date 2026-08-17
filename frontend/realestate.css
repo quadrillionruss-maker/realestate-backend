@@ -334,15 +334,40 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 /* Item 7 — a surveyor's benchmark crosshair. */
 .gate-crosshair { position: absolute; top: 38px; right: 130px; }
 
-/* Item 9 — an abstract floor plan, rotated behind the tagline. Its own
-   opacity, separate from the near-full-opacity stroke colour baked into the
-   SVG markup itself (index.html), so the shape stays crisp at any zoom
-   level rather than relying on a washed-out stroke colour to read as faint. */
-.gate-floorplan {
+/* The blueprint asset itself — real architectural linework (hundreds of
+   lines this file makes no attempt to redraw), not a CSS gradient or a
+   hand-drawn SVG standing in for one.
+
+   The PNG is authored on a near-white ground with pale teal ink, the
+   opposite of this panel's navy — opacity alone would just lay a hazy
+   light rectangle over the panel, not make the white disappear. multiply
+   is what actually does that: a white pixel multiplied against anything
+   leaves that anything unchanged (so the panel's own navy shows through
+   where the source paper was blank), while the darker/coloured ink
+   multiplies down into a tinted mark against it. That is also naturally
+   the low-contrast, subtle result the design calls for, not a side effect
+   to compensate for — a bolder blend mode (screen, lighten) would keep the
+   white paper visible as a wash, which is the one thing this must not do.
+
+   z-index:0 is the one deliberate exception to ".gate-brand > *"'s shared
+   z-index:1 further up this file — every real layer (decorations, mark,
+   headline, blurb) needs to paint above this, and this is the only child
+   of .gate-brand that should not. */
+.gate-blueprint-layer {
   position: absolute;
-  right: -20px; top: 50%;
-  transform: translateY(-40%) rotate(-8deg);
-  opacity: 0.12;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Biased toward the bottom-right, where the asset's own floor-plan detail
+     concentrates (its top-left is comparatively bare) — object-fit:cover
+     crops symmetrically from a centered anchor by default, and on a panel
+     shape noticeably different from the asset's own 801:984 ratio, a
+     center crop risks trimming exactly the detail this is meant to show. */
+  object-position: 70% 85%;
+  mix-blend-mode: multiply;
+  opacity: 0.65;
+  z-index: 0;
   pointer-events: none;
 }
 
