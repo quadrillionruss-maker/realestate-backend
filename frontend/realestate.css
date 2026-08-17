@@ -274,10 +274,10 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   flex-direction: column;
   font-family: var(--display);
   text-transform: uppercase;
-  font-size: 34px;
+  font-size: 50px;
   font-weight: 900;
-  letter-spacing: -0.5px;
-  line-height: 1.05;
+  letter-spacing: -1px;
+  line-height: 0.97;
   margin: 0 0 18px;
 }
 
@@ -286,9 +286,9 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 
 .gate-blurb {
   font-family: var(--sans);
-  color: rgba(255, 255, 255, 0.55);
+  color: rgba(255, 255, 255, 0.78);
   max-width: 42ch;
-  font-size: 12.5px;
+  font-size: 14px;
   line-height: 1.65;
 }
 
@@ -626,16 +626,20 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   box-shadow: 0 1px 3px rgba(80, 80, 160, 0.06);
 }
 
-.search { position: relative; flex: 1; max-width: 460px; }
+.search { position: relative; flex: 1; max-width: 420px; transition: max-width .16s var(--ease); }
+/* "Expand slightly" on focus — a few px of breathing room past the resting
+   420px, not a jarring resize; the transition above is what makes it read
+   as an expansion rather than a snap. */
+.search:focus-within { max-width: 448px; }
 
 .search input {
   width: 100%;
-  height: 34px;
+  height: 38px;
   background: var(--panel-2);
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   padding: 0 12px 0 32px;
-  font-size: 13px;
+  font-size: 14px;
   transition: border-color .16s, background .16s, box-shadow .16s;
 }
 
@@ -644,7 +648,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   outline: none;
   border-color: var(--accent);
   background: var(--panel);
-  box-shadow: 0 0 0 3px var(--accent-faint);
+  box-shadow: 0 0 0 4px var(--accent-faint);
 }
 
 .search .ico {
@@ -773,6 +777,18 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .card-body { padding: 18px; }
 .card-body.flush { padding: 0; }
 
+/* Dashboard progressive disclosure — the collapsed "Show N …" bar standing
+   in for the Drafted follow-ups / Tasks cards until clicked open. Full
+   card width and height so opening it doesn't shift the row above by a
+   sliver, just swaps the bar for the real card in place. */
+.collapsible-toggle {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; background: none; border: none; cursor: pointer;
+  font-size: 13.5px; font-weight: 600; color: var(--text); text-align: left;
+}
+.collapsible-toggle:hover { color: var(--accent); }
+.collapsible-chevron { color: var(--text-faint); font-size: 11px; }
+
 /* SECTION 23 — the dashboard's setup checklist card. */
 .onboarding-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 20px; }
 .onboarding-steps li { display: flex; align-items: baseline; gap: 8px; font-size: 13px; color: var(--text-faint); }
@@ -867,7 +883,7 @@ table.data th {
 }
 
 table.data td {
-  padding: 12px 16px;
+  padding: 13px 16px;
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
   color: var(--text);
@@ -1853,7 +1869,12 @@ table.data td.sched-detail-cell {
 
 /* ── 14. Utilities, empty states, motion, responsive ───────────────────── */
 .empty { padding: 34px 20px; text-align: center; color: var(--text-faint); font-size: 13px; }
-.empty-icon { font-size: 22px; opacity: 0.32; display: block; margin-bottom: 9px; }
+/* SVG icon: 40px, single color (currentColor picks up this rule's own
+   color: var(--text-faint) — the icon never needs a color of its own). The
+   old bare-glyph fallback (untouched empty states elsewhere that pass no
+   icon name) keeps its smaller, dimmer look via .empty-icon-glyph. */
+.empty-icon { width: 40px; height: 40px; margin: 0 auto 10px; display: block; color: var(--text-faint); }
+.empty-icon.empty-icon-glyph { width: auto; height: auto; font-size: 22px; opacity: 0.32; margin-bottom: 9px; }
 .empty strong { display: block; color: var(--text-dim); font-weight: 500; margin-bottom: 4px; font-size: 14px; }
 /* A one-line empty state folded into a widget rather than its own card. */
 .empty.compact { padding: 14px; }
@@ -1953,6 +1974,11 @@ table.data td.sched-detail-cell {
 /* ── Responsive ────────────────────────────────────────────────────────── */
 .menu-btn { display: none; }
 .signout-icon-btn { display: none; }
+/* Hidden by base rule, not the .hidden utility class — that one is
+   !important (this file's Utilities section), which a later @media
+   override could never beat. Shown only inside the max-width:640px block
+   further down. */
+.bottom-nav { display: none; }
 
 @media (max-width: 1100px) {
   .grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2146,6 +2172,52 @@ table.data td.sched-detail-cell {
      nodes, so this is one rule rather than a markup change. */
   .record-top { flex-direction: column; align-items: flex-start; gap: 4px; }
   .record-actions .action-link { flex: 1 1 auto; text-align: center; }
+
+  /* Bottom nav replaces the hamburger as the primary way to move around at
+     this width — not an addition to it, hence hiding .menu-btn here. The
+     sidebar itself is untouched and still opens by hamburger from 640px up
+     through the 820px breakpoint above; this block only ever applies below
+     640px, so the two never overlap. */
+  .menu-btn { display: none; }
+
+  .bottom-nav {
+    display: flex;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 80;
+    height: 56px;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+  }
+  .bottom-nav-item {
+    flex: 1 1 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px; position: relative; color: var(--text-faint); text-decoration: none;
+    font-size: 10.5px; font-weight: 500;
+  }
+  .bottom-nav-item.is-active { color: var(--accent); }
+  .bottom-nav-icon { width: 22px; height: 22px; }
+  .bottom-nav-badge {
+    position: absolute; top: 2px; left: 50%; margin-left: 2px;
+    min-width: 15px; height: 15px; padding: 0 3px; border-radius: 8px;
+    background: var(--danger); color: #fff; font-size: 9.5px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* Content and toasts both have to clear the fixed bar now sitting over
+     the bottom of the viewport — the 820px breakpoint's own 60px bottom
+     padding predates the bottom nav and is not enough headroom for it once
+     the safe-area inset is added on a notched phone. */
+  .page { padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px) + 20px); }
+  .toasts { bottom: calc(56px + env(safe-area-inset-bottom, 0px) + 12px); }
+
+  /* No physical keyboard here — the / shortcut hint has nothing to hint at. */
+  .search kbd { display: none; }
+  /* No fixed cap on this width; :focus-within ~ .topbar-right hiding the
+     rest of the topbar (dateline, notification bell, sign-out) is what
+     actually gives the search bar the room to read as "full width", not a
+     max-width number. */
+  .search { max-width: none; }
+  .search:focus-within { max-width: none; }
+  .search:focus-within ~ .topbar-right { display: none; }
 }
 
 @media (max-width: 480px) {

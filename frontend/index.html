@@ -266,12 +266,12 @@
         <a class="nav-item" href="#/customers" data-nav="customers"><span class="ico">◎</span> Buyers</a>
         <a class="nav-item" href="#/reservations" data-nav="reservations"><span class="ico">◇</span> Reservations</a>
         <a class="nav-item" href="#/payments" data-nav="payments"><span class="ico">₦</span> Payments</a>
+        <a class="nav-item" href="#/commissions" data-nav="commissions"><span class="ico">%</span> Commissions</a>
         <a class="nav-item" href="#/documents" data-nav="documents"><span class="ico">▥</span> Documents</a>
       </div>
 
       <div class="nav-group">
         <div class="nav-label">Management</div>
-        <a class="nav-item" href="#/commissions" data-nav="commissions"><span class="ico">%</span> Commissions</a>
         <a class="nav-item" href="#/reports" data-nav="reports"><span class="ico">◫</span> Reports</a>
         <a class="nav-item" href="#/settings" data-nav="settings"><span class="ico">⚙</span> Settings</a>
       </div>
@@ -331,26 +331,62 @@
   </div>
 </div>
 
+<!-- Mobile only (realestate.css, max-width: 640px) — replaces the hamburger
+     sidebar as the primary way to move around at that width, not an addition
+     to it. Shares data-nav with the sidebar's own links on purpose: renderRoute
+     already toggles .is-active on every [data-nav] element in the document
+     (not just the sidebar's), and applyNavForRole already shows/hides every
+     [data-nav] element by role the same way — so a role with a restricted nav
+     (a Sales Executive has no 'at-risk' or 'tasks') gets a bottom nav with
+     fewer tabs rather than one that 403s when tapped, for free, no new logic
+     needed for either. -->
+<!-- No .hidden class here — that utility is display:none !important
+     (realestate.css), which would out-rank any later media-query override.
+     Visibility below 640px is handled purely by .bottom-nav's own base rule
+     (display:none) and its @media override, same as every other pure
+     breakpoint-driven show/hide in this file. -->
+<nav class="bottom-nav" id="bottom-nav" aria-label="Primary">
+  <a class="bottom-nav-item" href="#/dashboard" data-nav="dashboard">
+    <svg class="bottom-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="4" y="4" width="7" height="7"/><rect x="13" y="4" width="7" height="7"/>
+      <rect x="4" y="13" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/>
+    </svg>
+    <span>Dashboard</span>
+  </a>
+  <a class="bottom-nav-item" href="#/customers" data-nav="customers">
+    <svg class="bottom-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="8.5" cy="8" r="3.2"/><path d="M3 20c0-3.9 2.5-6.2 5.5-6.2S14 16.1 14 20"/>
+      <circle cx="16.5" cy="9" r="2.6"/><path d="M13.8 14.3c.7-.5 1.6-.8 2.7-.8 2.6 0 4.5 1.8 4.5 5.3"/>
+    </svg>
+    <span>Buyers</span>
+  </a>
+  <a class="bottom-nav-item" href="#/at-risk" data-nav="at-risk">
+    <svg class="bottom-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 4.5l8.5 14.5H3.5z"/><path d="M12 10v3.5"/><path d="M12 16.5v.01"/>
+    </svg>
+    <span class="bottom-nav-badge hidden" id="bottom-count-risk"></span>
+    <span>At Risk</span>
+  </a>
+  <a class="bottom-nav-item" href="#/payments" data-nav="payments">
+    <svg class="bottom-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 3h12v18l-2-1.3L14 21l-2-1.3L10 21l-2-1.3L6 21z"/><path d="M9 8h6M9 11.5h6M9 15h4"/>
+    </svg>
+    <span>Payments</span>
+  </a>
+  <a class="bottom-nav-item" href="#/tasks" data-nav="tasks">
+    <svg class="bottom-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M5 13l4.5 4.5L19 7"/>
+    </svg>
+    <span class="bottom-nav-badge hidden" id="bottom-count-tasks"></span>
+    <span>Tasks</span>
+  </a>
+</nav>
+
 <div class="toasts" id="toasts"></div>
 <div id="overlay"></div>
 
 <script src="./realestate.js"></script>
 <script src="./offline-queue.js"></script>
 <script src="./screens.js"></script>
-<script>
-  // SECTION 14 — registered unconditionally (cheap, and every role benefits
-  // from the app-shell speed-up); which SCREENS actually use what it caches
-  // is gated to sales_rep inside screens.js and offline-queue.js instead.
-  // Guarded by the feature check itself, the standard pattern — an old
-  // browser or a locked-down webview with no serviceWorker support must not
-  // throw and take the rest of this inline block down with it.
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', function () {
-      navigator.serviceWorker.register('./service-worker.js').catch(function (err) {
-        console.warn('[archta] service worker registration failed:', err.message);
-      });
-    });
-  }
-</script>
 </body>
 </html>

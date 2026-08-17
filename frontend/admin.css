@@ -207,6 +207,13 @@ table.data tr.is-clickable { cursor: pointer; }
 .onboarding-steps li { color: var(--text-faint); }
 .onboarding-steps li.done { color: var(--text); }
 
+/* Client error reporting — the stack trace, verbatim but bounded. */
+.error-stack {
+  margin: 0; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--line-strong);
+  border-radius: var(--radius); font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow-y: auto;
+}
+
 /* Square permit tags, matching the operator app's own badge shape. */
 .badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 2px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; border: 1px solid transparent; }
 .badge.good { background: var(--good-soft); color: var(--good); border-color: rgba(47,107,69,0.28); }

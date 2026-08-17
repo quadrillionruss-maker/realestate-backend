@@ -34,7 +34,7 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql', '054_client_errors.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -69,7 +69,7 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql', '054_client_errors.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -2472,6 +2472,33 @@ function check(name, cond, detail) {
   } catch (err) { duplicateFeatureDayRefused = /duplicate|unique/i.test(err.message); }
   check('a second direct insert for the same org/feature/day is refused — increment_feature_event is the only safe way to add usage',
     duplicateFeatureDayRefused);
+
+  // ── 054: client-side error reporting ──────────────────────────────────────
+  const clientErrorCols = await colsOf('re_client_errors');
+  check('re_client_errors has the columns clientErrorService selects/inserts',
+    ['organization_id', 'user_id', 'app', 'message', 'stack', 'screen', 'url', 'user_agent', 'created_at', 'resolved_at']
+      .every((c) => clientErrorCols.includes(c)), clientErrorCols.join(', '));
+
+  const [{ id: clientErrorId, resolved_at: clientErrorResolvedAtDefault }] = await q(
+    `insert into re_client_errors (organization_id, app, message, screen) values ($1,'operator','Cannot read properties of undefined (reading ''current'')','dashboard') returning id, resolved_at`,
+    [userId]);
+  check('a client error round-trips and starts unresolved', clientErrorResolvedAtDefault === null);
+
+  let badAppRefused = false;
+  try {
+    await q(`insert into re_client_errors (app, message) values ('not_a_real_app','x')`);
+  } catch (err) { badAppRefused = /check/i.test(err.message); }
+  check('re_client_errors.app is limited to the three known frontends', badAppRefused);
+
+  let blankMessageInErrorTableRefused = false;
+  try {
+    await q(`insert into re_client_errors (app) values ('operator')`);
+  } catch (err) { blankMessageInErrorTableRefused = /null/i.test(err.message); }
+  check('re_client_errors.message is required', blankMessageInErrorTableRefused);
+
+  await q(`update re_client_errors set resolved_at = now() where id = $1`, [clientErrorId]);
+  const [{ resolved_at: clientErrorResolvedAfter }] = await q(`select resolved_at from re_client_errors where id=$1`, [clientErrorId]);
+  check('a client error can be marked resolved', clientErrorResolvedAfter !== null);
 
   // admin_wipe_organization — exercised against the SAME fixture org every
   // assertion above this point has been building up (userId), deliberately

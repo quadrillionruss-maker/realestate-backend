@@ -501,9 +501,29 @@
   }
 
   // ── Rendering helpers ─────────────────────────────────────────────────
-  function emptyState(title, hint, actionHtml) {
+  // Inline SVG rather than an external file or icon font — one line each,
+  // 24x24 viewBox, stroke="currentColor" so .empty-icon's own `color:
+  // var(--text-faint)` is the only place a color is ever set. Geometric and
+  // deliberately plain: this is a blank state, not a place for the brand's
+  // one gold accent to show up.
+  var EMPTY_ICONS = {
+    'check-circle': '<circle cx="12" cy="12" r="9"/><path d="M8 12.3l2.6 2.6L16 9.3"/>',
+    checkmark: '<path d="M5 13l4.5 4.5L19 7"/>',
+    person: '<circle cx="12" cy="8" r="4"/><path d="M4 20c0-4.4 3.6-7 8-7s8 2.6 8 7"/>',
+    building: '<rect x="5" y="3" width="14" height="18"/><path d="M9 7.5h1M14 7.5h1M9 11h1M14 11h1M9 14.5h1M14 14.5h1"/><path d="M10 21v-4h4v4"/>',
+    document: '<path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4"/><path d="M9.5 12h5M9.5 15.5h5"/>',
+    receipt: '<path d="M6 3h12v18l-2-1.3L14 21l-2-1.3L10 21l-2-1.3L6 21z"/><path d="M9 8h6M9 11.5h6M9 15h4"/>',
+    key: '<circle cx="8" cy="8" r="4"/><path d="M10.8 10.8L20 20M15.5 15.5l2-2M18.5 18.5l2-2"/>',
+    chart: '<path d="M4 20V13M10 20V7M16 20v-9"/><path d="M2 20h20"/>',
+  };
+
+  function emptyState(title, hint, actionHtml, icon) {
+    var svg = EMPTY_ICONS[icon];
     return '<div class="empty">' +
-      '<span class="empty-icon">◇</span>' +
+      (svg
+        ? '<svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" ' +
+            'stroke-linecap="round" stroke-linejoin="round">' + svg + '</svg>'
+        : '<span class="empty-icon empty-icon-glyph">◇</span>') +
       '<strong>' + esc(title) + '</strong>' +
       (hint ? '<div>' + esc(hint) + '</div>' : '') +
       (actionHtml ? '<div class="mt-2">' + actionHtml + '</div>' : '') +
@@ -520,7 +540,7 @@
 
   function table(columns, rows, rowFn, options) {
     var opts = options || {};
-    if (!rows.length) return emptyState(opts.emptyTitle || 'Nothing here yet', opts.emptyHint, opts.emptyAction);
+    if (!rows.length) return emptyState(opts.emptyTitle || 'Nothing here yet', opts.emptyHint, opts.emptyAction, opts.emptyIcon);
 
     return '<div class="table-wrap"><table class="data"><thead><tr>' +
       columns.map(function (c) {
@@ -875,7 +895,7 @@
       }
     } catch (err) {
       if (err.status === 401) return; // signOut already handled it
-      renderFailure(view, err);
+      renderFailure(view, err, route.name);
     }
 
     // Closing the mobile sidebar on navigation: leaving it open over the
@@ -893,17 +913,55 @@
   // Retry re-runs the screen only. Reload is still there for when that is not
   // enough. A status of 0 means the request never left the device, so the
   // wording says so rather than blaming the server.
-  function renderFailure(view, err) {
+  // Three genuinely different failures, told apart by whether request()
+  // (realestate.js's own fetch wrapper, above) ever threw this at all.
+  // request() attaches a numeric .status to EVERY error it throws — 0 for
+  // "never reached the server", the real HTTP code otherwise — so an error
+  // with no .status at all never went near the network. It is a bug in this
+  // screen's own render code (a null the code didn't check, a typo'd
+  // function name, a variable used before it was assigned — exactly what
+  // broke the WhatsApp queue banner once already), and saying "the server
+  // answered with an error" about it sends whoever reads it hunting through
+  // the wrong half of the codebase.
+  function renderFailure(view, err, screenName) {
     var offline = err.status === 0 || !navigator.onLine;
+    var isServerError = !offline && typeof err.status === 'number' && err.status > 0;
+    var isClientBug = !offline && !isServerError;
+
+    // Console-only, not shown on screen: the full stack is exactly what
+    // fixing a client bug needs and exactly what a Naira figure in a toast
+    // does not need to expose. Every failed screen load gets one, so this is
+    // the first place to look, not just this one recurring case.
+    console.error('[archta] screen failed to render:', err);
+
+    // Only a genuine client bug is reported — a server error is already
+    // visible server-side (Render's logs, this workspace's own audit trail),
+    // and reporting one here would just be a second, noisier copy of the
+    // same fact. Fire-and-forget: a broken screen reporting itself must
+    // never itself throw, and there is nothing useful to show if the report
+    // fails to send. Skipped when signed out entirely — no org to attach it
+    // to, and the sign-in screen has its own error handling already.
+    if (isClientBug && RE.state.user) {
+      api.post('/client-errors', {
+        message: err.message,
+        stack: err.stack,
+        screen: screenName || null,
+        url: window.location.hash,
+        user_agent: navigator.userAgent,
+      }).catch(function () { /* nothing to do if even the report fails */ });
+    }
+
+    var title = offline ? 'No connection' : isClientBug ? 'Something went wrong showing this screen' : 'Could not load this screen';
+    var sub = offline
+      ? 'Your device could not reach the server. Nothing was lost — try again when you have signal.'
+      : isClientBug
+        ? 'This is a bug in the app itself, not something the server reported. Retrying will not fix it, but reporting it will.'
+        : 'The server answered with an error.';
 
     view.innerHTML =
       '<div class="page-head"><div>' +
-        '<div class="page-title">' + (offline ? 'No connection' : 'Could not load this screen') + '</div>' +
-        '<div class="page-sub">' +
-          (offline
-            ? 'Your device could not reach the server. Nothing was lost — try again when you have signal.'
-            : 'The server answered with an error.') +
-        '</div>' +
+        '<div class="page-title">' + esc(title) + '</div>' +
+        '<div class="page-sub">' + esc(sub) + '</div>' +
       '</div></div>' +
       '<div class="notice' + (offline ? ' info' : '') + '">' + esc(err.message) + '</div>' +
       '<div class="btn-row">' +
@@ -940,6 +998,12 @@
       ]);
       setCount('count-risk', results[0].length);
       setCount('count-tasks', results[1].length);
+      // Mobile bottom nav's own badges. The elements exist in the DOM at
+      // every width (index.html) — only #bottom-nav's CSS visibility is
+      // breakpoint-gated — so updating them unconditionally here is
+      // harmless on desktop/tablet, not a wasted DOM write on a missing node.
+      setCount('bottom-count-risk', results[0].length);
+      setCount('bottom-count-tasks', results[1].length);
     } catch (e) { /* the nav is decoration here; never let it break a screen */ }
   }
 
@@ -1932,9 +1996,12 @@
     dismissPushBanner: dismissPushBanner,
     subscribeToPush: subscribeToPush,
     refreshNotifBell: refreshNotifBell,
-
-    // SECTION 15
-    whatsappQueue: whatsappQueue,
+    // SECTION 15 — whatsappQueue itself isn't assigned until near the
+    // bottom of this file; wired onto RE there instead of here, since
+    // capturing the bare (still-undefined, var-hoisted) variable at this
+    // point in the script would freeze RE.whatsappQueue at undefined
+    // forever — object literals copy the value at construction time, not a
+    // live binding to the variable.
   };
 
   // ── SECTION 1 — push notifications ───────────────────────────────────────
@@ -2179,6 +2246,28 @@
     skip: skipWhatsappQueueItem,
     done: endWhatsappQueue,
   };
+  RE.whatsappQueue = whatsappQueue;
+
+  // Registered unconditionally (cheap, and every role benefits from the
+  // app-shell speed-up); which SCREENS actually use what it caches is gated
+  // to sales_rep inside screens.js and offline-queue.js instead. Guarded by
+  // the feature check itself — an old browser or a locked-down webview with
+  // no serviceWorker support must not throw and take anything else down
+  // with it. Was a bare inline <script> in index.html; moved here so
+  // frontend/vercel.json's CSP never has to carry a per-script hash — this
+  // file's own convention (CLAUDE.md's frontend gotchas) is that nothing
+  // here is ever inline. Wrapped like every other top-level window.* call in
+  // this file: the minimal window stub logic.test.js requires this file
+  // against has no addEventListener.
+  try {
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('./service-worker.js').catch(function (err) {
+          console.warn('[archta] service worker registration failed:', err.message);
+        });
+      });
+    }
+  } catch (e) { /* no-op outside a real browser */ }
 
   document.addEventListener('DOMContentLoaded', boot);
 })();

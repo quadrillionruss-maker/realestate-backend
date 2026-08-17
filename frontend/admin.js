@@ -134,6 +134,7 @@
     health: renderHealth,
     revenue: renderRevenue,
     usage: renderUsage,
+    errors: renderClientErrors,
   };
 
   document.getElementById('nav').addEventListener('click', function (e) {
@@ -154,6 +155,18 @@
         loginScreen.hidden = false;
         appShell.hidden = true;
         return;
+      }
+      // Same distinction realestate.js's renderFailure makes: api() attaches
+      // a numeric status to every error that actually reached the network,
+      // so no status at all means this section's own render code broke, not
+      // the server. Reported so it shows up on the Errors tab itself —
+      // deliberately not gated behind "is this even the Errors tab", since a
+      // bug in some OTHER section is exactly what needs to surface there.
+      if (typeof err.status !== 'number') {
+        api('/client-errors', {
+          method: 'POST',
+          body: { message: err.message, stack: err.stack, screen: name, url: window.location.hash, user_agent: navigator.userAgent },
+        }).catch(function () {});
       }
       view.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
     });
@@ -305,6 +318,112 @@
             : '<div class="empty">No workspace has used a tracked feature in the last 30 days.</div>') +
         '</div></div>';
     });
+  }
+
+  // ── Client-side error reporting ────────────────────────────────────────
+  // Grouped by (app, screen, message) for display — the backend stores one
+  // row per occurrence (clientErrorService.js), same reasoning re_feature_events
+  // stores one row per day rather than one per event: nobody triaging this
+  // wants to scroll past 40 identical rows for the same bug to find the
+  // next distinct one.
+  var clientErrorsCache = [];
+  var openErrorGroupKey = null;
+
+  function groupClientErrors(rows) {
+    var byKey = new Map();
+    rows.forEach(function (r) {
+      var key = r.app + '|' + (r.screen || '') + '|' + r.message;
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key: key, app: r.app, screen: r.screen, message: r.message,
+          count: 0, firstSeen: r.created_at, lastSeen: r.created_at,
+          sampleStack: r.stack, orgNames: new Set(), unresolvedIds: [],
+        });
+      }
+      var g = byKey.get(key);
+      g.count += 1;
+      if (r.created_at < g.firstSeen) g.firstSeen = r.created_at;
+      if (r.created_at > g.lastSeen) { g.lastSeen = r.created_at; g.sampleStack = r.stack; }
+      if (r.org_name) g.orgNames.add(r.org_name);
+      if (!r.resolved_at) g.unresolvedIds.push(r.id);
+    });
+    return [...byKey.values()].sort(function (a, b) {
+      var openDiff = (b.unresolvedIds.length > 0) - (a.unresolvedIds.length > 0);
+      return openDiff || (new Date(b.lastSeen) - new Date(a.lastSeen));
+    });
+  }
+
+  function renderClientErrors() {
+    return api('/client-errors').then(function (rows) {
+      clientErrorsCache = rows;
+      paintClientErrors();
+    });
+  }
+
+  function paintClientErrors() {
+    var groups = groupClientErrors(clientErrorsCache);
+    var openCount = groups.filter(function (g) { return g.unresolvedIds.length > 0; }).length;
+    var distinctScreens = new Set(clientErrorsCache.map(function (r) { return r.app + '/' + (r.screen || '—'); })).size;
+
+    view.innerHTML =
+      '<h1 class="page-title">Errors</h1>' +
+      '<p class="muted">Client-side bugs reported by the operator and admin apps, last 30 days — grouped by app, screen and message.</p>' +
+      '<div class="kpi-grid">' +
+        kpi('Open', openCount) +
+        kpi('Total events', clientErrorsCache.length) +
+        kpi('Screens affected', distinctScreens) +
+      '</div>' +
+      '<div class="table-wrap"><table class="data"><thead><tr>' +
+        '<th>App</th><th>Screen</th><th>Message</th><th>Count</th><th>Last seen</th><th>Status</th><th></th>' +
+      '</tr></thead><tbody>' +
+      (groups.length ? groups.map(clientErrorRow).join('') : '<tr><td colspan="7"><div class="empty">No client errors reported in the last 30 days.</div></td></tr>') +
+      '</tbody></table></div>';
+
+    Array.prototype.forEach.call(document.querySelectorAll('tr[data-error-row]'), function (tr) {
+      tr.addEventListener('click', function (e) {
+        if (e.target.closest('button')) return;
+        openErrorGroupKey = openErrorGroupKey === tr.dataset.errorRow ? null : tr.dataset.errorRow;
+        paintClientErrors();
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-resolve-group]'), function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var group = groups.find(function (g) { return g.key === btn.dataset.resolveGroup; });
+        if (!group || !group.unresolvedIds.length) return;
+        api('/client-errors/resolve', { method: 'POST', body: { ids: group.unresolvedIds } })
+          .then(function () { toast('Marked resolved.', 'ok'); return renderClientErrors(); })
+          .catch(function (err) { toast(err.message, 'err'); });
+      });
+    });
+  }
+
+  function clientErrorRow(g) {
+    var isOpen = openErrorGroupKey === g.key;
+    var isResolved = g.unresolvedIds.length === 0;
+    var row = '<tr data-error-row="' + esc(g.key) + '" class="is-clickable">' +
+      '<td>' + esc(g.app) + '</td>' +
+      '<td class="mono">' + esc(g.screen || '—') + '</td>' +
+      '<td>' + esc(g.message.length > 100 ? g.message.slice(0, 100) + '…' : g.message) + '</td>' +
+      '<td class="mono">' + g.count + '</td>' +
+      '<td>' + timeAgo(g.lastSeen) + '</td>' +
+      '<td><span class="badge ' + (isResolved ? 'good' : 'bad') + '">' + (isResolved ? 'Resolved' : 'Open') + '</span></td>' +
+      '<td>' + (isResolved ? '' : '<button class="btn sm" data-resolve-group="' + esc(g.key) + '">Mark resolved</button>') + '</td>' +
+      '</tr>';
+
+    if (isOpen) {
+      row += '<tr class="detail-row"><td colspan="7"><div class="detail-grid">' +
+        detail('First seen', fmtDate(g.firstSeen)) +
+        detail('Last seen', fmtDate(g.lastSeen)) +
+        detail('Occurrences', g.count) +
+        detail('Workspaces affected', g.orgNames.size ? [...g.orgNames].join(', ') : '—') +
+        '</div>' +
+        '<div class="onboarding-block"><div class="k">Stack trace</div>' +
+          '<pre class="error-stack">' + esc(g.sampleStack || '(no stack captured)') + '</pre>' +
+        '</div>' +
+      '</td></tr>';
+    }
+    return row;
   }
 
   // ── Workspaces ─────────────────────────────────────────────────────────

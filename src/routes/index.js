@@ -43,5 +43,6 @@ router.use('/contractor-payments', require('./contractorPayments'));
 router.use('/community', require('./community'));
 router.use('/push', require('./push'));
 router.use('/scheduled-messages', require('./scheduledMessages'));
+router.use('/client-errors', require('./clientErrors'));
 
 module.exports = router;

@@ -132,9 +132,17 @@
   // every draft or just the first 5. Same module-level pattern as
   // projectFilter above, and cleared alongside it for the same reason.
   var showAllDrafts = false;
+  // Progressive disclosure — the Drafted follow-ups and Tasks sections start
+  // collapsed on every dashboard visit ("nothing else visible by default"),
+  // and open only for the rest of THIS session's dashboard visits once
+  // clicked open, same module-level/reset-on-sign-out lifetime as everything
+  // else on this list.
+  var draftsSectionOpen = false;
+  var tasksSectionOpen = false;
 
   R.resetScreenState = function () {
     projectFilter = null; expandedScheduleBuyerId = null; showAllDrafts = false;
+    draftsSectionOpen = false; tasksSectionOpen = false;
     leaderboardSort = 'total_collected';
   };
 
@@ -521,10 +529,27 @@
     '</div>';
   }
 
+  // Progressive disclosure for the Drafted follow-ups / Tasks sections —
+  // collapsed to a single "Show N …" bar until clicked, per zone. Nothing
+  // renders at all when there is nothing behind it: "Show 0 tasks" is not
+  // a button worth offering.
+  function collapsibleDashboardSection(opts) {
+    if (!opts.count) return '';
+    if (!opts.open) {
+      return '<div class="card mt-2"><button class="collapsible-toggle" id="' + opts.toggleId + '">' +
+        '<span>' + esc(opts.showLabel) + '</span><span class="collapsible-chevron">▾</span>' +
+      '</button></div>';
+    }
+    return '<div class="mt-2">' + card(opts.cardTitle, opts.bodyHtml, {
+      flush: true,
+      actions: (opts.cardActions || '') + '<button class="btn-quiet" id="' + opts.toggleId + '">Hide</button>',
+    }) + '</div>';
+  }
+
   /* ══ COMMAND CENTER ═════════════════════════════════════════════════════
-     The daily habit. Everything a developer needs before their first call:
-     what the AI noticed overnight, the four numbers, the unit mix, who is
-     behind, what to say to them, and what is on the list. */
+     The daily habit. A morning briefing, not a control room: the numbers,
+     the brief, and who to call — everything else (drafted follow-ups, open
+     tasks) is one click away, not on screen by default. */
   R.screens.dashboard = {
     render: async function (view, params, query) {
       // Documentation's dashboard is a different question entirely — what
@@ -644,12 +669,29 @@
 
         projectPills +
 
-        // The brief — Owner and Sales Director only. Collections and a Sales
-        // Executive see their own KPIs below instead; there is nothing
-        // strategic here for either of them to read, and no button that
-        // would only 403 if pressed.
+        // ZONE 1 — the numbers, first: moved ahead of the brief so the
+        // three-zone order on screen (numbers, brief, who to call) matches
+        // the order this HTML is actually built in.
+        // ₦28,450,000 at 18px (the mobile .stat-value size) is the widest
+        // thing on a 4-up grid squeezed to one column — nairaShort's
+        // ₦28.5m fits the tile instead of wrapping or overflowing it.
+        '<div class="grid cols-4">' +
+          stat('Collected this month', kpiMoney(d.collected_this_month), { tone: 'moss', accent: 'moss' }) +
+          stat('Outstanding', kpiMoney(d.outstanding_total)) +
+          stat('Overdue', kpiMoney(d.overdue.amount), {
+            tone: 'clay', accent: d.overdue.count ? 'clay' : null,
+            sub: d.overdue.count ? R.plural(d.overdue.count, 'installment') : 'All current',
+          }) +
+          stat('Due in 7 days', kpiMoney(d.due_next_7_days)) +
+        '</div>' +
+
+        // ZONE 2 — the Morning Brief, full width and dominant. Owner and
+        // Sales Director only. Collections and a Sales Executive see their
+        // own KPIs above instead; there is nothing strategic here for
+        // either of them to read, and no button that would only 403 if
+        // pressed.
         (canSeeBrief
-          ? '<div class="brief">' +
+          ? '<div class="brief mt-2">' +
               '<div class="brief-head">' +
                 '<span class="eyebrow">Morning Brief</span>' +
                 // "Today at 07:14" rather than a bare date. Checking the dashboard
@@ -737,19 +779,6 @@
             '</div>'
           : '') +
 
-        // ₦28,450,000 at 18px (the mobile .stat-value size) is the widest
-        // thing on a 4-up grid squeezed to one column — nairaShort's
-        // ₦28.5m fits the tile instead of wrapping or overflowing it.
-        '<div class="grid cols-4 mt-2">' +
-          stat('Collected this month', kpiMoney(d.collected_this_month), { tone: 'moss', accent: 'moss' }) +
-          stat('Outstanding', kpiMoney(d.outstanding_total)) +
-          stat('Overdue', kpiMoney(d.overdue.amount), {
-            tone: 'clay', accent: d.overdue.count ? 'clay' : null,
-            sub: d.overdue.count ? R.plural(d.overdue.count, 'installment') : 'All current',
-          }) +
-          stat('Due in 7 days', kpiMoney(d.due_next_7_days)) +
-        '</div>' +
-
         // Two revenue streams read as one number without this. Only shown once
         // there is actually a rental portfolio to report on — a pure off-plan
         // developer does not need "₦0 rental income" taking up a row forever.
@@ -760,54 +789,49 @@
             '</div>'
           : '') +
 
-        '<div class="grid split mt-2">' +
-          '<div>' +
-            (canSeeAtRisk
-              ? card('At risk', atRisk.length
-                  ? atRisk.slice(0, 6).map(riskRow).join('')
-                  : R.emptyState('Nobody has a missed installment', 'Good morning.'),
-                  { flush: true, actions: atRisk.length > 6 ? '<a class="btn-quiet" href="#/at-risk">See all ' + atRisk.length + '</a>' : '' })
-              : '') +
+        // ZONE 3 — at risk, full width, the third and last thing this screen
+        // leads with. Capped at 5 (not 6): "who to call" is a short list to
+        // scan before the first call of the day, not a second table.
+        (canSeeAtRisk
+          ? '<div class="mt-2">' + card('At risk', atRisk.length
+              ? atRisk.slice(0, 5).map(riskRow).join('')
+              : R.emptyState('All clear — no overdue buyers today.', null, null, 'check-circle'),
+              { flush: true, actions: atRisk.length > 5 ? '<a class="btn-quiet" href="#/at-risk">See all ' + atRisk.length + '</a>' : '' }) + '</div>'
+          : '') +
 
-            card('Inventory', inventoryHtml(d.units), { actions: '<a class="btn-quiet" href="#/units">Manage</a>' }) +
-          '</div>' +
+        // Everything below here is progressive disclosure: collapsed by
+        // default (draftsSectionOpen/tasksSectionOpen both start false,
+        // R.resetScreenState), so the screen a person actually lands on is
+        // numbers, brief, who to call — nothing else, until they ask for it.
+        (canSeeBrief ? collapsibleDashboardSection({
+            open: draftsSectionOpen,
+            count: drafts.length,
+            showLabel: 'Show ' + R.plural(drafts.length, 'drafted message'),
+            toggleId: 'btn-toggle-drafts',
+            cardTitle: 'Drafted follow-ups',
+            cardActions:
+              '<button class="btn-quiet" id="btn-drafts-send-all">Send all</button>' +
+              (drafts.length > 5
+                ? (showAllDrafts
+                    ? '<button class="btn-quiet" id="btn-drafts-collapse">Show fewer</button>'
+                    : '<button class="btn-quiet" id="btn-drafts-see-all">See all ' + drafts.length + '</button>')
+                : ''),
+            // SECTION 15 — the in-progress queue banner sits above the draft
+            // list itself, visible regardless of showAllDrafts, so leaving
+            // the dashboard mid-sequence and coming back still shows where
+            // the queue is.
+            bodyHtml: whatsappQueueBannerHtml() + (showAllDrafts ? drafts : drafts.slice(0, 5)).map(draftRow).join(''),
+          }) : '') +
 
-          '<div>' +
-            (canSeeBrief
-              ? card('Drafted follow-ups',
-                  // SECTION 15 — the in-progress queue banner sits above the
-                  // draft list itself, visible regardless of showAllDrafts,
-                  // so leaving the dashboard mid-sequence and coming back
-                  // still shows where the queue is.
-                  whatsappQueueBannerHtml() +
-                  (drafts.length
-                    ? (showAllDrafts ? drafts : drafts.slice(0, 5)).map(draftRow).join('')
-                    : R.emptyState('Nothing to chase today')),
-                  {
-                    flush: true,
-                    // Expands in place rather than navigating — there is no
-                    // standalone "all drafts" screen the way #/at-risk exists
-                    // for the At risk card, so "See all" toggles the same
-                    // module-level flag projectFilter already uses and
-                    // reloads, same pattern, different variable.
-                    actions:
-                      (drafts.length
-                        ? '<button class="btn-quiet" id="btn-drafts-send-all">Send all</button>'
-                        : '') +
-                      (drafts.length > 5
-                        ? (showAllDrafts
-                            ? '<button class="btn-quiet" id="btn-drafts-collapse">Show fewer</button>'
-                            : '<button class="btn-quiet" id="btn-drafts-see-all">See all ' + drafts.length + '</button>')
-                        : ''),
-                  })
-              : '') +
-
-            card('Tasks', tasks.length
-              ? tasks.slice(0, 7).map(taskRow).join('')
-              : R.emptyState('No open tasks'),
-              { flush: true, actions: '<a class="btn-quiet" href="#/tasks">All tasks</a>' }) +
-          '</div>' +
-        '</div>';
+        collapsibleDashboardSection({
+          open: tasksSectionOpen,
+          count: tasks.length,
+          showLabel: 'Show ' + R.plural(tasks.length, 'open task'),
+          toggleId: 'btn-toggle-tasks',
+          cardTitle: 'Tasks',
+          cardActions: '<a class="btn-quiet" href="#/tasks">All tasks</a>',
+          bodyHtml: tasks.slice(0, 7).map(taskRow).join(''),
+        });
 
       R.qsa('[data-project]', view).forEach(function (pill) {
         pill.addEventListener('click', function () {
@@ -828,6 +852,9 @@
         R.dismissPushBanner();
         R.reload();
       });
+
+      R.onClick(view, '#btn-toggle-drafts', function () { draftsSectionOpen = !draftsSectionOpen; R.reload(); });
+      R.onClick(view, '#btn-toggle-tasks', function () { tasksSectionOpen = !tasksSectionOpen; R.reload(); });
 
       R.onClick(view, '#btn-drafts-see-all', function () { showAllDrafts = true; R.reload(); });
       R.onClick(view, '#btn-drafts-collapse', function () { showAllDrafts = false; R.reload(); });
@@ -1188,7 +1215,7 @@
         '</div>' +
         card(null, atRisk.length
           ? atRisk.map(riskRow).join('')
-          : R.emptyState('Nobody has a missed installment', 'Every buyer is fully current.'),
+          : R.emptyState('All clear — no overdue buyers today.', null, null, 'check-circle'),
           { flush: true });
 
       wireRiskRows(view);
@@ -1212,15 +1239,15 @@
         '</div>' +
         card(null, tasks.length
           ? tasks.map(status === 'open' ? taskRow : doneTaskRow).join('')
-          : R.emptyState(
-              'No ' + status + ' tasks',
-              status === 'open'
-                ? 'Follow-ups you create, and the ones the AI suggests, both land here.'
-                : status === 'done'
+          : status === 'open'
+            ? R.emptyState('No open tasks.', 'Follow-ups you create, and the ones the AI suggests, both land here.', null, 'checkmark')
+            : R.emptyState(
+                'No ' + status + ' tasks',
+                status === 'done'
                   ? 'Tasks you mark done move here — nothing has been completed yet.'
                   : 'Tasks you dismiss move here — nothing has been dismissed yet.',
-              '<button class="btn primary" id="btn-empty-task">Add a task</button>'
-            ),
+                '<button class="btn primary" id="btn-empty-task">Add a task</button>'
+              ),
           { flush: true });
 
       if (status === 'open') wireTasks(view);
@@ -1262,7 +1289,13 @@
   /* ══ PROJECTS ═══════════════════════════════════════════════════════════ */
   R.screens.projects = {
     render: async function (view) {
-      var projects = await api('/projects');
+      // dashboard.read is granted to every role (routes/dashboard.js's own
+      // comment: "every authenticated role may open this endpoint"), so this
+      // second fetch needs no extra permission check beyond already being on
+      // this screen. d.units is the same shape the dashboard used to show
+      // its own inventory bar with — moved here, where the actual units live.
+      var results = await Promise.all([api('/projects'), api('/dashboard')]);
+      var projects = results[0], dashboardData = results[1];
       // Inventory is the developer's own book, not a rep's — permissions.js
       // documents Units/Projects as read-only for sales_rep explicitly. A
       // writable button in front of a read-only route is not a permission
@@ -1281,6 +1314,14 @@
       view.innerHTML =
         head('Projects', 'Each development you are selling.',
           canWrite ? '<button class="btn primary" id="btn-new-project">New project</button>' : '') +
+        // Moved here from the dashboard (it belongs with the units it
+        // describes, not the morning briefing) — documentationDashboard
+        // (routes/dashboard.js) returns a completely different shape with
+        // no .units at all, so this only renders for a role that actually
+        // gets one back.
+        (projects.length && dashboardData && dashboardData.units
+          ? card('Inventory', inventoryHtml(dashboardData.units)) + '<div class="mb-2"></div>'
+          : '') +
         (projects.length
           ? '<div class="grid cols-3">' + projects.map(function (p) { return projectCard(p, canManageConstruction, canManageContractors, canModerateCommunity); }).join('') + '</div>'
           : card(null, R.emptyState(
@@ -1746,14 +1787,15 @@
           },
           canWrite
             ? {
-                emptyTitle: 'No units yet',
+                emptyTitle: 'No units added yet.',
                 emptyHint: 'Add them one at a time, in bulk, or import a CSV.',
                 emptyAction: '<button class="btn primary" id="btn-empty-unit">Add unit</button>',
+                emptyIcon: 'building',
               }
             // A read-only role's own screen has no Add/Import buttons — telling
             // them how to add units their screen doesn't let them add is a
             // dead end, not a hint.
-            : { emptyTitle: 'No units yet', emptyHint: 'Units will appear here once your team adds them.' }
+            : { emptyTitle: 'No units added yet.', emptyHint: 'Units will appear here once your team adds them.', emptyIcon: 'building' }
         ), { flush: true });
 
       R.qsa('[data-project]', view).forEach(function (pill) {
@@ -2351,8 +2393,15 @@
               '</tr>';
             },
             {
-              emptyTitle: search ? 'Nobody matched that' : creditFilter ? 'Nobody in this tier' : blacklistFilter ? 'No blacklisted buyers' : 'No buyers yet',
+              emptyTitle: search ? 'Nobody matched that' : creditFilter ? 'Nobody in this tier' : blacklistFilter ? 'No blacklisted buyers' : 'No buyers yet.',
               emptyHint: search ? 'Try a phone number or part of a surname.' : 'Add them one at a time, or import the list you already have.',
+              // Only the genuinely-empty-account case gets the icon and CTA —
+              // "no buyers yet" and "no buyers matched this search" are
+              // different problems, and "Import buyers" is not the answer
+              // to the second one.
+              emptyIcon: (!search && !creditFilter && !blacklistFilter) ? 'person' : undefined,
+              emptyAction: (!search && !creditFilter && !blacklistFilter)
+                ? '<button class="btn primary" id="btn-empty-import-buyers">Import buyers</button>' : undefined,
             }
           ), { flush: true }) +
           paginationControls(p);
@@ -2409,6 +2458,7 @@
         // opening — R.onClick gives that fetch a spinner and a toast if it
         // fails, which a bare addEventListener wouldn't for an async handler.
         R.onClick(view, '#btn-import-buyers', importCustomersModal);
+        R.onClick(view, '#btn-empty-import-buyers', importCustomersModal);
         R.onClick(view, '#btn-export-buyers', async function () {
           await R.downloadCsv('/reports/export/customers', 'archta-buyers.csv');
           toast('Exported. Check your downloads.', 'ok');
@@ -3383,10 +3433,17 @@
               '</td>' +
             '</tr>';
           },
-          { emptyTitle: 'No reservations yet', emptyHint: 'A reservation ties a buyer to a unit and starts their payment schedule.' }
+          status
+            ? { emptyTitle: 'No ' + status + ' reservations', emptyHint: 'A reservation ties a buyer to a unit and starts their payment schedule.' }
+            : {
+                emptyTitle: 'No reservations yet.',
+                emptyHint: 'A reservation ties a buyer to a unit and starts their payment schedule.',
+                emptyIcon: 'key',
+                emptyAction: '<button class="btn primary" id="btn-empty-res">New reservation</button>',
+              }
         ), { flush: true });
 
-      R.onClick(view, '#btn-new-res', async function () { await reservationModal({}); });
+      R.onClick(view, '#btn-new-res, #btn-empty-res', async function () { await reservationModal({}); });
 
       R.onClick(view, '#btn-export-reservations', async function () {
         await R.downloadCsv('/reports/export/schedule', 'archta-reservations.csv');
@@ -4148,9 +4205,9 @@
                 '</tr>';
               },
               {
-                emptyTitle: 'No payments recorded yet',
+                emptyTitle: 'No payments recorded yet.',
                 emptyHint: 'Record one against a due installment, or wait for the next Paystack payment to settle.',
-                emptyAction: '<a class="btn-quiet" href="#/payments?tab=all">Go to Schedule</a>',
+                emptyIcon: 'receipt',
               }
             ), { flush: true }) +
             paginationControls(p);
@@ -4741,7 +4798,12 @@
             { label: 'Generated', hideMobile: true }, { label: 'Expiry', hideMobile: true }, { label: '' }],
           currentDocumentRows(documents),
           documentRow,
-          { emptyTitle: 'No documents yet', emptyHint: 'Allocation letters are generated per reservation; receipts appear automatically when a payment is recorded.' }
+          {
+            emptyTitle: 'No documents yet.',
+            emptyHint: 'Generate an allocation letter to get started.',
+            emptyIcon: 'document',
+            emptyAction: '<button class="btn primary" id="btn-empty-doc">New document</button>',
+          }
         ), { flush: true });
 
       R.onClick(view, '[data-generate]', async function (button) {
@@ -4815,7 +4877,7 @@
         R.reload();
       });
 
-      R.qs('#btn-new-doc', view).addEventListener('click', function () {
+      R.qsa('#btn-new-doc, #btn-empty-doc', view).forEach(function (b) { b.addEventListener('click', function () {
         if (!reservations.length) return toast('Create a reservation first.', 'err');
 
         var list = reservations.map(function (r) {
@@ -4910,7 +4972,7 @@
             if (firstVisible) firstVisible.selected = true;
           }
         });
-      });
+      }); });
     },
   };
 
@@ -5355,7 +5417,7 @@
   function heatmapGrid(heatmap) {
     var days = (heatmap && heatmap.days) || [];
     var max = (heatmap && heatmap.max_amount) || 0;
-    if (!max) return R.emptyState('No payments recorded yet');
+    if (!max) return R.emptyState('Not enough data yet.', 'Reports will populate as payments are recorded.', null, 'chart');
     return '<div class="heatmap-grid">' +
       days.map(function (d) {
         var bucket = d.amount <= 0 ? 0 : Math.min(4, Math.ceil((d.amount / max) * 4));

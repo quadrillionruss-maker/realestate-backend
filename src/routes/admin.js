@@ -15,6 +15,7 @@ const rateLimit = require('express-rate-limit');
 const env = require('../config/env');
 const adminService = require('../services/adminService');
 const onboarding = require('../services/onboardingService');
+const clientErrors = require('../services/clientErrorService');
 
 const router = express.Router();
 
@@ -146,6 +147,29 @@ router.get('/feature-usage', wrap(async (req, res) => {
 
 router.get('/workspaces/:id/onboarding', wrap(async (req, res) => {
   res.json(await onboarding.checklist(req.params.id));
+}));
+
+router.get('/client-errors', wrap(async (req, res) => {
+  res.json(await clientErrors.list());
+}));
+
+// The admin dashboard reporting ITS OWN bugs, same as the operator app does
+// (routes/clientErrors.js) — a different route because there is no staff
+// JWT / org context here to attach (adminAuth is a single shared secret,
+// not a session), so orgId/userId are simply omitted; migrations/054 makes
+// both columns nullable for exactly this case.
+router.post('/client-errors', wrap(async (req, res) => {
+  const { message, stack, screen, url, user_agent } = req.body || {};
+  if (!message) return res.status(400).json({ error: 'message is required' });
+  await clientErrors.report({ app: 'admin', message, stack, screen, url, userAgent: user_agent });
+  res.status(201).json({ reported: true });
+}));
+
+router.post('/client-errors/resolve', wrap(async (req, res) => {
+  const { ids } = req.body || {};
+  if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids must be a non-empty array' });
+  await clientErrors.resolve(ids);
+  res.json({ resolved: ids.length });
 }));
 
 module.exports = router;
