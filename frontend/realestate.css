@@ -202,11 +202,12 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 
 /* ── 3. Auth gate ──────────────────────────────────────────────────────── */
 /* "Option 2 (Drawing Reference)" — the brand panel dressed as a survey
-   drawing: coordinates, a scale bar, a benchmark spine label, a title-block
-   reference on the form side. Every one of these is decorative — this
-   product has no geolocation feature and AUTH-01/BUILD 791 name nothing a
-   database tracks — the same way a blueprint's own title block is part of
-   the drawing, not a claim about the building. */
+   drawing: guides, a mark, coordinates, a floor plan, a scale bar, all
+   drawn as one strict-reproduction SVG (gate-blueprint-svg, below), plus a
+   rust permit stamp on the form side. Every one of these is decorative —
+   this product has no geolocation feature and the permit number names
+   nothing a database tracks — the same way a blueprint's own title block
+   is part of the drawing, not a claim about the building. */
 .gate {
   min-height: 100vh;
   min-height: 100dvh;
@@ -221,173 +222,28 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
    manifesto to sign in. */
 .gate-brand {
   position: relative;
-  padding: 48px 40px 44px 40px;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-start;
   background: var(--sidebar-bg);
   overflow: hidden;
 }
 
-/* The mark sits at the top; this pushes everything after it down by a
-   proportional share of whatever room is left, instead of a fixed margin —
-   the group (mark, then tagline+blurb) reads as centered-ish without the
-   space-between gap this used to rely on. */
-.gate-brand-spacer { flex: 0.3; }
+/* Every technical element (guides, mark, coordinates, floor plan, scale
+   bar) is drawn inside gate-blueprint-svg (index.html) as one strict
+   reproduction of the reference image — see that SVG's own top comment for
+   why it replaced the earlier <img>+mix-blend-mode approach. slice, not
+   the "meet" default, because the composition is designed to bleed off the
+   panel's right/bottom edges (the floor plan explicitly does in the
+   reference) — meet would letterbox that into visible gaps instead. */
+.gate-blueprint-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 
-/* A single, very slow indigo bloom — the only decorative gradient in the
-   whole product, at 18% behind text that never sits on its brightest point.
-   Indigo, not gold: gold is reserved for the ◆ mark and the brief's rule. */
-.gate-brand::after {
-  content: '';
-  position: absolute;
-  inset: -30% -40% auto -20%;
-  height: 80%;
-  background: radial-gradient(60% 60% at 30% 30%, rgba(30, 79, 99, 0.28), transparent 70%);
-  pointer-events: none;
-}
-
-.gate-brand > * { position: relative; z-index: 1; }
-
-.gate-mark {
-  display: inline-flex;
-  align-items: center;
-  gap: 11px;
-  font-family: var(--mono);
-  text-transform: uppercase;
-  font-weight: 600;
-  font-size: 13px;
-  letter-spacing: 0.14em;
-  color: var(--sidebar-text-active);
-}
-
-/* The brand mark: ◆ on a filled indigo square, everywhere it appears
-   (gate, sidebar, mobile gate-card fallback below) — except the gate's own
-   copy is now larger and gets the thin gold border item 4 asks for, so it
-   reads as a stamped plate rather than a small app icon. The diamond
-   itself is the one foreground use of gold in the entire product. */
-.gate-mark i {
-  width: 36px; height: 36px;
-  display: grid; place-items: center;
-  background: var(--accent);
-  border: 1px solid rgba(201, 164, 92, 0.35);
-  border-radius: 8px;
-  color: var(--gold);
-  font-style: normal;
-  font-size: 16px;
-  flex-shrink: 0;
-}
-
-/* ── Drawing-reference dressing (Option 2) ──────────────────────────────── */
-
-/* Item 28 — top-left corner stamp. */
-.gate-record-number {
-  position: absolute;
-  top: 0; left: 0;
-  width: 48px; height: 48px;
-  background: rgba(201, 164, 92, 0.15);
-  border-right: 1px solid rgba(201, 164, 92, 0.3);
-  border-bottom: 1px solid rgba(201, 164, 92, 0.3);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-}
-.gate-record-number-digit { font-family: var(--display); font-size: 20px; font-weight: 900; color: var(--gold); line-height: 1; }
-.gate-record-number-label {
-  font-family: var(--mono); font-size: 6px; text-transform: uppercase; letter-spacing: 0.1em;
-  color: rgba(201, 164, 92, 0.7); text-align: center; line-height: 1.3;
-}
-
-/* Item 8 — the panel's own spine label, rotated as one block (tick, text,
-   tick together) so the ticks land at the ends of the vertical run rather
-   than needing a separate counter-rotation to stay visually horizontal. */
-.gate-benchmark {
-  position: absolute;
-  left: 10px; top: 50%;
-  transform: rotate(-90deg) translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 8px;
-  letter-spacing: 0.2em;
-  color: rgba(255, 255, 255, 0.25);
-}
-.gate-benchmark-tick { width: 8px; height: 1px; background: rgba(255, 255, 255, 0.25); display: inline-block; }
-
-/* Item 6 — Maitama, Abuja. Decorative; this deployment has no geolocation
-   feature. */
-.gate-coordinates {
-  position: absolute;
-  top: 20px; right: 20px;
-  font-family: var(--mono);
-  font-size: 9px;
-  color: rgba(255, 255, 255, 0.35);
-  text-align: right;
-  letter-spacing: 0.05em;
-  line-height: 1.6;
-}
-
-/* Item 7 — a surveyor's benchmark crosshair. */
-.gate-crosshair { position: absolute; top: 38px; right: 130px; }
-
-/* The blueprint asset itself — real architectural linework (hundreds of
-   lines this file makes no attempt to redraw), not a CSS gradient or a
-   hand-drawn SVG standing in for one.
-
-   The PNG is authored on a near-white ground with pale teal ink, the
-   opposite of this panel's navy — opacity alone would just lay a hazy
-   light rectangle over the panel, not make the white disappear. multiply
-   is what actually does that: a white pixel multiplied against anything
-   leaves that anything unchanged (so the panel's own navy shows through
-   where the source paper was blank), while the darker/coloured ink
-   multiplies down into a tinted mark against it. That is also naturally
-   the low-contrast, subtle result the design calls for, not a side effect
-   to compensate for — a bolder blend mode (screen, lighten) would keep the
-   white paper visible as a wash, which is the one thing this must not do.
-
-   z-index:0 is the one deliberate exception to ".gate-brand > *"'s shared
-   z-index:1 further up this file — every real layer (decorations, mark,
-   headline, blurb) needs to paint above this, and this is the only child
-   of .gate-brand that should not. */
-.gate-blueprint-layer {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  /* Biased toward the bottom-right, where the asset's own floor-plan detail
-     concentrates (its top-left is comparatively bare) — object-fit:cover
-     crops symmetrically from a centered anchor by default, and on a panel
-     shape noticeably different from the asset's own 801:984 ratio, a
-     center crop risks trimming exactly the detail this is meant to show. */
-  object-position: 70% 85%;
-  mix-blend-mode: multiply;
-  opacity: 0.65;
-  z-index: 0;
-  pointer-events: none;
-}
-
-/* Item 10 — the plan's own printed scale bar. */
-.gate-scale-bar { position: absolute; bottom: 100px; left: 40px; }
-.gate-scale-label {
-  font-family: var(--mono); font-size: 8px; color: rgba(255, 255, 255, 0.28);
-  letter-spacing: 0.08em; margin-top: 4px;
-}
-
-/* Item 11 — pinned to the bottom of the flex column via margin-top:auto
-   (.gate-brand's own justify-content:flex-start leaves the free space
-   below the tagline block for this to consume). */
-.gate-registered { margin-top: auto; }
-.gate-registered-rule { height: 1px; background: rgba(255, 255, 255, 0.12); margin-bottom: 14px; }
-.gate-registered-label {
-  font-family: var(--mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.2em;
-  color: rgba(255, 255, 255, 0.35); margin-bottom: 8px;
-}
-.gate-registered-text { font-family: var(--mono); font-size: 11px; color: rgba(255, 255, 255, 0.5); line-height: 1.8; }
+/* The only two things NOT inside that SVG — the headline and blurb sit on
+   top of it, positioned independently, because the reference is explicit
+   that they are not part of the background composition (its own spec:
+   "nothing should compete with the future headline that will sit above
+   this background"). top:23% roughly clears the mark drawn inside the SVG
+   (which ends around 16% of the panel's own height) with the same kind of
+   breathing room the reference leaves before its own center-left empty
+   region ends. */
+.gate-headline-block { position: absolute; top: 23%; left: 40px; right: 40px; z-index: 1; }
 
 /* The tagline — Archivo Black, stacked, stencilled caps, the same display
    face as every other headline moment in the product now (greeting,

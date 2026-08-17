@@ -67,54 +67,167 @@
      still exists — it is a debugging tool now, not the only way in. -->
 <main class="gate" id="gate" hidden>
   <section class="gate-brand">
-    <!-- The blueprint asset — real architectural linework, not CSS-drawn.
-         Sits first in the DOM (and pinned to z-index:0 in CSS) so it is the
-         lowest layer above the panel's own navy background: every other
-         child of .gate-brand shares z-index:1 via the ".gate-brand > *"
-         rule further down, so this is the one deliberate exception. Purely
-         decorative — alt="" and aria-hidden so a screen reader skips it
-         entirely rather than announcing an unlabelled image. -->
-    <img class="gate-blueprint-layer" src="./archta_blueprint_background.png" alt="" aria-hidden="true">
+    <!-- Strict reference reproduction of archta_blueprint_background.png,
+         redrawn as one SVG (not the raster asset itself — this replaces the
+         earlier <img>+mix-blend-mode approach entirely) so every element's
+         position is exact and independent of how the browser happens to
+         crop a bitmap at a given panel aspect ratio. viewBox matches the
+         reference PNG's own pixel dimensions (801x984) so coordinates below
+         were read directly off it. preserveAspectRatio="xMidYMid slice" is
+         the SVG equivalent of object-fit:cover — the composition is
+         designed to bleed off the panel's right and bottom edges (the floor
+         plan explicitly does), so letterboxing (the "meet" default) would
+         leave visible gaps that never appear in the reference.
+         aria-hidden — purely decorative, nothing here is live data. -->
+    <svg class="gate-blueprint-svg" viewBox="0 0 801 984" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+      <defs>
+        <pattern id="gate-hatch" width="6" height="6" patternUnits="userSpaceOnUse">
+          <circle cx="1.2" cy="1.2" r="0.6" fill="rgba(230,236,242,0.35)"/>
+        </pattern>
+      </defs>
 
-    <!-- Item 28 — a corner stamp, top-left, in the same gold the ◆ mark
-         itself uses — the one recurring signature colour in this palette. -->
-    <div class="gate-record-number">
-      <div class="gate-record-number-digit">1</div>
-      <div class="gate-record-number-label">RECORD<br>NUMBER</div>
-    </div>
+      <!-- Section 3 — two parallel vertical guides at the panel's left
+           edge: solid first, dashed second beside it, never reversed. -->
+      <g id="left-guides" stroke="rgba(201,164,92,0.55)">
+        <line x1="23" y1="30" x2="23" y2="905" stroke-width="1"/>
+        <line x1="44" y1="30" x2="44" y2="905" stroke="rgba(230,236,242,0.35)" stroke-width="1" stroke-dasharray="1 5"/>
+        <!-- BM - 01 sits beside the dashed guide, not centered on it. -->
+        <text x="52" y="742" transform="rotate(-90 52 742)" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="12"
+              letter-spacing="2" fill="rgba(230,236,242,0.4)">BM - 01</text>
+      </g>
 
-    <!-- Item 8 — a spine label on the panel's own left edge, the way a
-         physical survey plan is stamped BM (benchmark) — 01 near its border.
-         Rotated as one block (text + its two ticks together) so the whole
-         thing reads correctly after the -90deg turn, not just the text. -->
-    <div class="gate-benchmark">
-      <span class="gate-benchmark-tick"></span>
-      BM — 01
-      <span class="gate-benchmark-tick"></span>
-    </div>
+      <!-- Section 4 — the mark, built from primitives (square, diamond,
+           ticks, arrows, wordmark), not an icon-font glyph. -->
+      <g id="logo-mark">
+        <rect x="118" y="88" width="72" height="72" fill="none" stroke="rgba(230,236,242,0.55)" stroke-width="1"/>
+        <path d="M154 124l14 14-14 14-14-14z" fill="#C9A45C"/>
+        <!-- Horizontal ticks — shorter than the vertical ones. -->
+        <line x1="95" y1="124" x2="118" y2="124" stroke="rgba(230,236,242,0.55)" stroke-width="1"/>
+        <line x1="190" y1="124" x2="213" y2="124" stroke="rgba(230,236,242,0.55)" stroke-width="1"/>
+        <!-- Vertical ticks, each ending in an arrow. -->
+        <line x1="154" y1="88" x2="154" y2="48" stroke="rgba(230,236,242,0.55)" stroke-width="1"/>
+        <path d="M148 56l6-12 6 12z" fill="rgba(230,236,242,0.55)"/>
+        <line x1="154" y1="160" x2="154" y2="200" stroke="rgba(230,236,242,0.55)" stroke-width="1"/>
+        <path d="M148 192l6 12 6-12z" fill="rgba(230,236,242,0.55)"/>
+        <text x="225" y="132" font-family="'Archivo Black', sans-serif" font-size="26" font-weight="900"
+              letter-spacing="2" fill="rgba(255,255,255,0.92)">ARCHTA</text>
+      </g>
 
-    <!-- Item 6, values matched to the approved reference image. Decorative,
-         not a live location — this deployment has no geolocation feature;
-         it is here because a real survey drawing always carries the
-         coordinates of what it describes. -->
-    <div class="gate-coordinates">
-      <div>N 6° 27′ 15.2″</div>
-      <div>E 3° 24′ 10.8″</div>
-    </div>
+      <!-- Section 5-6 — coordinates, right-aligned, with exactly one
+           compass centered beneath them. -->
+      <g id="coordinates" text-anchor="end" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="15" fill="rgba(230,236,242,0.45)" letter-spacing="1">
+        <text x="770" y="68">N 6&#176; 27&#8242; 15.2&#8243;</text>
+        <text x="770" y="90">E 3&#176; 24&#8242; 10.8&#8243;</text>
+      </g>
+      <g id="upper-right-compass" stroke="rgba(230,236,242,0.4)" stroke-width="1">
+        <circle cx="745" cy="163" r="17" fill="none"/>
+        <line x1="745" y1="140" x2="745" y2="186"/>
+        <line x1="719" y1="163" x2="771" y2="163"/>
+      </g>
 
-    <!-- Item 7 — a surveyor's benchmark crosshair, the same drafting-table
-         vocabulary as the coordinates and the scale bar below. -->
-    <svg class="gate-crosshair" viewBox="0 0 30 30" width="30" height="30" aria-hidden="true">
-      <circle cx="15" cy="15" r="7" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
-      <line x1="15" y1="0" x2="15" y2="30" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
-      <line x1="0" y1="15" x2="30" y2="15" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
+      <!-- Section 7-9 — the floor plan. One rotated group so every room
+           shares the exact same angle; local coordinates below are drawn as
+           if unrotated, then the whole assembly is turned around a pivot
+           near point A (its own top-left corner) so it reads as one
+           consistent CAD drawing, not several independently-angled pieces. -->
+      <g id="floor-plan" transform="rotate(11 770 590)" fill="none" stroke="rgba(230,236,242,0.4)" stroke-width="0.9"
+         font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="11">
+        <!-- Hatched foundation triangle at the plan's own leftmost point. -->
+        <path d="M683 818 L790 585 L790 700 Z" fill="url(#gate-hatch)" stroke="rgba(230,236,242,0.5)"/>
+        <!-- Exterior wall — the long diagonal spine every room hangs off. -->
+        <path d="M683 818 L790 585 L1010 470 L1230 380 L1460 300 L1620 260" stroke-width="1.3"/>
+        <path d="M790 700 L1000 590 L1210 490 L1430 410 L1600 360" stroke-width="1.3"/>
+        <!-- Interior walls / room divisions. -->
+        <line x1="880" y1="650" x2="905" y2="540"/>
+        <line x1="985" y1="605" x2="1010" y2="495"/>
+        <line x1="1095" y1="560" x2="1120" y2="450"/>
+        <line x1="1205" y1="515" x2="1230" y2="405"/>
+        <line x1="1315" y1="470" x2="1340" y2="360"/>
+        <line x1="1425" y1="425" x2="1450" y2="320"/>
+        <!-- Door swing arcs. -->
+        <path d="M905 540 A50 50 0 0 1 940 585"/>
+        <path d="M1120 450 A44 44 0 0 1 1150 490"/>
+        <!-- Windows — short double ticks across two exterior segments. -->
+        <line x1="1000" y1="540" x2="1010" y2="500" stroke-width="1.6"/>
+        <line x1="1300" y1="420" x2="1310" y2="382" stroke-width="1.6"/>
+        <!-- Room numbers. -->
+        <text x="800" y="770">02</text>
+        <text x="945" y="620">07</text>
+        <text x="1155" y="540">04</text>
+        <text x="1360" y="440">08</text>
+        <text x="1060" y="700">01</text>
+        <text x="1270" y="600">01</text>
+        <text x="1000" y="500">071</text>
+        <!-- Dimension lines: extension ticks + a numeric label along each. -->
+        <g stroke="rgba(230,236,242,0.3)" stroke-width="0.6">
+          <line x1="790" y1="585" x2="790" y2="820" stroke-dasharray="1 4"/>
+          <line x1="1010" y1="470" x2="1010" y2="700" stroke-dasharray="1 4"/>
+          <line x1="1230" y1="380" x2="1230" y2="600" stroke-dasharray="1 4"/>
+        </g>
+        <text x="835" y="705" transform="rotate(-32 835 705)">3.80</text>
+        <text x="905" y="665" transform="rotate(-32 905 665)">1.80</text>
+        <text x="1000" y="640" transform="rotate(-32 1000 640)">9.80</text>
+        <text x="1075" y="565" transform="rotate(-32 1075 565)">3.80</text>
+        <text x="1210" y="520" transform="rotate(-32 1210 520)">2.80</text>
+        <text x="1350" y="430" transform="rotate(-32 1350 430)">1.30</text>
+        <text x="1470" y="350" transform="rotate(-32 1470 350)">2.20</text>
+        <!-- Construction marks — small x-crosses at a few wall junctions. -->
+        <g stroke="rgba(230,236,242,0.4)" stroke-width="0.7">
+          <path d="M785 580l10 10M795 580l-10 10"/>
+          <path d="M1005 465l10 10M1015 465l-10 10"/>
+          <path d="M1225 375l10 10M1235 375l-10 10"/>
+        </g>
+      </g>
+
+      <!-- Section 9 — A/B section markers, part of the floor plan's own
+           rotation so they stay pinned to the drawing rather than the page
+           axes. -->
+      <g id="section-markers" transform="rotate(11 770 590)" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="11" fill="rgba(230,236,242,0.5)">
+        <circle cx="745" cy="600" r="11" fill="none" stroke="rgba(230,236,242,0.5)" stroke-width="0.8"/>
+        <text x="745" y="604" text-anchor="middle">A</text>
+        <circle cx="1350" cy="322" r="11" fill="none" stroke="rgba(230,236,242,0.5)" stroke-width="0.8"/>
+        <text x="1350" y="326" text-anchor="middle">B</text>
+      </g>
+
+      <!-- Section 13 — REGISTERED SYSTEM block. Kept clear of the floor
+           plan (section 14) — it sits well inside the panel's empty
+           center-left, not over any of the rotated group above. -->
+      <g id="registered-system" font-family="'IBM Plex Mono', ui-monospace, monospace">
+        <text x="90" y="682" font-size="11" letter-spacing="3" fill="rgba(230,236,242,0.45)">REGISTERED SYSTEM</text>
+        <line x1="90" y1="694" x2="230" y2="694" stroke="rgba(230,236,242,0.3)" stroke-width="1" stroke-dasharray="1 4"/>
+        <text x="90" y="720" font-size="13" fill="rgba(230,236,242,0.6)">Built for developers.</text>
+        <text x="90" y="740" font-size="13" fill="rgba(230,236,242,0.6)">Backed by records.</text>
+        <line x1="90" y1="756" x2="230" y2="756" stroke="rgba(230,236,242,0.3)" stroke-width="1" stroke-dasharray="1 4"/>
+      </g>
+
+      <!-- Section 11-12 — bottom guide, scale bar. The 0-10 segment is
+           drawn at a heavier stroke-width than the rest, per spec — the
+           whole bar is not uniformly bold. -->
+      <line id="bottom-guide" x1="23" y1="905" x2="410" y2="905" stroke="rgba(230,236,242,0.25)" stroke-width="1" stroke-dasharray="1 5"/>
+      <g id="scale-bar" font-family="'IBM Plex Mono', ui-monospace, monospace" font-size="11" fill="rgba(230,236,242,0.5)">
+        <line x1="120" y1="898" x2="185" y2="898" stroke="rgba(230,236,242,0.75)" stroke-width="1.4"/>
+        <line x1="185" y1="898" x2="340" y2="898" stroke="rgba(230,236,242,0.4)" stroke-width="0.8"/>
+        <line x1="120" y1="893" x2="120" y2="903" stroke="rgba(230,236,242,0.6)" stroke-width="1"/>
+        <line x1="185" y1="893" x2="185" y2="903" stroke="rgba(230,236,242,0.6)" stroke-width="1"/>
+        <line x1="250" y1="894" x2="250" y2="902" stroke="rgba(230,236,242,0.5)" stroke-width="0.8"/>
+        <line x1="340" y1="893" x2="340" y2="903" stroke="rgba(230,236,242,0.6)" stroke-width="1"/>
+        <text x="120" y="918" text-anchor="middle">0</text>
+        <text x="185" y="918" text-anchor="middle">10</text>
+        <text x="250" y="918" text-anchor="middle">20</text>
+        <text x="340" y="918" text-anchor="middle">30M</text>
+      </g>
+
+      <!-- Section 10 — the one bottom-left compass, at the meeting point of
+           the left guides and the bottom guide; the lines continue through
+           it rather than stopping at its edge. -->
+      <g id="bottom-left-compass" stroke="rgba(201,164,92,0.5)" stroke-width="1">
+        <circle cx="23" cy="905" r="16" fill="none"/>
+        <line x1="23" y1="882" x2="23" y2="928"/>
+        <line x1="0" y1="905" x2="46" y2="905"/>
+      </g>
     </svg>
 
-    <div class="gate-mark"><i>◆</i> ARCHTA</div>
-
-    <div class="gate-brand-spacer" aria-hidden="true"></div>
-
-    <div>
+    <div class="gate-headline-block">
       <!-- Three independently-styled lines — not achievable with one <em>
            run inside a single heading. Middle line dim, bookended by the
            first and last line at full weight. -->
@@ -124,26 +237,6 @@
         <span class="gate-headline-line">on record.</span>
       </h1>
       <p class="gate-blurb">Nothing about a sale lives anywhere else.</p>
-    </div>
-
-    <!-- Item 10 — 5 ticks across a 100px line: 0/25/50/75/100, read against
-         the "0 10 20 30M" label below as a plan's printed scale bar. -->
-    <div class="gate-scale-bar">
-      <svg width="100" height="8" viewBox="0 0 100 8" aria-hidden="true">
-        <line x1="0" y1="4" x2="100" y2="4" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
-        <line x1="0" y1="0" x2="0" y2="8" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
-        <line x1="25" y1="1" x2="25" y2="7" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
-        <line x1="50" y1="1" x2="50" y2="7" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
-        <line x1="75" y1="1" x2="75" y2="7" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
-        <line x1="100" y1="0" x2="100" y2="8" stroke="rgba(255,255,255,0.28)" stroke-width="0.75"/>
-      </svg>
-      <div class="gate-scale-label">0 10 20 30M</div>
-    </div>
-
-    <div class="gate-registered">
-      <div class="gate-registered-rule"></div>
-      <div class="gate-registered-label">REGISTERED SYSTEM</div>
-      <p class="gate-registered-text">Built for developers.<br>Backed by records.</p>
     </div>
   </section>
 
