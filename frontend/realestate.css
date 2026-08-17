@@ -201,11 +201,17 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .serif { font-family: var(--serif); text-transform: uppercase; font-weight: 900; }
 
 /* ── 3. Auth gate ──────────────────────────────────────────────────────── */
+/* "Option 2 (Drawing Reference)" — the brand panel dressed as a survey
+   drawing: coordinates, a scale bar, a benchmark spine label, a title-block
+   reference on the form side. Every one of these is decorative — this
+   product has no geolocation feature and AUTH-01/BUILD 791 name nothing a
+   database tracks — the same way a blueprint's own title block is part of
+   the drawing, not a claim about the building. */
 .gate {
   min-height: 100vh;
   min-height: 100dvh;
   display: grid;
-  grid-template-columns: 1.05fr 1fr;
+  grid-template-columns: 1.15fr 0.85fr;
   background: var(--bg);
 }
 
@@ -215,13 +221,19 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
    manifesto to sign in. */
 .gate-brand {
   position: relative;
-  padding: 56px 56px 44px;
+  padding: 48px 40px 44px 40px;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: flex-start;
   background: var(--sidebar-bg);
   overflow: hidden;
 }
+
+/* The mark sits at the top; this pushes everything after it down by a
+   proportional share of whatever room is left, instead of a fixed margin —
+   the group (mark, then tagline+blurb) reads as centered-ish without the
+   space-between gap this used to rely on. */
+.gate-brand-spacer { flex: 0.3; }
 
 /* A single, very slow indigo bloom — the only decorative gradient in the
    whole product, at 18% behind text that never sits on its brightest point.
@@ -244,24 +256,113 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   font-family: var(--mono);
   text-transform: uppercase;
   font-weight: 600;
-  font-size: 12px;
+  font-size: 13px;
   letter-spacing: 0.14em;
   color: var(--sidebar-text-active);
 }
 
 /* The brand mark: ◆ on a filled indigo square, everywhere it appears
-   (gate, sidebar, mobile gate-card fallback below). The diamond itself is
-   the one foreground use of gold in the entire product. */
+   (gate, sidebar, mobile gate-card fallback below) — except the gate's own
+   copy is now larger and gets the thin gold border item 4 asks for, so it
+   reads as a stamped plate rather than a small app icon. The diamond
+   itself is the one foreground use of gold in the entire product. */
 .gate-mark i {
-  width: 28px; height: 28px;
+  width: 36px; height: 36px;
   display: grid; place-items: center;
   background: var(--accent);
-  border-radius: 7px;
+  border: 1px solid rgba(201, 164, 92, 0.35);
+  border-radius: 8px;
   color: var(--gold);
   font-style: normal;
-  font-size: 13px;
+  font-size: 16px;
   flex-shrink: 0;
 }
+
+/* ── Drawing-reference dressing (Option 2) ──────────────────────────────── */
+
+/* Item 28 — top-left corner stamp. */
+.gate-record-number {
+  position: absolute;
+  top: 0; left: 0;
+  width: 48px; height: 48px;
+  background: rgba(201, 164, 92, 0.15);
+  border-right: 1px solid rgba(201, 164, 92, 0.3);
+  border-bottom: 1px solid rgba(201, 164, 92, 0.3);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+}
+.gate-record-number-digit { font-family: var(--display); font-size: 20px; font-weight: 900; color: var(--gold); line-height: 1; }
+.gate-record-number-label {
+  font-family: var(--mono); font-size: 6px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: rgba(201, 164, 92, 0.7); text-align: center; line-height: 1.3;
+}
+
+/* Item 8 — the panel's own spine label, rotated as one block (tick, text,
+   tick together) so the ticks land at the ends of the vertical run rather
+   than needing a separate counter-rotation to stay visually horizontal. */
+.gate-benchmark {
+  position: absolute;
+  left: 10px; top: 50%;
+  transform: rotate(-90deg) translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  color: rgba(255, 255, 255, 0.25);
+}
+.gate-benchmark-tick { width: 8px; height: 1px; background: rgba(255, 255, 255, 0.25); display: inline-block; }
+
+/* Item 6 — Maitama, Abuja. Decorative; this deployment has no geolocation
+   feature. */
+.gate-coordinates {
+  position: absolute;
+  top: 20px; right: 20px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.35);
+  text-align: right;
+  letter-spacing: 0.05em;
+  line-height: 1.6;
+}
+
+/* Item 7 — a surveyor's benchmark crosshair. */
+.gate-crosshair { position: absolute; top: 38px; right: 130px; }
+
+/* Item 9 — an abstract floor plan, rotated behind the tagline. Its own
+   opacity, separate from the near-full-opacity stroke colour baked into the
+   SVG markup itself (index.html), so the shape stays crisp at any zoom
+   level rather than relying on a washed-out stroke colour to read as faint. */
+.gate-floorplan {
+  position: absolute;
+  right: -20px; top: 50%;
+  transform: translateY(-40%) rotate(-8deg);
+  opacity: 0.12;
+  pointer-events: none;
+}
+
+/* Item 10 — the plan's own printed scale bar. */
+.gate-scale-bar { position: absolute; bottom: 100px; left: 40px; }
+.gate-scale-label {
+  font-family: var(--mono); font-size: 8px; color: rgba(255, 255, 255, 0.28);
+  letter-spacing: 0.08em; margin-top: 4px;
+}
+
+/* Item 11 — pinned to the bottom of the flex column via margin-top:auto
+   (.gate-brand's own justify-content:flex-start leaves the free space
+   below the tagline block for this to consume). */
+.gate-registered { margin-top: auto; }
+.gate-registered-rule { height: 1px; background: rgba(255, 255, 255, 0.12); margin-bottom: 14px; }
+.gate-registered-label {
+  font-family: var(--mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.2em;
+  color: rgba(255, 255, 255, 0.35); margin-bottom: 8px;
+}
+.gate-registered-text { font-family: var(--mono); font-size: 11px; color: rgba(255, 255, 255, 0.5); line-height: 1.8; }
 
 /* The tagline — Archivo Black, stacked, stencilled caps, the same display
    face as every other headline moment in the product now (greeting,
@@ -274,7 +375,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   flex-direction: column;
   font-family: var(--display);
   text-transform: uppercase;
-  font-size: 50px;
+  font-size: 52px;
   font-weight: 900;
   letter-spacing: -1px;
   line-height: 0.97;
@@ -282,14 +383,18 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 }
 
 .gate-headline-line { color: var(--sidebar-text-active); font-weight: 900; }
-.gate-headline-line.is-dim { opacity: 0.5; }
+/* Blueprint teal, not a fade — this line reads as a deliberate second
+   colour (the drafting-table accent itself, lightened for a dark ground),
+   not as "less important" the way opacity implied. */
+.gate-headline-line.is-dim { color: #4A8FA8; opacity: 1; }
 
 .gate-blurb {
   font-family: var(--sans);
-  color: rgba(255, 255, 255, 0.78);
+  color: rgba(255, 255, 255, 0.75);
   max-width: 42ch;
   font-size: 14px;
   line-height: 1.65;
+  margin-top: 20px;
 }
 
 /* Three statements about behaviour, replacing what used to be three numbers
@@ -335,17 +440,48 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .gate-card-brand { display: none; }
 
 .gate-form-wrap {
-  display: grid;
-  place-items: center;
-  padding: 40px 28px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 28px 24px;
+  background: var(--panel);
 }
+
+/* Item 13 — the form side's own title-block reference, styled like the
+   record-number stamp on the brand panel: this document, catalogued. */
+.gate-drawing-ref {
+  position: absolute;
+  top: 28px; right: 32px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-strong);
+  text-align: right;
+}
+.gate-drawing-ref-label {
+  font-family: var(--mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--text-faint);
+}
+.gate-drawing-ref-code { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--accent); margin-top: 2px; }
+.gate-drawing-ref-rev { font-family: var(--mono); font-size: 9px; color: var(--text-faint); margin-top: 1px; }
+.gate-drawing-ref-diamond { text-align: center; color: var(--gold); font-size: 8px; margin-top: 4px; }
 
 .gate-card { width: 100%; max-width: 372px; }
 
+/* Item 25 — outside .gate-card (index.html), always visible regardless of
+   which gate form is showing; margin-top:auto is what pins it to the
+   bottom of the flex column above. */
+.gate-footer-line {
+  margin-top: auto;
+  padding-top: 24px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
 .gate-title {
   font-family: var(--display);
-  text-transform: uppercase;
-  font-size: 22px;
+  text-transform: none;
+  font-size: 26px;
   font-weight: 900;
   letter-spacing: -0.01em;
   margin-bottom: 6px;
@@ -354,13 +490,17 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .gate-sub { color: var(--text-dim); margin-bottom: 26px; font-size: 13.5px; }
 
 /* Tabs: sign in / create account. An underline indicator, not a filled
-   pill — the accent colour IS the "you are here" signal now. */
+   pill — the accent colour IS the "you are here" signal now. Only Sign In
+   is ever visible now (Create account hidden — item 14, see index.html's
+   own comment on why it is display:none and not removed from the DOM). */
 .gate-tabs {
   display: flex;
   gap: 4px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 24px;
 }
+
+#tab-register { display: none; }
 
 .gate-tab {
   flex: 1;
@@ -371,6 +511,10 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   color: var(--text-faint);
   transition: color .18s var(--ease), border-color .18s var(--ease);
 }
+
+/* The one remaining tab: a label, not a control competing for a full flex
+   share it no longer needs to share with anything. */
+#tab-login { flex: 0; padding-left: 0; }
 
 .gate-tab[aria-selected='true'] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 .gate-tab:hover:not([aria-selected='true']) { color: var(--text-dim); }
@@ -396,6 +540,15 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 /* Google renders its own button into this slot. */
 #google-slot { display: flex; justify-content: center; }
 
+/* Item 22 — the three dashed rules, replacing solid border-tops as the
+   section separator inside the sign-in form specifically (the other gate
+   forms — register, reset, 2FA — keep their existing solid .gate-foot
+   border-top; this redesign only reaches the form item 16-24 describe). */
+.gate-dashed { border: none; border-top: 1px dashed var(--line-strong); margin: 18px 0; }
+
+/* Item 23 — between the last dashed rule and "Need an account". */
+.gate-diamond-sep { text-align: center; color: var(--gold); font-size: 9px; margin: 6px 0; }
+
 .gate-foot {
   margin-top: 26px;
   padding-top: 20px;
@@ -406,6 +559,102 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+/* Item 24 — the sign-in form's own foot has only "Need an account?" left in
+   it (Forgot your password moved up to .gate-remember-row, item 18), so the
+   space-between/border-top treatment above (still used by every other gate
+   form) is overridden here for a single centered line instead. */
+.gate-foot-center {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+  justify-content: center;
+  font-size: 13px;
+}
+
+/* Item 17 — envelope/lock icons inside the email/password inputs. */
+.gate-field-icon { position: relative; }
+.gate-input-icon {
+  position: absolute;
+  left: 12px;
+  /* Anchored from the FIELD's bottom edge, not its top — the input is a
+     fixed 48px (.gate-card .input) and is always the last element in these
+     two fields, so bottom:17px (half of 48, minus half the 14px icon)
+     centers it in the input regardless of the label's own line-height,
+     which a fixed top offset would have to guess at and could drift out of
+     sync with. */
+  bottom: 17px;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+.gate-field-icon .input { padding-left: 38px; }
+
+/* Item 18 — remember-me / forgot-password row, directly under the password
+   field. */
+.gate-remember-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 12px 0 20px;
+}
+.gate-remember {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+.gate-remember input { width: 14px; height: 14px; accent-color: var(--accent); }
+.gate-forgot { font-size: 12.5px; }
+
+/* Item 19 — SIGN IN →, the one button on this form that gets the mono/
+   letter-spaced drafting-plate treatment rather than the app-wide .btn.primary
+   look (which every OTHER primary button in the product still uses
+   unmodified — this class only ever applies inside .gate-card). */
+.gate-submit {
+  height: 48px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  font-size: 13px;
+}
+
+/* Items 20-21, 26-27 — inputs and labels throughout every gate form, not
+   just sign-in: consistent treatment across register/reset/2FA too, since
+   they share this same card. Spacing here (6px label-to-input via .field's
+   own margin-bottom, 16px between fields — see .field below) is the
+   8/16/24/32 system item 26 asks for. */
+.gate-card .field { margin-bottom: 16px; }
+.gate-card .field label {
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.gate-card .input {
+  /* box-sizing:border-box, not a recalculated content-height, is the fix
+     here — the base .input rule (no box-sizing reset anywhere in this
+     file) carries 9px 12px padding, and this file's own .btn avoids the
+     same trap only because IT uses 0 vertical padding + flex centering
+     instead. An input can't do that (padding is what keeps typed text off
+     the border), so height:48px under the default content-box would add
+     that 18px of padding AND 2px of border on top, rendering at 68px. */
+  box-sizing: border-box;
+  height: 48px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+}
+.gate-card .input:focus {
+  border: 1.5px solid var(--accent);
+  box-shadow: 0 0 0 3px rgba(30, 79, 99, 0.10);
+  background: var(--panel);
 }
 
 .link-quiet {
@@ -626,11 +875,11 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   box-shadow: 0 1px 3px rgba(80, 80, 160, 0.06);
 }
 
-.search { position: relative; flex: 1; max-width: 420px; transition: max-width .16s var(--ease); }
+.search { position: relative; flex: 1; max-width: 500px; transition: max-width .16s var(--ease); }
 /* "Expand slightly" on focus — a few px of breathing room past the resting
-   420px, not a jarring resize; the transition above is what makes it read
+   500px, not a jarring resize; the transition above is what makes it read
    as an expansion rather than a snap. */
-.search:focus-within { max-width: 448px; }
+.search:focus-within { max-width: 530px; }
 
 .search input {
   width: 100%;

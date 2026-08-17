@@ -1319,6 +1319,17 @@
         button.classList.remove('is-working');
       }
     });
+
+    // Item 25 of the drawing-reference redesign — no inline <script> (same
+    // CSP reasoning config.js's own header explains), and a class lookup
+    // rather than el()/getElementById since .gate-footer-year is a class,
+    // not an id. Named yearEl rather than el deliberately: el is this
+    // file's own document.getElementById helper, already in scope for the
+    // rest of this function — shadowing it with a local var (even one
+    // holding an unrelated querySelector result) would hoist over every
+    // other el('...') call in wireGate, not just the lines after it.
+    var yearEl = document.querySelector('.gate-footer-year');
+    if (yearEl) yearEl.textContent = new Date().getFullYear();
   }
 
   // Google Identity Services. Loaded only if the server reports a client id,
