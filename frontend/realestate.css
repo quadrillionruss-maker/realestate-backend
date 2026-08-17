@@ -448,21 +448,33 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   background: var(--panel);
 }
 
-/* Item 13 — the form side's own title-block reference, styled like the
-   record-number stamp on the brand panel: this document, catalogued. */
+/* Item 13, rebuilt to match the approved reference image — a rotated
+   rust/terracotta permit stamp, not the mono title-block the text spec
+   originally described. Reuses --danger/--danger-soft rather than
+   introducing a new colour token: it is already this exact rust-red
+   (#B23A24) elsewhere in the palette, just never on a light tint background
+   like a real ink stamp before now. */
 .gate-drawing-ref {
   position: absolute;
   top: 28px; right: 32px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--line-strong);
-  text-align: right;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid rgba(178, 58, 36, 0.4);
+  border-radius: 3px;
+  background: var(--danger-soft);
+  transform: rotate(-3deg);
 }
+.gate-drawing-ref-diamond { color: var(--danger); font-size: 13px; line-height: 1; margin-top: 2px; }
 .gate-drawing-ref-label {
-  font-family: var(--mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.15em; color: var(--text-faint);
+  font-family: var(--mono); font-size: 9px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--danger); line-height: 1.5;
 }
-.gate-drawing-ref-code { font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--accent); margin-top: 2px; }
-.gate-drawing-ref-rev { font-family: var(--mono); font-size: 9px; color: var(--text-faint); margin-top: 1px; }
-.gate-drawing-ref-diamond { text-align: center; color: var(--gold); font-size: 8px; margin-top: 4px; }
+.gate-drawing-ref-code {
+  font-family: var(--mono); font-size: 9px; color: var(--danger); opacity: 0.85;
+  letter-spacing: 0.04em; margin-top: 4px;
+}
 
 .gate-card { width: 100%; max-width: 372px; }
 
@@ -572,6 +584,9 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   justify-content: center;
   font-size: 13px;
 }
+/* "Create one" — accent by default per the reference image, same reasoning
+   .gate-forgot overrides .link-quiet's base color above. */
+.gate-foot-center .link-quiet { color: var(--accent); }
 
 /* Item 17 — envelope/lock icons inside the email/password inputs. */
 .gate-field-icon { position: relative; }
@@ -590,6 +605,27 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 }
 .gate-field-icon .input { padding-left: 38px; }
 
+/* Password visibility toggle — right side, mirroring the lock icon's own
+   left-side positioning exactly (same bottom:17px anchor, same reasoning:
+   robust against the label's line-height rather than a guessed top offset).
+   Only the password field's input gets the extra right padding; the email
+   field has no button there and does not need the room. */
+.gate-password-toggle {
+  position: absolute;
+  right: 12px;
+  bottom: 17px;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: var(--text-faint);
+  cursor: pointer;
+  display: flex;
+  line-height: 0;
+}
+.gate-password-toggle:hover { color: var(--text-dim); }
+#login-password { padding-right: 38px; }
+
 /* Item 18 — remember-me / forgot-password row, directly under the password
    field. */
 .gate-remember-row {
@@ -606,7 +642,10 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   color: var(--text-dim);
 }
 .gate-remember input { width: 14px; height: 14px; accent-color: var(--accent); }
-.gate-forgot { font-size: 12.5px; }
+/* Accent by default, per the reference image — .link-quiet's own base
+   color (var(--text-dim)) only turns accent on hover, which is right for
+   every OTHER quiet link in the app but not this one. */
+.gate-forgot { font-size: 12.5px; color: var(--accent); }
 
 /* Item 19 — SIGN IN →, the one button on this form that gets the mono/
    letter-spaced drafting-plate treatment rather than the app-wide .btn.primary

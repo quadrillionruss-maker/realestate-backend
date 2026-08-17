@@ -84,12 +84,13 @@
       <span class="gate-benchmark-tick"></span>
     </div>
 
-    <!-- Item 6 — Maitama, Abuja. Decorative, not a live location — this
-         deployment has no geolocation feature; it is here because a real
-         survey drawing always carries the coordinates of what it describes. -->
+    <!-- Item 6, values matched to the approved reference image. Decorative,
+         not a live location — this deployment has no geolocation feature;
+         it is here because a real survey drawing always carries the
+         coordinates of what it describes. -->
     <div class="gate-coordinates">
-      <div>N 9° 3′ 44.2″</div>
-      <div>E 7° 29′ 17.8″</div>
+      <div>N 6° 27′ 15.2″</div>
+      <div>E 3° 24′ 10.8″</div>
     </div>
 
     <!-- Item 7 — a surveyor's benchmark crosshair, the same drafting-table
@@ -154,16 +155,17 @@
   </section>
 
   <section class="gate-form-wrap">
-    <!-- Item 13 — styled like the drawing's own title-block reference, the
-         same "this document, catalogued" idea the record-number stamp on
-         the brand panel carries. BUILD 791 names this deployment's test
-         count at the time this design shipped, same convention the git log
-         for this repo already uses in every commit message. -->
+    <!-- Item 13, per the approved reference image — a rotated permit stamp
+         (rust/terracotta, not the mono drawing-ref block the text spec
+         originally described), replacing AUTH-01/BUILD 791 with a permit
+         number. Decorative, same footing as every other drawing motif on
+         this page: nothing here is a real license or a database record. -->
     <div class="gate-drawing-ref">
-      <div class="gate-drawing-ref-label">DRAWING REF.</div>
-      <div class="gate-drawing-ref-code">AUTH-01</div>
-      <div class="gate-drawing-ref-rev">BUILD 791</div>
       <div class="gate-drawing-ref-diamond">◆</div>
+      <div class="gate-drawing-ref-text">
+        <div class="gate-drawing-ref-label">PERMIT TO OPERATE<br>ARCHTA SYSTEM</div>
+        <div class="gate-drawing-ref-code">NO. 2024-08-15-01</div>
+      </div>
     </div>
 
     <div class="gate-card">
@@ -188,12 +190,16 @@
         <button class="gate-tab" role="tab" id="tab-register" aria-selected="false" type="button">Create account</button>
       </div>
 
-      <hr class="gate-dashed">
-
       <!-- Sign in -->
       <form id="form-login" autocomplete="on" novalidate>
         <h1 class="gate-title">Welcome back.</h1>
         <p class="gate-sub" id="gate-login-sub">Sign in to your workspace.</p>
+
+        <!-- Item 22's first dashed rule, repositioned per the approved
+             reference image — after the subtitle and before the first
+             field, not between the tab and the heading as the original
+             text spec described. -->
+        <hr class="gate-dashed">
 
         <div class="field gate-field-icon">
           <label for="login-email">Email</label>
@@ -211,6 +217,21 @@
           </svg>
           <input class="input" id="login-password" type="password" required autocomplete="current-password"
                  placeholder="••••••••">
+          <!-- Password visibility toggle. Wired in realestate.js's
+               wireGate(), not here — no inline onclick, same CSP reasoning
+               every other handler in this app already follows. Two SVGs,
+               one shown at a time via .hidden; the click handler swaps
+               which one carries that class and flips the input's type. -->
+          <button type="button" class="gate-password-toggle" id="toggle-login-password" aria-label="Show password">
+            <svg class="gate-eye-icon" data-eye="on" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>
+            </svg>
+            <svg class="gate-eye-icon hidden" data-eye="off" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 3l18 18"/>
+              <path d="M10.6 5.2A10.6 10.6 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.1 4.1M6.6 6.6C4 8.3 2 12 2 12s3.5 7 10 7a9.7 9.7 0 0 0 4-.8"/>
+              <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>
+            </svg>
+          </button>
         </div>
 
         <!-- Item 18 — moved out of gate-foot and up next to the field it

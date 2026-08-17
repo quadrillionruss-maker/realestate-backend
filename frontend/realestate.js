@@ -1206,6 +1206,20 @@
       }
     });
 
+    // Password visibility toggle — the two SVGs already in index.html swap
+    // via .hidden, and the input's own type flips between password/text.
+    // No inline handler on the button itself, so nothing here trips the
+    // CSP config.js's own header already explains.
+    el('toggle-login-password').addEventListener('click', function () {
+      var input = el('login-password');
+      var showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      qsa('.gate-eye-icon', el('toggle-login-password')).forEach(function (svg) {
+        svg.classList.toggle('hidden');
+      });
+      el('toggle-login-password').setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    });
+
     // SECTION 2 — second step of login. pendingInviteToken (above) is still
     // honoured here too: an invited address with 2FA on has to clear BOTH
     // steps before the invite is claimed.
