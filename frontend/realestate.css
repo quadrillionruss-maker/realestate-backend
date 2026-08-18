@@ -118,7 +118,12 @@
   --lift: 0 20px 60px rgba(30, 27, 75, 0.18);
   --lift-sm: 0 4px 12px rgba(0, 0, 0, 0.15);
 
-  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Design item 7 — one easing curve for every transition in the app,
+     used already (var(--ease) appears throughout this file); the value
+     itself changed here so every one of those existing uses picks up the
+     new curve for free, rather than a second token being introduced
+     alongside the old one. */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 /* ── 2. Reset + type ───────────────────────────────────────────────────── */
@@ -201,20 +206,6 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .serif { font-family: var(--serif); text-transform: uppercase; font-weight: 900; }
 
 /* ── 3. Auth gate ──────────────────────────────────────────────────────── */
-/* "Option 2 (Drawing Reference)" — the brand panel dressed as a survey
-   drawing: guides, a mark, coordinates, a floor plan, a scale bar, plus a
-   rust permit stamp on the form side. Every one of these is decorative —
-   this product has no geolocation feature and the permit number names
-   nothing a database tracks — the same way a blueprint's own title block
-   is part of the drawing, not a claim about the building.
-
-   SECOND rebuild: every technical element is now its own small, precisely
-   positioned piece (fixed px from the panel's own edges, or a tiny
-   self-contained SVG sized to its own footprint) rather than one big SVG
-   scaled across the whole panel — see index.html's own top-of-panel
-   comment for why the shared-viewBox version silently cropped the logo and
-   the bottom elements on viewports whose aspect ratio didn't match the
-   801:984 source closely enough. Nothing below can crop anything else. */
 .gate {
   min-height: 100vh;
   min-height: 100dvh;
@@ -223,199 +214,19 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   background: var(--bg);
 }
 
-/* Left: the identity, on the one dark surface this product still has —
-   the same indigo as the sidebar. Right: the white form. On a phone the
-   identity collapses away entirely, because nobody scrolls past a
-   manifesto to sign in. */
+/* THIRD rebuild of this panel. The first two hand-built the blueprint
+   composition (guides, mark, coordinates, compasses, floor plan, scale
+   bar, headline) as individually-positioned CSS/SVG pieces, chasing a
+   reference image element-by-element across several rounds. sup.png is
+   that composition already finished — headline and blurb baked into the
+   pixels — so the panel is now just that one image, full-bleed. Nothing
+   here is recreated in CSS or SVG; background-size:cover fills the panel
+   at any viewport without distorting it, background-position:center keeps
+   the same crop point (the logo/headline column, left-of-center in the
+   source) as the panel's aspect ratio changes. var(--sidebar-bg) stays as
+   the color underneath in case the image fails to load. */
 .gate-brand {
-  position: relative;
-  background: var(--sidebar-bg);
-  overflow: hidden;
-}
-
-/* Section 3 — two parallel vertical guides, full panel height. Fixed px
-   from the left edge (not a %) so they read as a constant-width margin
-   line, the way a physical drawing's own border does, rather than drifting
-   proportionally further right on a wider panel. */
-.gate-guide-solid { position: absolute; left: 23px; top: 30px; bottom: 79px; width: 1px; background: rgba(201,164,92,0.55); }
-.gate-guide-dashed { position: absolute; left: 44px; top: 30px; bottom: 79px; width: 0; border-left: 1px dashed rgba(230,236,242,0.35); }
-
-/* BM - 01, beside the dashed guide (44px), not centered on it or sitting
-   between the two guides — the reference places it in the UPPER portion of
-   the panel, roughly level with the logo, not near the bottom.
-   transform-origin:left center pivots on the text's own left edge (where
-   "B" starts); rotate(90deg), not -90 — clockwise around that left-edge
-   pivot swings the text DOWNWARD from that point, landing "B" at the top
-   and "1" at the bottom, matching the reference's actual reading order.
-   -90 here would have put "1" at the top instead, upside down relative to
-   the reference. */
-.gate-benchmark {
-  position: absolute;
-  left: 54px; top: 14%;
-  transform: rotate(90deg);
-  transform-origin: left center;
-  white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.2em;
-  color: rgba(230,236,242,0.4);
-}
-
-/* Section 4 — the mark. A small, self-contained SVG (its own ~96px
-   viewBox, not the panel's) so nothing about the panel's own aspect ratio
-   can ever crop it — this is the element the first rebuild cut off at the
-   top. Fixed px placement mirrors the reference's own margins exactly. */
-.gate-logo-mark {
-  position: absolute;
-  top: 118px; left: 40px;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-.gate-logo-mark svg { overflow: visible; flex-shrink: 0; }
-.gate-logo-mark span {
-  font-family: var(--display);
-  font-size: 24px;
-  font-weight: 900;
-  letter-spacing: 0.06em;
-  color: rgba(255,255,255,0.92);
-}
-
-/* Section 5-6 — coordinates, right-aligned, top-right corner. */
-.gate-coordinates {
-  position: absolute;
-  top: 52px; right: 40px;
-  font-family: var(--mono);
-  font-size: 13px;
-  letter-spacing: 0.03em;
-  color: rgba(230,236,242,0.45);
-  text-align: right;
-  line-height: 1.7;
-}
-/* One shared shape for both compasses (top and bottom); each instance
-   overrides only its own position, so there is exactly one compass drawn
-   per spot, never two stacked. */
-/* overflow:visible — both compasses' crosshair lines deliberately extend a
-   little past their own viewBox (the "lines continuing through" the
-   target the brief asks for); SVG clips to its viewBox by default, which
-   would otherwise trim that extension down to almost nothing. */
-.gate-compass { position: absolute; overflow: visible; }
-/* Centered under the coordinates' own right edge (right:40px there) — the
-   compass box is 36px wide, so its right edge sits 18px further out
-   (half its own width) to land its CENTER under that same alignment line. */
-.gate-compass-top { top: 112px; right: 22px; }
-/* Centered on the guides' intersection: guide-solid is left:23px, the
-   bottom guide is bottom:79px — this box is 32px, so it's offset by half
-   that (16px) from each so its own center lands exactly on that point. */
-.gate-compass-bottom { left: 7px; bottom: 63px; }
-
-/* Section 7-9 — the floor plan, composited from bankai.png (the only
-   reference asset still present in frontend/) rather than redrawn.
-   Anchored to the panel's own lower-right corner, sized to a fixed
-   fraction of the panel so the large center-left region (section 14)
-   stays empty. */
-.gate-floorplan-crop {
-  position: absolute;
-  right: 0; bottom: 0;
-  width: 66%;
-  height: 76%;
-  overflow: hidden;
-  opacity: 0.55;
-}
-.gate-floorplan-img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  /* object-fit:cover gives an aspect-correct base fit for ANY panel shape
-     first (no distortion, ever); the scale+origin on top of that is what
-     actually zooms into the source's own lower-right — bankai.png's floor
-     plan concentrates toward ITS bottom-right corner, not its top (that's
-     the logo/coordinates), so both the base anchor (object-position) and
-     the extra zoom (transform-origin) point at 100% 100%, not 100% 0% —
-     rather than showing the whole composition (logo, headline and all)
-     shrunk to fit here. A uniform scale from a fixed origin only ever
-     magnifies; it can never stretch one axis independently of the other. */
-  object-fit: cover;
-  object-position: 100% 100%;
-  transform: scale(2.1);
-  transform-origin: 100% 100%;
-}
-
-/* Section 13 — REGISTERED SYSTEM block, bottom-left, clear of the floor
-   plan crop above (which starts well to its right). */
-.gate-registered { position: absolute; left: 40px; bottom: 178px; max-width: 220px; }
-.gate-registered-rule { height: 1px; border-top: 1px dashed rgba(230,236,242,0.3); margin-bottom: 14px; }
-.gate-registered-label {
-  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.2em;
-  color: rgba(230,236,242,0.45); margin-bottom: 10px;
-}
-.gate-registered-text { font-family: var(--mono); font-size: 13px; color: rgba(230,236,242,0.6); line-height: 1.7; }
-
-/* Section 11-12 — bottom guide + scale bar. The reference places the scale
-   bar well right of center-left (not near the left guides) — left:40%,
-   not a fixed px value, since this element is positioned relative to the
-   overall composition rather than pinned to one edge the way the guides
-   or the registered-system block are. The guide's own width is a calc()
-   ending at that same 40% mark, so the two always meet regardless of the
-   panel's actual pixel width. */
-.gate-bottom-guide { position: absolute; left: 23px; bottom: 79px; width: calc(40% - 23px); height: 0; border-top: 1px dashed rgba(230,236,242,0.25); }
-.gate-scale-bar { position: absolute; left: 40%; bottom: 66px; }
-/* Each label positioned to sit under its own tick exactly (0/65/130/220px,
-   matching the SVG above) — the ticks are NOT evenly spaced (the 20-30M
-   gap is wider than 0-10 or 10-20), so flexbox's space-between would have
-   spread the labels evenly instead and misaligned every one of them. */
-.gate-scale-labels {
-  position: relative;
-  width: 220px; height: 14px; margin-top: 6px;
-  font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em; color: rgba(230,236,242,0.5);
-}
-.gate-scale-labels span { position: absolute; top: 0; }
-.gate-scale-labels span:nth-child(1) { left: 0; }
-.gate-scale-labels span:nth-child(2) { left: 65px; transform: translateX(-50%); }
-.gate-scale-labels span:nth-child(3) { left: 130px; transform: translateX(-50%); }
-.gate-scale-labels span:nth-child(4) { left: 220px; transform: translateX(-100%); }
-
-/* The headline and blurb sit on top of everything above, positioned
-   independently — the reference is explicit that they are not part of the
-   background composition ("nothing should compete with the future
-   headline that will sit above this background"). top:31%, matched
-   against bankai.png (the reference that shows the full composition
-   together, headline included) rather than estimated from the gap below
-   the mark alone. */
-.gate-headline-block { position: absolute; top: 31%; left: 40px; right: 40px; z-index: 1; }
-
-/* The tagline — Archivo Black, stacked, stencilled caps, the same display
-   face as every other headline moment in the product now (greeting,
-   page-title, gate-title). Each line is its own element so the middle one
-   can be dimmed independently — the same device the indigo version used
-   for its own tagline, kept because the STRUCTURE still earns its place;
-   only the typeface and the copy changed. */
-.gate-headline {
-  display: flex;
-  flex-direction: column;
-  font-family: var(--display);
-  text-transform: uppercase;
-  font-size: 52px;
-  font-weight: 900;
-  letter-spacing: -1px;
-  line-height: 0.97;
-  margin: 0 0 18px;
-}
-
-.gate-headline-line { color: var(--sidebar-text-active); font-weight: 900; }
-/* Blueprint teal, not a fade — this line reads as a deliberate second
-   colour (the drafting-table accent itself, lightened for a dark ground),
-   not as "less important" the way opacity implied. */
-.gate-headline-line.is-dim { color: #4A8FA8; opacity: 1; }
-
-.gate-blurb {
-  font-family: var(--sans);
-  color: rgba(255, 255, 255, 0.75);
-  max-width: 42ch;
-  font-size: 14px;
-  line-height: 1.65;
-  margin-top: 20px;
+  background: var(--sidebar-bg) url('./sup.png') center / cover no-repeat;
 }
 
 /* Three statements about behaviour, replacing what used to be three numbers
@@ -756,15 +567,18 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   margin-bottom: 22px;
 }
 
+/* Design item 4 — H1: page titles and the dashboard greeting. */
 .page-title {
   font-family: var(--display);
   text-transform: uppercase;
-  font-size: 22px;
+  font-size: 32px;
   font-weight: 900;
   letter-spacing: -0.01em;
 }
 
-.page-sub { color: var(--text-dim); font-size: 13px; margin-top: 3px; }
+/* Metadata level (12px, medium weight) — a subtitle is secondary
+   information under the H1, not body content in its own right. */
+.page-sub { color: var(--text-dim); font-size: 12px; font-weight: 500; margin-top: 3px; }
 .page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ── 5. Sidebar ────────────────────────────────────────────────────────── */
@@ -836,10 +650,14 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 
 .nav { padding: 14px 10px; flex: 1; }
 
-.nav-group + .nav-group { margin-top: 18px; }
+/* Design item 2 — quieter sidebar. 20px between groups (was 18px) is the
+   only separation between them now; no colour rule was ever drawn here to
+   begin with, so "remove separators, use gap spacing" was already true —
+   this just widens the gap that was already doing that job alone. */
+.nav-group + .nav-group { margin-top: 20px; }
 
 .nav-label {
-  font-size: 9.5px;
+  font-size: 9px;
   letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--sidebar-text);
@@ -856,22 +674,30 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   border-radius: 8px;
   color: var(--sidebar-text);
   text-decoration: none;
-  font-size: 13.5px;
+  font-size: 12.5px;
   position: relative;
-  transition: background .15s var(--ease), color .15s var(--ease);
+  border-left: 2px solid transparent;
+  transition: background .12s var(--ease), color .12s var(--ease), border-color .12s var(--ease);
 }
 
 .nav-item:hover { background: rgba(255, 255, 255, 0.07); color: rgba(255, 255, 255, 0.85); }
 
-/* The filled indigo background IS the "you are here" signal — no left bar,
-   no glow, just the same solid fill a selected control gets everywhere
-   else in this palette. */
-.nav-item.is-active { background: var(--sidebar-active-bg); color: var(--sidebar-text-active); font-weight: 600; }
+/* A subtle tint + left rule now, not a filled block — quieter, but still
+   unambiguous next to every unselected item's transparent border. Left
+   padding drops by the same 2px the border adds, so the icon/label don't
+   shift sideways the moment a row becomes active. */
+.nav-item.is-active {
+  background: rgba(255, 255, 255, 0.1);
+  border-left-color: var(--accent);
+  padding-left: 8px;
+  color: var(--sidebar-text-active);
+  font-weight: 600;
+}
 
 .nav-item .ico {
   width: 16px;
   text-align: center;
-  font-size: 13px;
+  font-size: 14px;
   opacity: 0.85;
   flex-shrink: 0;
 }
@@ -1079,7 +905,8 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   border-bottom: 1px solid var(--line);
 }
 
-.card-title { font-size: 13.5px; font-weight: 600; }
+/* Design item 4 — H2: card titles and section headers. */
+.card-title { font-family: var(--sans); font-size: 18px; font-weight: 600; }
 /* Unscoped: used inside .card-head, .modal-head and .toast alike — always
    the same job, pushing whatever follows it to the far edge of a flex row. */
 .spacer { flex: 1; }
@@ -1111,29 +938,32 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .grid.split { grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); }
 
-/* Stat tiles. The number is the object; the label is the caption. */
+/* Design item 3 — stat tiles, cleaner. No box-shadow, no coloured top rule
+   (the old accent-X modifier is gone from stat() in screens.js entirely) —
+   just the 1px border every other card in this app already uses, and the
+   number itself carries whatever colour signal is needed via .stat-value's
+   own tone classes below. The number is the hero now, not the card. */
 .stat {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: 0 1px 3px rgba(80, 80, 160, 0.06);
   padding: 16px 18px;
   position: relative;
   overflow: hidden;
+  transition: transform .12s var(--ease), border-color .12s var(--ease);
 }
+.stat:hover { transform: translateY(-1px); border-color: var(--line-strong); }
 
 .stat-label {
-  font-size: 10px;
-  letter-spacing: 0.17em;
-  text-transform: uppercase;
+  font-size: 11px;
   color: var(--text-faint);
-  font-weight: 600;
+  font-weight: 400;
 }
 
 .stat-value {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  font-size: 19px;
+  font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.02em;
   margin-top: 8px;
@@ -1145,23 +975,9 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .stat-value.clay { color: var(--danger); }
 .stat-value.gold { color: var(--accent); }
 
-.stat-sub { font-size: 11.5px; color: var(--text-faint); margin-top: 5px; }
-
-/* A rule of state along the top edge — for a POSITIVE or highlighted
-   figure. The overdue tile deliberately has no border of its own: its
-   amount is already red (.stat-value.clay below), and a red border on top
-   of red text is double-signalling the same one fact. accent-clay/tone:
-   'clay' still gets applied to the tile (screens.js keeps naming it), it
-   simply paints nothing extra any more. */
-.stat.accent-moss::before,
-.stat.accent-gold::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 2px;
-}
-.stat.accent-moss::before { background: var(--moss); }
-.stat.accent-gold::before { background: var(--accent); }
+/* The tile's own small trend line — "14 payments", "9 installments" — a
+   plain count, not a second figure competing with the hero value above it. */
+.stat-sub { font-size: 11px; color: var(--text-faint); margin-top: 5px; }
 
 /* ── 8. Tables ─────────────────────────────────────────────────────────── */
 /* Wide tables scroll inside their own container. The page body must never
@@ -1199,7 +1015,7 @@ table.data td {
 }
 
 table.data tbody tr:last-child td { border-bottom: none; }
-table.data tbody tr { transition: background .12s; }
+table.data tbody tr { transition: background .08s var(--ease); }
 /* Faint alternating rows — every other row a hair off white — so a dense
    table stays scannable without a hard border on every line. */
 table.data tbody tr:nth-child(even) { background: var(--panel-2); }
@@ -1330,24 +1146,29 @@ table.data td.num, table.data th.num {
   transform: rotate(45deg);
 }
 
+/* Exactly 3 button types: this bare rule is Secondary (white/panel
+   background, bordered), .primary and .danger are the other two. No other
+   modifier changes appearance or size — everything is 40px/4px so a row of
+   mixed buttons lines up. */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  height: 34px;
-  padding: 0 15px;
-  border-radius: 8px;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 4px;
   border: 1px solid var(--line-strong);
-  background: var(--panel-2);
-  color: var(--text);
+  background: var(--panel);
+  color: var(--text-dim);
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   white-space: nowrap;
-  transition: background .15s var(--ease), border-color .15s var(--ease), opacity .15s, box-shadow .15s var(--ease);
+  transition: background .15s var(--ease), border-color .15s var(--ease), opacity .15s, box-shadow .15s var(--ease), transform .08s var(--ease);
 }
 
 .btn:hover:not(:disabled) { background: var(--panel-3); border-color: var(--line-strong); }
+.btn:active:not(:disabled) { transform: scale(0.98); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* One indigo button per screen. Its scarcity is what makes it read as
@@ -1356,30 +1177,25 @@ table.data td.num, table.data th.num {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
-  font-weight: 600;
 }
 .btn.primary:hover:not(:disabled) { background: var(--accent-2); border-color: var(--accent-2); }
 .btn.primary:focus-visible { box-shadow: 0 0 0 3px var(--accent-faint); }
 
-/* The AI-action button — "Regenerate brief" and its like. A quieter,
-   tinted twin of primary rather than a second loud colour. */
+/* The AI-action button — reserved for "Regenerate brief" alone, everywhere
+   else in the operator app. A quieter, tinted twin of primary rather than a
+   second loud colour. (The buyer portal also uses this class for its own,
+   separately-scoped CTAs — untouched here.) */
 .btn.brass {
   background: var(--accent-soft);
   border: 1px solid rgba(30, 79, 99, 0.2);
   color: var(--accent);
-  font-weight: 600;
 }
 .btn.brass:hover:not(:disabled) { background: var(--accent-faint); }
 
-.btn.ghost { background: transparent; border-color: var(--line-strong); color: var(--text-dim); }
-.btn.ghost:hover:not(:disabled) { background: var(--panel-2); }
-
-.btn.danger { border-color: rgba(239, 68, 68, 0.4); color: var(--danger); background: transparent; }
-.btn.danger:hover:not(:disabled) { background: var(--danger-soft); }
+.btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn.danger:hover:not(:disabled) { opacity: 0.88; }
 
 .btn.block { width: 100%; }
-.btn.lg { height: 40px; padding: 0 20px; font-size: 14px; }
-.btn.sm { height: 28px; padding: 0 10px; font-size: 12px; }
 
 /* The quiet button: a link that behaves like a control. Used on every
    "Copy for WhatsApp" and every "Done" — actions that are frequent, minor,
@@ -1397,7 +1213,7 @@ table.data td.num, table.data th.num {
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
-  transition: color .15s var(--ease), border-color .15s var(--ease), background .15s var(--ease);
+  transition: color .15s var(--ease), border-color .15s var(--ease), background .15s var(--ease), transform .08s var(--ease);
 }
 
 .btn-quiet:hover:not(:disabled) {
@@ -1405,6 +1221,8 @@ table.data td.num, table.data th.num {
   border-color: var(--accent);
   background: var(--accent-faint);
 }
+
+.btn-quiet:active:not(:disabled) { transform: scale(0.98); }
 
 .btn-quiet:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-quiet.is-done { color: var(--moss); border-color: rgba(5, 150, 105, 0.35); background: var(--moss-soft); }
@@ -1490,37 +1308,37 @@ table.data td.num, table.data th.num {
 .badge.medium { background: var(--warn-soft); color: var(--warn); border-color: #FDE68A; }
 .badge.low { background: var(--accent-soft); color: var(--accent); border-color: rgba(30, 79, 99, 0.24); }
 
-/* Buyer risk chips in the morning brief — the whole chip is coloured by
-   severity now (not just a left rule), and the whole chip is clickable:
-   see screens.js's dashboard render for the data-customer-id wiring. */
-.risk-chip {
+/* Design item 1 — the morning brief's numbered risk list, replacing the
+   old coloured-pill risk-chip entirely. A plain list, not cards: the
+   number and the text ARE the hierarchy now, and the only colour left is
+   one small dot per row (see screens.js's riskDotClass — four fixed
+   thresholds on days_late, nothing computed inline). */
+.risk-list { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; }
+.risk-list-row {
   display: flex;
   align-items: baseline;
-  gap: 7px;
-  padding: 8px 12px;
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  font-size: 12.5px;
-  line-height: 1.45;
-  transition: transform .15s var(--ease), box-shadow .15s var(--ease);
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
 }
+.risk-list-row:last-child { border-bottom: none; }
+.risk-list-row[data-buyer] { cursor: pointer; }
+.risk-list-row[data-buyer]:hover .risk-list-text b { color: var(--accent); }
 
-/* Only a chip resolved to a buyer id (see screens.js's buyerIdByName) is
-   actually clickable — one without a match just reads as a static chip. */
-.risk-chip[data-buyer] { cursor: pointer; }
-.risk-chip[data-buyer]:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.10); }
+.risk-list-num { font-family: var(--mono); color: var(--text-faint); flex-shrink: 0; }
+.risk-list-text { flex: 1; color: var(--text-dim); min-width: 0; }
+.risk-list-text b { font-weight: 600; color: var(--text); transition: color .15s var(--ease); }
 
-.risk-chip b { font-weight: 600; white-space: nowrap; }
-/* The reason text — "3 missed installments... 12 days late" — is the
-   "days late, faded" half of the chip; it inherits the chip's own colour at
-   reduced opacity rather than a fourth hue. */
-.risk-chip span { opacity: 0.75; }
+/* The one remaining colour in this card — four fixed thresholds on
+   days_late, not the AI's own low/medium/high severity read. */
+.risk-list-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; margin-left: auto; align-self: center; }
+.risk-list-dot.risk-dot-red    { background: var(--danger); }
+.risk-list-dot.risk-dot-amber  { background: #C97A2B; }
+.risk-list-dot.risk-dot-yellow { background: #D4B106; }
+.risk-list-dot.risk-dot-grey   { background: var(--text-faint); }
 
-.risk-chip.high   { background: var(--danger-soft); color: var(--danger); border-color: #FECACA; }
-.risk-chip.medium { background: var(--warn-soft); color: var(--warn); border-color: #FDE68A; }
-.risk-chip.low    { background: var(--moss-soft); color: var(--moss); border-color: #BBF7D0; }
-
-.risk-row { display: flex; flex-direction: column; gap: 7px; margin-top: 14px; }
+.risk-list-viewall { display: inline-block; margin-top: 10px; font-size: 12.5px; }
 
 /* Anything the AI wrote is marked. Every output here is a proposal a human
    sends, and the mark is how you tell at a glance — indigo, not gold; gold
@@ -1603,7 +1421,7 @@ table.data td.num, table.data th.num {
   max-height: calc(100dvh - 44px);
   display: flex;
   flex-direction: column;
-  animation: rise .22s var(--ease);
+  animation: modal-in .18s var(--ease);
 }
 
 .modal.wide { max-width: 800px; }
@@ -1635,11 +1453,12 @@ table.data td.num, table.data th.num {
   border-radius: var(--radius-sm);
   color: var(--text-faint);
   font-size: 15px;
-  transition: background .14s, color .14s;
+  transition: background .14s, color .14s, transform .08s var(--ease);
   flex-shrink: 0;
 }
 
 .icon-btn:hover { background: var(--panel-3); color: var(--text); }
+.icon-btn:active { transform: scale(0.98); }
 
 /* SECTION 1 — the topbar bell. #btn-notifications needs position:relative
    (set on .topbar-right > button generically would be too broad, so this
@@ -1684,7 +1503,7 @@ table.data td.num, table.data th.num {
   z-index: 100;
   display: flex;
   flex-direction: column;
-  animation: slide-in .24s var(--ease);
+  animation: drawer-in .2s var(--ease);
 }
 
 .drawer-head {
@@ -1705,7 +1524,8 @@ table.data td.num, table.data th.num {
 
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.99); } }
-@keyframes slide-in { from { transform: translateX(24px); opacity: 0; } }
+@keyframes modal-in { from { opacity: 0; transform: translateY(8px); } }
+@keyframes drawer-in { from { transform: translateX(100%); } }
 
 /* ── 12. Toast ─────────────────────────────────────────────────────────── */
 .toasts {
@@ -1740,10 +1560,15 @@ table.data td.num, table.data th.num {
    speaks in the first person. */
 .greeting { margin-bottom: 22px; }
 
+/* Design item 4 — H1, same level as .page-title (the greeting fills the
+   same role on the dashboard that a page title does everywhere else).
+   Kept as a clamp(), not a flat 32px, so a narrow phone still gets a
+   smaller floor rather than the greeting wrapping mid-word — the ceiling
+   is what changed, from 26px to the new H1 size. */
 .greeting h1 {
   font-family: var(--display);
   text-transform: uppercase;
-  font-size: clamp(20px, 2.6vw, 26px);
+  font-size: clamp(22px, 3.2vw, 32px);
   font-weight: 900;
   letter-spacing: -0.01em;
 }
@@ -2220,6 +2045,11 @@ table.data td.sched-detail-cell {
 
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 
+/* The KPI-tile skeleton's stand-in for a .stat-value — taller than a plain
+   .skeleton line so the placeholder tile reads as "a number is coming",
+   not just more text. */
+.skeleton.skeleton-lg { height: 22px; }
+
 .muted { color: var(--text-dim); }
 .faint { color: var(--text-faint); }
 .moss { color: var(--moss); }
@@ -2234,6 +2064,21 @@ table.data td.sched-detail-cell {
 .hidden { display: none !important; }
 .divider { height: 1px; background: var(--line); margin: 18px 0; }
 
+/* Design item 5 — labelled form sections (Add Buyer, New Reservation,
+   Record Payment), replacing plain .divider rules between unrelated field
+   groups with a named boundary instead. */
+.form-section + .form-section { margin-top: 24px; }
+.form-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--accent);
+  letter-spacing: 0.1em;
+  font-weight: 600;
+  padding-bottom: 8px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
 /* ── CSP-safe layout/text utilities ──────────────────────────────────────
    Cover what used to be one-off style="" attributes on generated markup —
    a strict style-src with no 'unsafe-inline' refuses to apply those at all,
@@ -2246,10 +2091,16 @@ table.data td.sched-detail-cell {
 .mb-3px { margin-bottom: 3px; }
 .opacity-60 { opacity: .6; }
 .lh-loose { line-height: 1.6; }
+.lh-19 { line-height: 1.9; }
 .cursor-pointer { cursor: pointer; }
 .center-pad { padding: 20px; text-align: center; }
 .mono-input { font-family: var(--mono); font-size: 12px; }
 .label-caps { text-transform: uppercase; letter-spacing: .04em; font-size: 11px; }
+/* The referral-code input (customerModal) used to carry this as an inline
+   style="text-transform:uppercase" — a real CSP violation on the Vercel
+   deployment (no unsafe-inline in style-src), just never hit since nobody
+   had reported the field silently not-uppercasing. */
+.input-uppercase { text-transform: uppercase; }
 
 .fs-11-5 { font-size: 11.5px; }
 .fs-12 { font-size: 12px; }
@@ -2383,7 +2234,6 @@ table.data td.sched-detail-cell {
   .icon-btn { width: 44px; height: 44px; font-size: 17px; }
   .btn-quiet { height: 36px; padding: 0 12px; min-height: 44px; }
   .btn { min-height: 44px; }
-  .btn.sm { min-height: 38px; }
 
   /* iOS Safari zooms the whole page on focusing any input under 16px — the
      one browser behaviour a form cannot override, only avoid. #search-input

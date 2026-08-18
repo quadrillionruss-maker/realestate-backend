@@ -182,21 +182,27 @@ router.get('/', requirePermission('dashboard.read'), async (req, res, next) => {
     const rentalPayments = paymentRows.filter(isRentalPayment);
     const salesPayments = paymentRows.filter((row) => !isRentalPayment(row));
 
+    // Design item 3 — the KPI tiles' own small trend line ("14 payments",
+    // "9 installments") reads one of these counts, not a re-derived guess
+    // on the frontend — each is free (the row array it counts is already
+    // fetched to compute the KPI's own amount above).
+    const dueNext7Rows = scheduleRows.filter((s) => s.status === 'pending' && s.due_date >= today && s.due_date <= in7);
+
     res.json({
       project_id: projectId,
       projects: projects.data || [],
       collected_this_month: sum(paymentRows, 'amount'),
+      collected_this_month_count: paymentRows.length,
       collected_sales_this_month: sum(salesPayments, 'amount'),
       collected_rental_this_month: sum(rentalPayments, 'amount'),
       outstanding_total: sum(scheduleRows, 'amount_due'),
+      outstanding_count: scheduleRows.length,
       overdue: {
         count: overdueRows.length,
         amount: sum(overdueRows, 'amount_due'),
       },
-      due_next_7_days: sum(
-        scheduleRows.filter((s) => s.status === 'pending' && s.due_date >= today && s.due_date <= in7),
-        'amount_due'
-      ),
+      due_next_7_days: sum(dueNext7Rows, 'amount_due'),
+      due_next_7_days_count: dueNext7Rows.length,
       units: {
         available: unitRows.filter((u) => u.status === 'available').length,
         reserved: unitRows.filter((u) => u.status === 'reserved').length,

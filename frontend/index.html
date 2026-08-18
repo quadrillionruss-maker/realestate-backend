@@ -66,139 +66,15 @@
      password, and no way to sign in from a second device. `npm run token`
      still exists — it is a debugging tool now, not the only way in. -->
 <main class="gate" id="gate" hidden>
-  <section class="gate-brand">
-    <!-- SECOND rebuild of this panel. The first attempt used one big SVG
-         scaled with preserveAspectRatio="xMidYMid slice" across the whole
-         801x984 composition — on any panel proportionally wider than that
-         source ratio, slice crops symmetrically from top AND bottom to make
-         the width fill, which silently clipped the logo (near the top) and
-         the scale bar / bottom compass (near the bottom) depending on
-         viewport. Every element below is now sized and positioned in real
-         px/% against the panel's own edges instead, so nothing depends on
-         a shared viewBox surviving an aspect-ratio mismatch — each piece is
-         only ever as large as it needs to be, and none of them can crop
-         each other.
-
-         The floor plan is the one exception, and it is handled completely
-         differently on purpose: the reference assets supplied for it
-         (archta_exact_reference.svg, before that archta_blueprint_
-         background.png — both since removed from frontend/, superseded
-         by bankai.png below) were raster images with no vector path data
-         to import. Composited as an image (position/scale/crop via a
-         clipping container, opacity) instead of traced, per the brief. -->
-
-    <!-- Section 3 — two parallel vertical guides at the panel's left edge,
-         spanning its full height via top/bottom:0 rather than a fixed
-         length, so they never come up short on a tall viewport. -->
-    <div class="gate-guide-solid" aria-hidden="true"></div>
-    <div class="gate-guide-dashed" aria-hidden="true"></div>
-    <!-- BM - 01 sits beside the dashed guide, not centered on it. -->
-    <div class="gate-benchmark" aria-hidden="true">BM - 01</div>
-
-    <!-- Section 4 — the mark: square, diamond, ticks and arrows as one
-         small self-contained SVG (sized to its own ~215x160 footprint, not
-         the whole panel, so it is never subject to any cropping math),
-         "ARCHTA" as real adjacent text so it stays crisp at any zoom. -->
-    <div class="gate-logo-mark" aria-hidden="true">
-      <svg viewBox="0 0 96 96" width="72" height="72">
-        <rect x="12" y="12" width="72" height="72" fill="none" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-        <path d="M48 36l12 12-12 12-12-12z" fill="#C9A45C"/>
-        <!-- Horizontal ticks — shorter than the vertical ones. -->
-        <line x1="0" y1="48" x2="12" y2="48" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-        <line x1="84" y1="48" x2="96" y2="48" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-        <!-- Vertical ticks, longer than the horizontal ones, each ending in
-             a small perpendicular cross-tick (a survey benchmark mark, the
-             same vocabulary as the compasses elsewhere on this panel) —
-             not a solid triangular arrowhead, which is what the reference
-             actually shows despite the original text brief calling them
-             "arrow/marker". -->
-        <line x1="48" y1="12" x2="48" y2="-20" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-        <line x1="41" y1="-20" x2="55" y2="-20" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-        <line x1="48" y1="84" x2="48" y2="116" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-        <line x1="41" y1="116" x2="55" y2="116" stroke="rgba(230,236,242,0.55)" stroke-width="1.2"/>
-      </svg>
-      <span>ARCHTA</span>
-    </div>
-
-    <!-- Section 5-6 — coordinates, right-aligned, with exactly one compass
-         centered beneath them. -->
-    <div class="gate-coordinates" aria-hidden="true">
-      <div>N 6&#176; 27&#8242; 15.2&#8243;</div>
-      <div>E 3&#176; 24&#8242; 10.8&#8243;</div>
-    </div>
-    <svg class="gate-compass gate-compass-top" viewBox="0 0 36 36" width="36" height="36" aria-hidden="true">
-      <circle cx="18" cy="18" r="17" fill="none" stroke="rgba(230,236,242,0.4)" stroke-width="1"/>
-      <line x1="18" y1="-5" x2="18" y2="41" stroke="rgba(230,236,242,0.4)" stroke-width="1"/>
-      <line x1="-5" y1="18" x2="41" y2="18" stroke="rgba(230,236,242,0.4)" stroke-width="1"/>
-    </svg>
-
-    <!-- Section 7-9 — the floor plan, composited from bankai.png's own
-         lower-right region (archta_exact_reference.svg and
-         archta_blueprint_background.png, the two earlier reference assets,
-         are gone from frontend/ — bankai.png is the only one left, so it is
-         now this layer's image source too). right:0;bottom:0 with a fixed
-         width/height keeps it anchored to the lower-right corner (bleeding
-         off both edges, same as the reference) while preserving the large
-         center-left negative space (section 14). overflow:hidden on the
-         wrapper is the crop; object-fit:cover + transform:scale on the
-         image itself is what zooms into the source's own lower-right
-         (where its floor-plan detail concentrates, not the logo/coordinate
-         text near its top) without distorting it — object-fit alone
-         establishes an aspect-correct base fit for ANY container shape,
-         and a uniform transform:scale from a corner origin only ever
-         zooms, never stretches one axis independently of the other (the
-         one hard requirement in the brief). -->
-    <div class="gate-floorplan-crop" aria-hidden="true">
-      <img class="gate-floorplan-img" src="./bankai.png" alt="">
-    </div>
-
-    <!-- Section 13 — REGISTERED SYSTEM block, well clear of the floor plan
-         crop above (which starts partway down and across, not from this
-         corner). -->
-    <div class="gate-registered" aria-hidden="true">
-      <div class="gate-registered-rule"></div>
-      <div class="gate-registered-label">REGISTERED SYSTEM</div>
-      <p class="gate-registered-text">Built for developers.<br>Backed by records.</p>
-    </div>
-
-    <!-- Section 11-12 — bottom guide + scale bar. The 0-10 segment is drawn
-         at a heavier stroke-width than the rest — the whole bar is not
-         uniformly bold. -->
-    <div class="gate-bottom-guide" aria-hidden="true"></div>
-    <div class="gate-scale-bar" aria-hidden="true">
-      <svg viewBox="0 0 220 16" width="220" height="16">
-        <line x1="0" y1="8" x2="65" y2="8" stroke="rgba(230,236,242,0.75)" stroke-width="1.6"/>
-        <line x1="65" y1="8" x2="220" y2="8" stroke="rgba(230,236,242,0.4)" stroke-width="0.9"/>
-        <line x1="0" y1="2" x2="0" y2="14" stroke="rgba(230,236,242,0.65)" stroke-width="1"/>
-        <line x1="65" y1="2" x2="65" y2="14" stroke="rgba(230,236,242,0.65)" stroke-width="1"/>
-        <line x1="130" y1="4" x2="130" y2="12" stroke="rgba(230,236,242,0.5)" stroke-width="0.8"/>
-        <line x1="220" y1="2" x2="220" y2="14" stroke="rgba(230,236,242,0.65)" stroke-width="1"/>
-      </svg>
-      <div class="gate-scale-labels"><span>0</span><span>10</span><span>20</span><span>30M</span></div>
-    </div>
-
-    <!-- Section 10 — the one bottom-left compass, exactly at the meeting
-         point of the two left guides and the bottom guide. Its own small
-         SVG draws lines continuing through the circle, per spec, rather
-         than stopping at its edge. -->
-    <svg class="gate-compass gate-compass-bottom" viewBox="0 0 36 36" width="32" height="32" aria-hidden="true">
-      <circle cx="18" cy="18" r="16" fill="none" stroke="rgba(201,164,92,0.5)" stroke-width="1"/>
-      <line x1="18" y1="-6" x2="18" y2="42" stroke="rgba(201,164,92,0.5)" stroke-width="1"/>
-      <line x1="-6" y1="18" x2="42" y2="18" stroke="rgba(201,164,92,0.5)" stroke-width="1"/>
-    </svg>
-
-    <div class="gate-headline-block">
-      <!-- Three independently-styled lines — not achievable with one <em>
-           run inside a single heading. Middle line dim, bookended by the
-           first and last line at full weight. -->
-      <h1 class="gate-headline">
-        <span class="gate-headline-line">Every plot,</span>
-        <span class="gate-headline-line is-dim">every naira,</span>
-        <span class="gate-headline-line">on record.</span>
-      </h1>
-      <p class="gate-blurb">Nothing about a sale lives anywhere else.</p>
-    </div>
-  </section>
+  <!-- THIRD rebuild of this panel, and the last: every prior round
+       hand-built the blueprint (guides, mark, coordinates, compasses, floor
+       plan, scale bar, headline) as positioned CSS/SVG pieces reproducing a
+       reference image element-by-element. That reference now IS the panel —
+       sup.png is the complete composition (logo, headline, blurb and all,
+       baked into the pixels), so this section is just that one image,
+       full-bleed, with no DOM to recreate any part of it. See .gate-brand
+       in realestate.css for the background-image itself. -->
+  <section class="gate-brand" role="img" aria-label="Archta. Every plot, every naira, on record. Nothing about a sale lives anywhere else."></section>
 
   <section class="gate-form-wrap">
     <!-- Item 13, per the approved reference image — a rotated permit stamp

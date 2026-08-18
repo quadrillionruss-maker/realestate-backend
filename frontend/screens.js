@@ -176,9 +176,12 @@
     '</div>';
   }
 
+  // Design item 3 — no more coloured top border (the accent-X modifier):
+  // the value's own colour (o.tone) already carries that signal, and a
+  // border repeating it was double-signalling the same one fact.
   function stat(label, value, opts) {
     var o = opts || {};
-    return '<div class="stat' + (o.accent ? ' accent-' + o.accent : '') + '">' +
+    return '<div class="stat">' +
       '<div class="stat-label">' + esc(label) + '</div>' +
       '<div class="stat-value' + (o.tone ? ' ' + o.tone : '') + '">' + esc(value) + '</div>' +
       (o.sub ? '<div class="stat-sub">' + esc(o.sub) + '</div>' : '') +
@@ -191,6 +194,18 @@
       (title ? '<div class="card-head"><div class="card-title">' + esc(title) + '</div>' +
         '<div class="spacer"></div>' + (o.actions || '') + '</div>' : '') +
       '<div class="card-body' + (o.flush ? ' flush' : '') + '">' + bodyHtml + '</div>' +
+    '</div>';
+  }
+
+  // Design item 5 — a labelled group inside a form, replacing the plain
+  // <div class="divider"> some modals used between unrelated field
+  // clusters. Stacked sections get their 24px gap for free from
+  // .form-section + .form-section's own margin-top; the caller does not
+  // add spacing between calls.
+  function formSection(label, bodyHtml) {
+    return '<div class="form-section">' +
+      '<div class="form-section-label">' + esc(label) + '</div>' +
+      bodyHtml +
     '</div>';
   }
 
@@ -638,7 +653,7 @@
               '<div class="flex-row justify-between align-center gap-10">' +
                 '<span>Turn on notifications for payments, the morning brief, and buyers falling behind — even when this tab is closed.</span>' +
                 '<div class="btn-row">' +
-                  '<button class="btn primary sm" id="btn-enable-push">Enable notifications</button>' +
+                  '<button class="btn primary" id="btn-enable-push">Enable notifications</button>' +
                   '<button class="btn-quiet" id="btn-dismiss-push">Not now</button>' +
                 '</div>' +
               '</div>' +
@@ -676,13 +691,13 @@
         // thing on a 4-up grid squeezed to one column — nairaShort's
         // ₦28.5m fits the tile instead of wrapping or overflowing it.
         '<div class="grid cols-4">' +
-          stat('Collected this month', kpiMoney(d.collected_this_month), { tone: 'moss', accent: 'moss' }) +
-          stat('Outstanding', kpiMoney(d.outstanding_total)) +
+          stat('Collected this month', kpiMoney(d.collected_this_month), { tone: 'moss', sub: R.plural(d.collected_this_month_count, 'payment') }) +
+          stat('Outstanding', kpiMoney(d.outstanding_total), { sub: R.plural(d.outstanding_count, 'installment') }) +
           stat('Overdue', kpiMoney(d.overdue.amount), {
-            tone: 'clay', accent: d.overdue.count ? 'clay' : null,
+            tone: 'clay',
             sub: d.overdue.count ? R.plural(d.overdue.count, 'installment') : 'All current',
           }) +
-          stat('Due in 7 days', kpiMoney(d.due_next_7_days)) +
+          stat('Due in 7 days', kpiMoney(d.due_next_7_days), { sub: R.plural(d.due_next_7_days_count, 'installment') }) +
         '</div>' +
 
         // ZONE 2 — the Morning Brief, full width and dominant. Owner and
@@ -759,15 +774,26 @@
                 : '') +
 
               (risks.length
-                ? '<div class="risk-row">' + risks.slice(0, 6).map(function (r) {
+                ? '<ol class="risk-list">' + risks.slice(0, 3).map(function (r, i) {
                     var buyerId = buyerIdByName[r.customer_name];
                     // data-buyer is what wireRiskRows(view) below already
                     // listens for — the same attribute the At-Risk card's
-                    // own "Open" button uses — so a chip with a resolved id
+                    // own "Open" button uses — so a row with a resolved id
                     // opens the buyer drawer for free, no new wiring needed.
-                    return '<div class="risk-chip ' + esc(r.severity) + '"' + (buyerId ? ' data-buyer="' + esc(buyerId) + '"' : '') + '>' +
-                      '<b>' + esc(r.customer_name) + '</b><span>' + esc(r.reason) + '</span></div>';
-                  }).join('') + '</div>'
+                    return '<li class="risk-list-row"' + (buyerId ? ' data-buyer="' + esc(buyerId) + '"' : '') + '>' +
+                      '<span class="risk-list-num">' + (i + 1) + '.</span>' +
+                      '<span class="risk-list-text">' +
+                        '<b>' + esc(r.customer_name) + '</b>' +
+                        ' / ' + esc(nairaShort(r.overdue_amount)) +
+                        ' · ' + esc(R.plural(r.missed_count, 'missed installment')) +
+                        ' · ' + esc(R.plural(r.days_late, 'day')) + ' overdue' +
+                      '</span>' +
+                      '<span class="risk-list-dot ' + riskDotClass(r.days_late) + '"></span>' +
+                    '</li>';
+                  }).join('') + '</ol>' +
+                  (risks.length > 3
+                    ? '<a class="btn-quiet risk-list-viewall" href="#/at-risk">View all ' + risks.length + ' →</a>'
+                    : '')
                 : '') +
               '<div class="brief-actions">' +
                 '<button class="btn brass" id="btn-brief">Regenerate brief</button>' +
@@ -785,7 +811,7 @@
         (d.collected_rental_this_month
           ? '<div class="grid cols-2 mt-2">' +
               stat('Sales income this month', naira(d.collected_sales_this_month), { tone: 'moss' }) +
-              stat('Rental income this month', naira(d.collected_rental_this_month), { tone: 'gold', accent: 'gold' }) +
+              stat('Rental income this month', naira(d.collected_rental_this_month), { tone: 'gold' }) +
             '</div>'
           : '') +
 
@@ -924,7 +950,7 @@
 
       '<div class="mt-2">' +
         card(null, '<div class="center-pad">' +
-          '<a class="btn brass" href="#/documents">Go to Documents</a>' +
+          '<a class="btn primary" href="#/documents">Go to Documents</a>' +
         '</div>') +
       '</div>';
   }
@@ -965,6 +991,19 @@
     }
     out += esc(text.slice(lastIndex));
     return out;
+  }
+
+  // Design item 1 — the brief's own numbered risk list. Four discrete
+  // buckets off days_late, not the AI's own low/medium/high severity field
+  // (a coarser, narrative read) — a plain, deterministic threshold on one
+  // number, so the same buyer always gets the same colour regardless of
+  // which words a model or the fallback wrote around them.
+  function riskDotClass(daysLate) {
+    var d = Number(daysLate) || 0;
+    if (d >= 300) return 'risk-dot-red';
+    if (d >= 90) return 'risk-dot-amber';
+    if (d >= 30) return 'risk-dot-yellow';
+    return 'risk-dot-grey';
   }
 
   function riskRow(c) {
@@ -1209,7 +1248,7 @@
       view.innerHTML =
         head('At risk', 'Buyers with a missed installment, worst first. A broken promise outranks a bigger number.') +
         '<div class="grid cols-3 mb-2">' +
-          stat('Buyers at risk', String(atRisk.length), { accent: atRisk.length ? 'clay' : null }) +
+          stat('Buyers at risk', String(atRisk.length), { tone: atRisk.length ? 'clay' : null }) +
           stat('Total exposure', naira(exposure), { tone: 'clay' }) +
           stat('Broken promises', String(broken.length), { tone: broken.length ? 'clay' : null }) +
         '</div>' +
@@ -2569,9 +2608,17 @@
   }
 
   function customerModal() {
+    // Design item 5 — sectioned per the brief's own Add Buyer breakdown
+    // (Personal Details / Property / Payment Plan / Assignment), but only
+    // Personal Details actually exists as fields on this specific modal —
+    // property, plan and rep assignment happen afterwards, in the New
+    // Reservation flow (reservationModal, below), a genuinely separate
+    // step in this product: a buyer record can exist with no unit, no
+    // plan and no rep at all. Adding those three sections here with
+    // nothing in them would mean inventing fields this form has never had.
     R.modal({
       title: 'Add a buyer',
-      body:
+      body: formSection('Personal Details',
         '<div class="field"><label for="c-name">Full name</label>' +
           '<input class="input" id="c-name" name="full_name" required placeholder="Mrs Adeyemi Okonkwo"></div>' +
         '<div class="field-row">' +
@@ -2593,8 +2640,7 @@
         // as a source is just a label; a code is a specific person who
         // gets credit.
         '<div class="field"><label for="c-referral">Referred by (code, optional)</label>' +
-          '<input class="input" id="c-referral" name="referral_code" placeholder="e.g. 7K2QX9LM" ' +
-            'style="text-transform:uppercase"></div>',
+          '<input class="input input-uppercase" id="c-referral" name="referral_code" placeholder="e.g. 7K2QX9LM"></div>'),
       submitLabel: 'Add buyer',
       onSubmit: async function (form, close) {
         var v = R.values(form);
@@ -3647,7 +3693,7 @@
         '<div class="grid cols-3 mb-2">' +
           stat('Contract value', naira(state.contract_value)) +
           stat('Already paid', naira(state.total_paid), { tone: 'moss' }) +
-          stat('To reschedule', naira(state.remaining), { tone: 'gold', accent: 'gold' }) +
+          stat('To reschedule', naira(state.remaining), { tone: 'gold' }) +
         '</div>' +
 
         '<p class="field-hint mb-2">' +
@@ -3775,85 +3821,89 @@
       title: 'New reservation',
       wide: true,
       body:
-        '<div class="field-row">' +
-          '<div class="field"><label for="r-unit">Unit</label>' +
-            '<select class="select" id="r-unit" name="unit_id" required>' + options(unitList, 'id', 'label', preset.unitId) + '</select></div>' +
+        formSection('Buyer',
           '<div class="field"><label for="r-customer">Buyer</label>' +
             '<select class="select" id="r-customer" name="customer_id" required>' +
-              options(customers, 'id', 'full_name', preset.customerId) + '</select></div>' +
-        '</div>' +
+              options(customers, 'id', 'full_name', preset.customerId) + '</select></div>'
+        ) +
 
-        '<div class="field"><label for="r-property-type">What is this?</label>' +
-          '<select class="select" id="r-property-type" name="property_type">' +
-            '<option value="off_plan">Off-plan sale</option>' +
-            '<option value="outright">Outright sale</option>' +
-            '<option value="rental">Rental / tenancy</option>' +
-          '</select></div>' +
+        formSection('Unit',
+          '<div class="field"><label for="r-unit">Unit</label>' +
+            '<select class="select" id="r-unit" name="unit_id" required>' + options(unitList, 'id', 'label', preset.unitId) + '</select></div>' +
+          '<div class="field"><label for="r-property-type">What is this?</label>' +
+            '<select class="select" id="r-property-type" name="property_type">' +
+              '<option value="off_plan">Off-plan sale</option>' +
+              '<option value="outright">Outright sale</option>' +
+              '<option value="rental">Rental / tenancy</option>' +
+            '</select></div>'
+        ) +
 
-        '<div class="field"><label for="r-rep">Sales rep</label>' +
-          '<select class="select" id="r-rep" name="sales_rep_id">' +
-            '<option value="">Unassigned</option>' +
-            reps.map(function (rep) {
-              return '<option value="' + esc(rep.id) + '">' +
-                esc((rep.users && (rep.users.full_name || rep.users.email)) || 'Rep') +
-                (rep.commission_rate ? ' — ' + rep.commission_rate + '% commission' : '') + '</option>';
-            }).join('') +
-          '</select>' +
-          '<p class="field-hint">Commission accrues to this rep on every payment against this reservation.</p></div>' +
+        formSection('Assignment',
+          '<div class="field"><label for="r-rep">Sales rep</label>' +
+            '<select class="select" id="r-rep" name="sales_rep_id">' +
+              '<option value="">Unassigned</option>' +
+              reps.map(function (rep) {
+                return '<option value="' + esc(rep.id) + '">' +
+                  esc((rep.users && (rep.users.full_name || rep.users.email)) || 'Rep') +
+                  (rep.commission_rate ? ' — ' + rep.commission_rate + '% commission' : '') + '</option>';
+              }).join('') +
+            '</select>' +
+            '<p class="field-hint">Commission accrues to this rep on every payment against this reservation.</p></div>'
+        ) +
 
-        '<div class="divider"></div>' +
+        formSection('Payment Plan',
+          // Off-plan / outright: a plan is optional (an outright buyer often
+          // pays in full, off-book).
+          '<label class="check mb-2" id="r-has-plan-row"><input type="checkbox" id="r-has-plan" name="has_plan" checked>' +
+            '<span>Set up an installment plan</span></label>' +
 
-        // Off-plan / outright: a plan is optional (an outright buyer often
-        // pays in full, off-book).
-        '<label class="check mb-2" id="r-has-plan-row"><input type="checkbox" id="r-has-plan" name="has_plan" checked>' +
-          '<span>Set up an installment plan</span></label>' +
+          '<div id="r-plan">' +
+            '<div class="field-row">' +
+              '<div class="field"><label for="r-total">Total amount</label>' +
+                '<div class="input-money"><input class="input" id="r-total" name="total_amount" type="number" min="1" step="1"></div></div>' +
+              '<div class="field"><label for="r-count">Number of installments</label>' +
+                '<input class="input" id="r-count" name="number_of_installments" type="number" min="1" max="120" value="12"></div>' +
+            '</div>' +
+            '<div class="field-row">' +
+              '<div class="field"><label for="r-freq">Frequency</label>' +
+                '<select class="select" id="r-freq" name="frequency">' +
+                  '<option value="monthly">Monthly</option><option value="quarterly">Quarterly</option>' +
+                '</select></div>' +
+              '<div class="field"><label for="r-start">First payment due</label>' +
+                '<input class="input" id="r-start" name="start_date" type="date" value="' + R.todayISO() + '"></div>' +
+            '</div>' +
+            '<p class="field-hint" id="r-preview"></p>' +
 
-        '<div id="r-plan">' +
-          '<div class="field-row">' +
-            '<div class="field"><label for="r-total">Total amount</label>' +
-              '<div class="input-money"><input class="input" id="r-total" name="total_amount" type="number" min="1" step="1"></div></div>' +
-            '<div class="field"><label for="r-count">Number of installments</label>' +
-              '<input class="input" id="r-count" name="number_of_installments" type="number" min="1" max="120" value="12"></div>' +
+            // SECTION 7 — needs both a buyer and a unit picked (the
+            // recommendation is built from THIS unit's price and THIS buyer's
+            // credit score), so it stays disabled until both selects have a
+            // value — see wirePlanRecommendation().
+            '<button class="btn-quiet mb-2" type="button" id="r-ai-recommend" disabled>AI Recommendation</button>' +
+            '<div class="hidden" id="r-ai-suggestion"></div>' +
           '</div>' +
-          '<div class="field-row">' +
-            '<div class="field"><label for="r-freq">Frequency</label>' +
-              '<select class="select" id="r-freq" name="frequency">' +
-                '<option value="monthly">Monthly</option><option value="quarterly">Quarterly</option>' +
-              '</select></div>' +
-            '<div class="field"><label for="r-start">First payment due</label>' +
-              '<input class="input" id="r-start" name="start_date" type="date" value="' + R.todayISO() + '"></div>' +
-          '</div>' +
-          '<p class="field-hint" id="r-preview"></p>' +
 
-          // SECTION 7 — needs both a buyer and a unit picked (the
-          // recommendation is built from THIS unit's price and THIS buyer's
-          // credit score), so it stays disabled until both selects have a
-          // value — see wirePlanRecommendation().
-          '<button class="btn-quiet mb-2" type="button" id="r-ai-recommend" disabled>AI Recommendation</button>' +
-          '<div class="hidden" id="r-ai-suggestion"></div>' +
-        '</div>' +
-
-        // Rental: always has a rent schedule — "Monthly rent amount" and
-        // "Tenancy duration in months" replace "Total amount" and "Number of
-        // installments", and the schedule is generated from those two values
-        // exactly the way an off-plan plan is (monthly_rent × months = total,
-        // months = installment count) — installmentService needs no change.
-        '<div id="r-plan-rental" class="hidden">' +
-          '<div class="field-row">' +
-            '<div class="field"><label for="r-rent">Monthly rent amount</label>' +
-              '<div class="input-money"><input class="input" id="r-rent" name="monthly_rent" type="number" min="1" step="10000"></div></div>' +
-            '<div class="field"><label for="r-duration">Initial lease period</label>' +
-              '<select class="select" id="r-duration" name="duration_months">' +
-                '<option value="6">6 months</option>' +
-                '<option value="12" selected>1 year</option>' +
-                '<option value="24">2 years</option>' +
-                '<option value="36">3 years</option>' +
-              '</select></div>' +
-          '</div>' +
-          '<div class="field"><label for="r-tenancy-start">Tenancy start date</label>' +
-            '<input class="input" id="r-tenancy-start" name="tenancy_start_date" type="date" value="' + R.todayISO() + '"></div>' +
-          '<p class="field-hint" id="r-rental-preview"></p>' +
-        '</div>',
+          // Rental: always has a rent schedule — "Monthly rent amount" and
+          // "Tenancy duration in months" replace "Total amount" and "Number of
+          // installments", and the schedule is generated from those two values
+          // exactly the way an off-plan plan is (monthly_rent × months = total,
+          // months = installment count) — installmentService needs no change.
+          '<div id="r-plan-rental" class="hidden">' +
+            '<div class="field-row">' +
+              '<div class="field"><label for="r-rent">Monthly rent amount</label>' +
+                '<div class="input-money"><input class="input" id="r-rent" name="monthly_rent" type="number" min="1" step="10000"></div></div>' +
+              '<div class="field"><label for="r-duration">Initial lease period</label>' +
+                '<select class="select" id="r-duration" name="duration_months">' +
+                  '<option value="6">6 months</option>' +
+                  '<option value="12" selected>1 year</option>' +
+                  '<option value="24">2 years</option>' +
+                  '<option value="36">3 years</option>' +
+                '</select></div>' +
+            '</div>' +
+            '<div class="field"><label for="r-tenancy-start">Tenancy start date</label>' +
+              '<input class="input" id="r-tenancy-start" name="tenancy_start_date" type="date" value="' + R.todayISO() + '"></div>' +
+            '<p class="field-hint" id="r-rental-preview"></p>' +
+          '</div>'
+        ),
       submitLabel: 'Create reservation',
       onSubmit: async function (form, close) {
         var v = R.values(form);
@@ -4476,21 +4526,27 @@
       title: 'Record a payment',
       body:
         (customerName ? '<p class="muted mb-2">From <b>' + esc(customerName) + '</b>.</p>' : '') +
-        '<div class="field"><label for="pay-amount">Amount received</label>' +
-          '<div class="input-money"><input class="input" id="pay-amount" name="amount" type="number" min="1" step="1" required value="' + esc(outstanding || '') + '"></div>' +
-          '<p class="field-hint">Part payments are fine. The installment settles once it is fully covered.</p>' +
-          '<div id="pay-warn"></div></div>' +
-        '<div class="field"><label for="pay-method">Method</label>' +
-          '<select class="select" id="pay-method" name="method">' +
-            '<option value="bank_transfer">Bank transfer</option>' +
-            '<option value="cash">Cash</option>' +
-            '<option value="pos">POS</option>' +
-            '<option value="paystack">Paystack</option>' +
-          '</select></div>' +
-        '<div class="field"><label for="pay-ref">Reference</label>' +
-          '<input class="input" id="pay-ref" name="reference" placeholder="Bank reference or teller number"></div>' +
-        '<div class="field"><label for="pay-payer">Payer name <span class="muted">(if not ' + esc(customerName || 'the buyer') + ')</span></label>' +
-          '<input class="input" id="pay-payer" name="payer_name" placeholder="e.g. a spouse, company or lawyer\'s account"></div>',
+
+        formSection('Amount',
+          '<div class="field"><label for="pay-amount">Amount received</label>' +
+            '<div class="input-money"><input class="input" id="pay-amount" name="amount" type="number" min="1" step="1" required value="' + esc(outstanding || '') + '"></div>' +
+            '<p class="field-hint">Part payments are fine. The installment settles once it is fully covered.</p>' +
+            '<div id="pay-warn"></div></div>'
+        ) +
+
+        formSection('Transaction Details',
+          '<div class="field"><label for="pay-method">Method</label>' +
+            '<select class="select" id="pay-method" name="method">' +
+              '<option value="bank_transfer">Bank transfer</option>' +
+              '<option value="cash">Cash</option>' +
+              '<option value="pos">POS</option>' +
+              '<option value="paystack">Paystack</option>' +
+            '</select></div>' +
+          '<div class="field"><label for="pay-ref">Reference</label>' +
+            '<input class="input" id="pay-ref" name="reference" placeholder="Bank reference or teller number"></div>' +
+          '<div class="field"><label for="pay-payer">Payer name <span class="muted">(if not ' + esc(customerName || 'the buyer') + ')</span></label>' +
+            '<input class="input" id="pay-payer" name="payer_name" placeholder="e.g. a spouse, company or lawyer\'s account"></div>'
+        ),
       submitLabel: 'Record payment',
       onSubmit: async function (form, close) {
         var v = R.values(form);
@@ -5193,7 +5249,7 @@
         commissionTabs(tab) +
         '<div class="grid cols-3 mb-2">' +
           stat('Total earned', naira(totalEarned), { tone: 'gold' }) +
-          stat('Owed to reps', naira(totalOwed), { accent: totalOwed ? 'gold' : null }) +
+          stat('Owed to reps', naira(totalOwed), { tone: totalOwed ? 'gold' : null }) +
           stat('Reps earning', String(summary.length)) +
         '</div>' +
 
@@ -5569,10 +5625,10 @@
           ? '<div class="grid cols-4 mb-2">' +
               stat('Gross development value', nairaShort(t.gross_development_value)) +
               stat('Contracted', nairaShort(t.contracted_value), { tone: 'gold' }) +
-              stat('Collected to date', nairaShort(t.collected_total), { tone: 'moss', accent: 'moss' }) +
+              stat('Collected to date', nairaShort(t.collected_total), { tone: 'moss' }) +
               stat('Receivables outstanding', nairaShort(t.receivables_outstanding), {
                 sub: t.receivables_overdue ? nairaShort(t.receivables_overdue) + ' overdue' : 'none overdue',
-                accent: t.receivables_overdue ? 'clay' : null,
+                tone: t.receivables_overdue ? 'clay' : null,
               }) +
             '</div>'
           : '') +
@@ -5585,7 +5641,7 @@
               stat('Contractor payments — pending', nairaShort(report.contractor_payments.pending_total)) +
               stat('Contractor payments — overdue', nairaShort(report.contractor_payments.overdue_total), {
                 sub: R.plural(report.contractor_payments.overdue_count, 'payment'),
-                accent: report.contractor_payments.overdue_count ? 'clay' : null,
+                tone: report.contractor_payments.overdue_count ? 'clay' : null,
               }) +
             '</div>'
           : '') +
@@ -5732,7 +5788,7 @@
                   tone: rental.occupancy.rate >= 70 ? 'moss' : null,
                   sub: rental.occupancy.occupied + ' occupied · ' + rental.occupancy.vacant + ' vacant',
                 }) +
-                stat('Rental income this month', naira(rental.monthly_rental_income), { tone: 'gold', accent: 'gold' }) +
+                stat('Rental income this month', naira(rental.monthly_rental_income), { tone: 'gold' }) +
                 stat('Current monthly rent roll', naira(rental.current_monthly_rent_roll)) +
               '</div>', { flush: false }) +
 
@@ -5759,7 +5815,7 @@
         (canLegal
           ? card('Legal cases',
               '<div class="grid cols-3">' +
-                stat('Active cases', String(legalSummary.active_count), { accent: legalSummary.active_count ? 'clay' : null }) +
+                stat('Active cases', String(legalSummary.active_count), { tone: legalSummary.active_count ? 'clay' : null }) +
                 stat('Total in dispute', nairaShort(legalSummary.total_in_dispute), { tone: 'clay' }) +
                 stat('Settled this month', legalSummary.settled_this_month_count + ' · ' + nairaShort(legalSummary.settled_this_month_amount), { tone: 'moss' }) +
               '</div>', { flush: false })
@@ -7095,7 +7151,7 @@
   function setup2faStepTwoBody(backupCodes) {
     return '<div class="notice mb-2">Save these backup codes now. Each works once if you ever lose access to your ' +
         'authenticator app, and they will not be shown again.</div>' +
-      '<div class="mono mb-2" style="line-height:1.9">' + backupCodes.map(esc).join('<br>') + '</div>';
+      '<div class="mono mb-2 lh-19">' + backupCodes.map(esc).join('<br>') + '</div>';
   }
 
   // SECTION 3 — session management, opened from openAccountModal

@@ -364,7 +364,7 @@
         '</div>' +
         '<form class="modal-body" id="' + formId + '">' + (opts.body || '') + '</form>' +
         '<div class="modal-foot">' +
-          '<button class="btn ghost" type="button" data-close>' + esc(opts.cancelLabel || 'Cancel') + '</button>' +
+          '<button class="btn" type="button" data-close>' + esc(opts.cancelLabel || 'Cancel') + '</button>' +
           (opts.submitLabel
             ? '<button class="btn primary" type="submit" form="' + formId + '">' + esc(opts.submitLabel) + '</button>'
             : '') +
@@ -536,6 +536,27 @@
       out += '<div class="skeleton" data-w="' + (94 - i * 9) + '"></div>';
     }
     return out + '</div>';
+  }
+
+  // Shaped like the dashboard it stands in for — a 4-tile KPI grid and a
+  // brief card, not the generic single-card skeleton() every other screen
+  // gets — so the very first paint doesn't jump when the real layout lands.
+  function dashboardSkeleton() {
+    var tile =
+      '<div class="stat">' +
+        '<div class="skeleton" data-w="55"></div>' +
+        '<div class="skeleton skeleton-lg mt-1" data-w="70"></div>' +
+        '<div class="skeleton" data-w="40"></div>' +
+      '</div>';
+    var tiles = '';
+    for (var i = 0; i < 4; i++) tiles += tile;
+    return '<div class="grid cols-4">' + tiles + '</div>' +
+      '<div class="brief mt-2">' +
+        '<div class="skeleton" data-w="25"></div>' +
+        '<div class="skeleton mt-1" data-w="96"></div>' +
+        '<div class="skeleton" data-w="88"></div>' +
+        '<div class="skeleton" data-w="52"></div>' +
+      '</div>';
   }
 
   function table(columns, rows, rowFn, options) {
@@ -874,7 +895,9 @@
 
     if (!isSameScreen) {
       view.className = 'page screen-enter';
-      view.innerHTML = '<div class="card">' + skeleton(5) + '</div>';
+      view.innerHTML = route.name === 'dashboard'
+        ? dashboardSkeleton()
+        : '<div class="card">' + skeleton(5) + '</div>';
       applyDynamicStyles(view);
       window.scrollTo(0, 0);
     } else {
@@ -966,7 +989,7 @@
       '<div class="notice' + (offline ? ' info' : '') + '">' + esc(err.message) + '</div>' +
       '<div class="btn-row">' +
         '<button class="btn primary" id="btn-retry">Try again</button>' +
-        '<button class="btn ghost" id="btn-hard-reload">Reload the app</button>' +
+        '<button class="btn" id="btn-hard-reload">Reload the app</button>' +
       '</div>';
 
     onClick(view, '#btn-retry', async function () {
@@ -1698,7 +1721,7 @@
 
         '<div class="divider"></div>' +
 
-        '<button class="btn ghost" type="button" id="btn-account-signout">Sign out</button>' +
+        '<button class="btn" type="button" id="btn-account-signout">Sign out</button>' +
         // Last in the DOM on purpose: modal() autofocuses the first
         // input/select/textarea in the body, and a type=file input would win
         // that race (it matches :not([type=hidden])) despite being visually
@@ -2014,6 +2037,7 @@
     table: table,
     emptyState: emptyState,
     skeleton: skeleton,
+    dashboardSkeleton: dashboardSkeleton,
 
     // SECTION 1
     pushSupported: pushSupported,

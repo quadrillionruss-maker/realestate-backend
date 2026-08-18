@@ -218,6 +218,27 @@ async function gatherOrgState(orgId) {
   const flatOverdue = flatten(overdue.data);
   const flatUpcoming = flatten(upcoming.data);
 
+  // SECTION — numbered risk list. Aggregated by ref straight from
+  // flatOverdue's own per-installment rows, the same sums buildFallbackBrief's
+  // own byCustomer aggregation computes independently for the rule-based
+  // path. Deliberately NOT asked of the model (BRIEF_SCHEMA's risks item has
+  // no numeric fields) — summing several installment rows per customer and
+  // taking the oldest days-late is arithmetic, and arithmetic a model gets
+  // asked to do on a buyer's real money is arithmetic that can be wrong.
+  // Computed here once and merged into risks after the model responds
+  // instead (resolveRefs), so both the AI and fallback paths end up with
+  // the exact same, exactly-correct numbers regardless of which one wrote
+  // the sentence around them.
+  const overdueAmountByRef = new Map();
+  const overdueCountByRef = new Map();
+  const maxDaysLateByRef = new Map();
+  for (const row of flatOverdue) {
+    if (!row.customer_ref) continue;
+    overdueAmountByRef.set(row.customer_ref, (overdueAmountByRef.get(row.customer_ref) || 0) + row.amount);
+    overdueCountByRef.set(row.customer_ref, (overdueCountByRef.get(row.customer_ref) || 0) + 1);
+    maxDaysLateByRef.set(row.customer_ref, Math.max(maxDaysLateByRef.get(row.customer_ref) || 0, row.days_late));
+  }
+
   // Promises carry no customer_id (promiseService.js is shared and has its
   // own reasons not to), so matching to a ref is by name — the same
   // assumption buildFallbackBrief already makes to line up a promise with
@@ -265,6 +286,9 @@ async function gatherOrgState(orgId) {
     nameByRef,
     idByRef,
     phoneByRef,
+    overdueAmountByRef,
+    overdueCountByRef,
+    maxDaysLateByRef,
   };
 }
 
@@ -406,6 +430,13 @@ function buildFallbackBrief(state) {
           + (c.promise?.status === 'broken' ? `; promised to pay by ${c.promise.promised_date} and did not` : '')
           + (c.promise?.status === 'open' ? `; promised to pay by ${c.promise.promised_date}` : ''),
         severity: severityFor(c),
+        // Same field names resolveRefs attaches for the AI path (from its
+        // own deterministic aggregation) — the numbered risk list on the
+        // dashboard reads these directly regardless of which path wrote
+        // this brief.
+        overdue_amount: c.amount,
+        missed_count: c.count,
+        days_late: c.max_days_late,
       };
     }),
     // Nobody at legal stage gets a drafted message. Anything written to a
@@ -562,7 +593,10 @@ function sanitizeStateForModel(state) {
 // whatsapp_draft/email_draft/email_subject/recommendation titles where a
 // name belongs. This resolves every one of those back to the real name
 // before the brief is stored or shown to anyone.
-function resolveRefs(brief, nameByRef, idByRef = new Map(), phoneByRef = new Map()) {
+function resolveRefs(
+  brief, nameByRef, idByRef = new Map(), phoneByRef = new Map(),
+  overdueAmountByRef = new Map(), overdueCountByRef = new Map(), maxDaysLateByRef = new Map()
+) {
   const nameFor = (ref) => nameByRef.get(ref) || 'this buyer';
   const replaceRefs = (text) => {
     if (typeof text !== 'string') return text;
@@ -573,9 +607,17 @@ function resolveRefs(brief, nameByRef, idByRef = new Map(), phoneByRef = new Map
 
   // TASK 2.5 — customer_id travels alongside customer_name from here on, so
   // the frontend can make a buyer's name clickable without a second lookup.
+  // overdue_amount/missed_count/days_late are the deterministic sums built
+  // in gatherOrgState (see that function's own comment on why the model is
+  // never asked to compute these itself) — the numbered risk list on the
+  // dashboard reads them directly rather than parsing them back out of
+  // whatever prose `reason` happens to contain.
   const risks = (brief.risks || []).map(({ customer_ref, ...rest }) => ({
     customer_name: nameFor(customer_ref),
     customer_id: idByRef.get(customer_ref) || null,
+    overdue_amount: overdueAmountByRef.get(customer_ref) || 0,
+    missed_count: overdueCountByRef.get(customer_ref) || 0,
+    days_late: maxDaysLateByRef.get(customer_ref) || 0,
     ...rest,
   }));
 
@@ -709,7 +751,10 @@ async function requestBriefFromModel(state) {
     throw Object.assign(new Error('OpenAI returned JSON that was not a brief object'), { malformedResponse: true });
   }
 
-  return resolveRefs(parsed, state.nameByRef, state.idByRef, state.phoneByRef);
+  return resolveRefs(
+    parsed, state.nameByRef, state.idByRef, state.phoneByRef,
+    state.overdueAmountByRef, state.overdueCountByRef, state.maxDaysLateByRef
+  );
 }
 
 // SECTION 15 — "Include project health summary in the Monday morning
