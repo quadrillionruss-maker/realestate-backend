@@ -75,12 +75,13 @@
   --accent-faint: #EFF5F6;
 
   /* The one surface that stays dark — the sidebar and the gate's brand
-     panel, the same blueprint-ink teal as the accent, deepened. */
-  --sidebar-bg:          #163B4B;
+     panel, matched to sup.png's own deep navy so the login page and the
+     app shell read as one product rather than two different dark blues. */
+  --sidebar-bg:          #0B1F2E;
   --sidebar-line:        rgba(255, 255, 255, 0.08);
   --sidebar-text:        rgba(255, 255, 255, 0.58);
   --sidebar-text-active: #FFFFFF;
-  --sidebar-active-bg:   #1E4F63;
+  --sidebar-active-bg:   #1A4A63;
 
   --danger:      #B23A24;
   --danger-soft: #F7E9E4;
@@ -220,11 +221,20 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
    reference image element-by-element across several rounds. sup.png is
    that composition already finished — headline and blurb baked into the
    pixels — so the panel is now just that one image, full-bleed. Nothing
-   here is recreated in CSS or SVG; background-size:cover fills the panel
-   at any viewport without distorting it, background-position:center keeps
-   the same crop point (the logo/headline column, left-of-center in the
-   source) as the panel's aspect ratio changes. var(--sidebar-bg) stays as
-   the color underneath in case the image fails to load. */
+   here is recreated in CSS or SVG.
+
+   background-size:cover: sup.png was re-exported at 1351x1164 (~1.16:1)
+   specifically to match this panel's own on-screen ratio — .gate gives
+   this section 1.15 of 2fr, and with height pinned to the full viewport
+   that ratio is roughly (0.575 * window width) : window height, which
+   runs ~0.92:1 at 16:10 down to ~1.15-1.2:1 on a shorter/wider window.
+   The original 1141x1379 (0.83:1, portrait) was badly mismatched against
+   that — cover cropped the top and bottom (the "logo/scale-bar cut off"
+   failure the very first hand-built version of this panel also had),
+   contain left visible letterbox bars on the sides instead. The
+   re-exported ratio sits close enough to the panel's real range that
+   cover now fills edge-to-edge with only a sliver of crop at the extremes.
+   var(--sidebar-bg) shows behind the image if it fails to load. */
 .gate-brand {
   background: var(--sidebar-bg) url('./sup.png') center / cover no-repeat;
 }
@@ -299,13 +309,17 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   transform: rotate(-3deg);
 }
 .gate-drawing-ref-diamond { color: var(--danger); font-size: 13px; line-height: 1; margin-top: 2px; }
-.gate-drawing-ref-label {
-  font-family: var(--mono); font-size: 9px; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 0.08em; color: var(--danger); line-height: 1.5;
+.gate-drawing-ref-line1 {
+  font-family: var(--mono); font-size: 6.5px; text-transform: uppercase;
+  letter-spacing: 0.12em; color: var(--danger); line-height: 1.5;
 }
-.gate-drawing-ref-code {
-  font-family: var(--mono); font-size: 9px; color: var(--danger); opacity: 0.85;
-  letter-spacing: 0.04em; margin-top: 4px;
+.gate-drawing-ref-line2 {
+  font-family: var(--mono); font-size: 7px; font-weight: 600; color: var(--danger);
+  line-height: 1.5; margin-top: 2px;
+}
+.gate-drawing-ref-line3 {
+  font-family: var(--mono); font-size: 6.5px; color: var(--danger); opacity: 0.85;
+  line-height: 1.5; margin-top: 2px;
 }
 
 .gate-card { width: 100%; max-width: 372px; }
@@ -349,6 +363,8 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
 .gate-tab {
   flex: 1;
   padding: 10px 10px;
+  padding-bottom: 10px;
+  white-space: nowrap;
   border-bottom: 2.5px solid transparent;
   font-size: 13px;
   font-weight: 500;
@@ -474,10 +490,11 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   color: var(--text-dim);
 }
 .gate-remember input { width: 14px; height: 14px; accent-color: var(--accent); }
-/* Accent by default, per the reference image — .link-quiet's own base
-   color (var(--text-dim)) only turns accent on hover, which is right for
-   every OTHER quiet link in the app but not this one. */
-.gate-forgot { font-size: 12.5px; color: var(--accent); }
+/* Accent and underlined by default, per the reference image — .link-quiet's
+   own base state (var(--text-dim), no underline until hover) is right for
+   every OTHER quiet link in the app but reads as plain text here, not this
+   one; a permanent underline is what marks it clickable at rest. */
+.gate-forgot { font-size: 12.5px; color: var(--accent); text-decoration: underline; }
 
 /* Item 19 — SIGN IN →, the one button on this form that gets the mono/
    letter-spaced drafting-plate treatment rather than the app-wide .btn.primary
@@ -518,14 +535,30 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
      that 18px of padding AND 2px of border on top, rendering at 68px. */
   box-sizing: border-box;
   height: 48px;
-  background: var(--panel);
+  background: rgba(255, 255, 255, 0.55) !important;
   border: 1px solid var(--line-strong);
   border-radius: 4px;
 }
 .gate-card .input:focus {
   border: 1.5px solid var(--accent);
   box-shadow: 0 0 0 3px rgba(30, 79, 99, 0.10);
-  background: var(--panel);
+  background: rgba(255, 255, 255, 0.55) !important;
+}
+
+/* The pale blue isn't coming from .input's own background above (already
+   overridden !important) — it's Chrome/Safari's built-in autofill
+   styling, which only a background-color declaration can never beat; the
+   inset box-shadow trick is the one technique that actually paints over
+   it, and -webkit-text-fill-color is needed alongside it because autofill
+   also pins the text color independently of `color`. */
+.gate-card .input:-webkit-autofill,
+.gate-card .input:-webkit-autofill:hover,
+.gate-card .input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px rgba(255, 255, 255, 0.55) inset;
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+  border-color: var(--line-strong);
+  transition: background-color 5000s ease-in-out 0s;
 }
 
 .link-quiet {
@@ -687,7 +720,7 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
    padding drops by the same 2px the border adds, so the icon/label don't
    shift sideways the moment a row becomes active. */
 .nav-item.is-active {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--sidebar-active-bg);
   border-left-color: var(--accent);
   padding-left: 8px;
   color: var(--sidebar-text-active);
