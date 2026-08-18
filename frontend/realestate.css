@@ -234,9 +234,25 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
    contain left visible letterbox bars on the sides instead. The
    re-exported ratio sits close enough to the panel's real range that
    cover now fills edge-to-edge with only a sliver of crop at the extremes.
-   var(--sidebar-bg) shows behind the image if it fails to load. */
+   var(--sidebar-bg) shows behind the image if it fails to load.
+
+   position:sticky + an explicit height, not the grid's default stretch:
+   .gate is a single-row grid, so with no height set here this column
+   would stretch to match whatever height its sibling needs — and Create
+   account (4 fields) or the 2FA/reset forms run taller than one viewport
+   where Sign in (2 fields) does not. A taller box forced cover to zoom in
+   further to still cover it, which is what made the image visibly "grow"
+   switching tabs even though nothing about the image itself changed.
+   Pinning height to one viewport keeps the cover math — and so the
+   image's crop/zoom — identical no matter how tall the form beside it
+   gets; sticky is what lets the panel stay in view, at that same fixed
+   size, while a taller form scrolls past it rather than stretching it. */
 .gate-brand {
   background: var(--sidebar-bg) url('./sup.png') center / cover no-repeat;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
 }
 
 /* Three statements about behaviour, replacing what used to be three numbers
@@ -290,36 +306,39 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   background: var(--panel);
 }
 
-/* Item 13, rebuilt to match the approved reference image — a rotated
-   rust/terracotta permit stamp, not the mono title-block the text spec
-   originally described. Reuses --danger/--danger-soft rather than
-   introducing a new colour token: it is already this exact rust-red
-   (#B23A24) elsewhere in the palette, just never on a light tint background
-   like a real ink stamp before now. */
+/* Item 13 — no longer a stamp. A plain right-aligned text block: no box,
+   no border, no background, no rotation, no SVG icon, just the title-block
+   wording a real drawing carries in its corner. The spec names
+   var(--ink)/var(--ink-faint), which this file has no such tokens under —
+   --text and --text-faint are this palette's actual ink-black/faded-ink
+   pair, so those are what's used below. */
 .gate-drawing-ref {
   position: absolute;
-  top: 28px; right: 32px;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 10px 14px;
-  border: 1px solid rgba(178, 58, 36, 0.4);
-  border-radius: 3px;
-  background: var(--danger-soft);
-  transform: rotate(-3deg);
+  top: 24px; right: 28px;
+  text-align: right;
 }
-.gate-drawing-ref-diamond { color: var(--danger); font-size: 13px; line-height: 1; margin-top: 2px; }
 .gate-drawing-ref-line1 {
-  font-family: var(--mono); font-size: 6.5px; text-transform: uppercase;
-  letter-spacing: 0.12em; color: var(--danger); line-height: 1.5;
+  font-family: var(--mono); font-size: 8px; text-transform: uppercase;
+  letter-spacing: 0.15em; color: var(--text-faint); line-height: 1.5;
 }
 .gate-drawing-ref-line2 {
-  font-family: var(--mono); font-size: 7px; font-weight: 600; color: var(--danger);
-  line-height: 1.5; margin-top: 2px;
+  font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text);
+  line-height: 1.5;
 }
 .gate-drawing-ref-line3 {
-  font-family: var(--mono); font-size: 6.5px; color: var(--danger); opacity: 0.85;
-  line-height: 1.5; margin-top: 2px;
+  font-family: var(--mono); font-size: 8px; color: var(--text-faint);
+  line-height: 1.5;
+}
+.gate-drawing-ref-diamond {
+  color: var(--gold);
+  font-size: 8px;
+  line-height: 1;
+  text-align: center;
+  margin: 6px 0;
+}
+.gate-drawing-ref-rule {
+  height: 0;
+  border-top: 1px solid rgba(0, 0, 0, 0.15);
 }
 
 .gate-card { width: 100%; max-width: 372px; }
