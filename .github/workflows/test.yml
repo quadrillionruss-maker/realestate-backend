@@ -1,0 +1,24 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # syntax + logic + schema — all offline (schema.test.js runs migrations
+      # against an in-process PGlite Postgres), so no Supabase project or
+      # secrets are needed here. See CLAUDE.md's "Testing" section.
+      - run: npm test

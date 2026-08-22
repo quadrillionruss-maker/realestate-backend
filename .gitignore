@@ -3,3 +3,6 @@ node_modules/
 .env.local
 *.log
 .DS_Store
+/test-results/
+/playwright-report/
+/blob-report/

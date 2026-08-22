@@ -514,8 +514,8 @@
     buyer_added: '#/buyers',
     reservation_created: '#/buyers',
     payment_recorded: '#/payments',
-    branding_configured: '#/settings',
-    team_invited: '#/settings',
+    branding_configured: '#/settings?tab=workspace',
+    team_invited: '#/settings?tab=team',
     brief_generated: '#/dashboard',
   };
 
@@ -673,11 +673,10 @@
             '</div>'
           : '') +
 
-        // SECTION 23 — the setup checklist, only while it is still worth
-        // showing: once 5 of the 8 steps are done the workspace has proven
-        // it's in real use, and a permanent card nagging a live business
-        // about "invite a team member" would just be noise.
-        (onboarding && onboarding.completed_count < 5 ? onboardingCardHtml(onboarding) : '') +
+        // Keep the checklist visible until it is actually complete. Hiding it
+        // at an arbitrary halfway point strands an owner with unfinished
+        // setup work and no reminder or shortcut back to it.
+        (onboarding && onboarding.completed_count < onboarding.total_count ? onboardingCardHtml(onboarding) : '') +
 
         '<div class="greeting"><h1>' + esc(greeting()) + '</h1>' +
           '<div class="greeting-lines">' + lines.join('') + '</div></div>' +

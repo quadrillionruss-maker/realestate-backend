@@ -37,6 +37,45 @@ async function ensureBucket() {
   if (error && !/already exists/i.test(error.message)) throw error;
 }
 
+// ── Content sniffing ─────────────────────────────────────────────────────
+// Every upload function below used to validate only the CALLER's claimed
+// contentType against an allow-list — nothing ever inspected the bytes
+// actually being stored. An authenticated user could declare "image/png" on
+// a file that is anything else at all (an HTML document, an SVG carrying
+// script, an arbitrary binary) and it would land in a bucket — one of them
+// public — under a .png extension and get served back with that same
+// declared content type. detectSignature reads the fixed header bytes every
+// one of these formats is required to start with; assertContentMatchesType
+// refuses anything where the bytes and the declared type disagree.
+function detectSignature(buffer) {
+  if (buffer.length >= 8
+    && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47
+    && buffer[4] === 0x0d && buffer[5] === 0x0a && buffer[6] === 0x1a && buffer[7] === 0x0a) {
+    return 'image/png';
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  // RIFF container, WEBP fourCC at byte 8 — the two fixed anchors of the format.
+  if (buffer.length >= 12
+    && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  if (buffer.length >= 5 && buffer.toString('ascii', 0, 5) === '%PDF-') {
+    return 'application/pdf';
+  }
+  return null;
+}
+
+function assertContentMatchesType(buffer, contentType) {
+  if (detectSignature(buffer) !== contentType) {
+    throw Object.assign(
+      new Error(`That file's content does not match its declared type (${contentType}).`),
+      { statusCode: 400 }
+    );
+  }
+}
+
 async function uploadPdf(storagePath, pdf) {
   await ensureBucket();
   const { error } = await supabaseAdmin.storage
@@ -92,6 +131,7 @@ async function uploadPrivateMedia(path, buffer, contentType) {
       { statusCode: 400 }
     );
   }
+  assertContentMatchesType(buffer, contentType);
   if (buffer.length > MAX_MEDIA_BYTES) {
     throw Object.assign(new Error('That file is larger than 6MB.'), { statusCode: 400 });
   }
@@ -130,6 +170,7 @@ async function uploadMedia(path, buffer, contentType) {
       { statusCode: 400 }
     );
   }
+  assertContentMatchesType(buffer, contentType);
   if (buffer.length > MAX_MEDIA_BYTES) {
     throw Object.assign(new Error('That file is larger than 6MB.'), { statusCode: 400 });
   }
@@ -172,6 +213,7 @@ async function uploadTeamLogo(teamId, buffer, contentType) {
       { statusCode: 400 }
     );
   }
+  assertContentMatchesType(buffer, contentType);
   if (buffer.length > MAX_LOGO_BYTES) {
     throw Object.assign(new Error('That image is larger than 2MB.'), { statusCode: 400 });
   }
@@ -200,6 +242,7 @@ async function uploadUserAvatar(userId, buffer, contentType) {
       { statusCode: 400 }
     );
   }
+  assertContentMatchesType(buffer, contentType);
   if (buffer.length > MAX_LOGO_BYTES) {
     throw Object.assign(new Error('That image is larger than 2MB.'), { statusCode: 400 });
   }
@@ -218,4 +261,5 @@ module.exports = {
   BUCKET, SIGNED_URL_TTL_SECONDS, ensureBucket, uploadPdf, createSignedUrl, uploadPrivateMedia,
   MEDIA_BUCKET, MEDIA_TYPES, MAX_MEDIA_BYTES, uploadMedia,
   PUBLIC_ASSETS_BUCKET, LOGO_TYPES, MAX_LOGO_BYTES, uploadTeamLogo, uploadUserAvatar,
+  detectSignature,
 };

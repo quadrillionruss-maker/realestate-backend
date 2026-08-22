@@ -21,6 +21,24 @@ const STEPS = [
 ];
 
 async function checklist(orgId) {
+  const results = await Promise.all([
+    supabaseAdmin.from('re_projects').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
+    supabaseAdmin.from('re_units').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
+    supabaseAdmin.from('re_customers').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
+    supabaseAdmin.from('re_reservations').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
+    supabaseAdmin.from('re_payments').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).is('voided_at', null),
+    supabaseAdmin.from('re_org_settings').select('company_name').eq('organization_id', orgId).maybeSingle(),
+    // An invitation is the action this step asks the owner to take. A pending
+    // invite must count here; otherwise the checklist appears broken until a
+    // recipient creates an account and accepts it. The owner's membership is
+    // included too, so a team needs at least two non-removed rows to finish.
+    supabaseRaw.from('team_members').select('id', { count: 'exact', head: true }).eq('team_id', orgId).in('status', ['active', 'invited']),
+    supabaseAdmin.from('re_ai_briefs').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
+  ]);
+
+  const failed = results.find((result) => result.error);
+  if (failed) throw failed.error;
+
   const [
     { count: projectCount },
     { count: unitCount },
@@ -28,22 +46,20 @@ async function checklist(orgId) {
     { count: reservationCount },
     { count: paymentCount },
     { data: settings },
-    { count: activeMemberCount },
+    { count: memberOrInviteCount },
     { count: briefCount },
-  ] = await Promise.all([
-    supabaseAdmin.from('re_projects').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
-    supabaseAdmin.from('re_units').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
-    supabaseAdmin.from('re_customers').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
-    supabaseAdmin.from('re_reservations').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
-    supabaseAdmin.from('re_payments').select('id', { count: 'exact', head: true }).eq('organization_id', orgId).is('voided_at', null),
-    supabaseAdmin.from('re_org_settings').select('company_name').eq('organization_id', orgId).maybeSingle(),
-    // A solo account has no team_members row at all (team lookup degrades to
-    // "solo" — see CLAUDE.md's Org scoping section), so this simply never
-    // completes for one, which is accurate: nobody has been invited.
-    supabaseRaw.from('team_members').select('id', { count: 'exact', head: true }).eq('team_id', orgId).eq('status', 'active'),
-    supabaseAdmin.from('re_ai_briefs').select('id', { count: 'exact', head: true }).eq('organization_id', orgId),
-  ]);
+  ] = results;
 
+  return buildChecklist({
+    projectCount, unitCount, buyerCount, reservationCount, paymentCount,
+    settings, memberOrInviteCount, briefCount,
+  });
+}
+
+function buildChecklist({
+  projectCount, unitCount, buyerCount, reservationCount, paymentCount,
+  settings, memberOrInviteCount, briefCount,
+}) {
   const done = {
     project_created: Boolean(projectCount),
     units_added: Boolean(unitCount),
@@ -51,7 +67,7 @@ async function checklist(orgId) {
     reservation_created: Boolean(reservationCount),
     payment_recorded: Boolean(paymentCount),
     branding_configured: Boolean(settings?.company_name && String(settings.company_name).trim()),
-    team_invited: Number(activeMemberCount || 0) > 1,
+    team_invited: Number(memberOrInviteCount || 0) > 1,
     brief_generated: Boolean(briefCount),
   };
 
@@ -63,4 +79,4 @@ async function checklist(orgId) {
   };
 }
 
-module.exports = { checklist, STEPS };
+module.exports = { checklist, buildChecklist, STEPS };

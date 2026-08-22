@@ -89,6 +89,16 @@ const DEV_ORIGINS = [
 // Exact origins only, never a wildcard or a regex over *.vercel.app: Vercel
 // preview URLs are attacker-registerable in the general case, and `credentials:
 // true` below means an allowed origin can make authenticated requests.
+//
+// THREE PLACES KNOW A DEPLOYMENT HOST, INDEPENDENTLY, BECAUSE THEY ARE THREE
+// SEPARATE DEPLOY TARGETS WITH NO SHARED BUILD STEP — moving the frontend or
+// the API to a new domain means updating all three by hand, or requests
+// start failing CORS/CSP with nothing in the Network tab explaining why:
+//   1. PRODUCTION_ORIGINS here — which frontend origin this API accepts
+//   2. frontend/config.js's PRODUCTION_API — which API host the browser calls
+//   3. frontend/vercel.json's Content-Security-Policy connect-src — which
+//      hosts the browser is even allowed to call (JSON has no comment syntax,
+//      which is why this note lives here instead of there)
 const PRODUCTION_ORIGINS = [
   'https://realestate-frontend-pi.vercel.app',
 ];

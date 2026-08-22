@@ -119,6 +119,8 @@ try {
   if (!/document is not defined/.test(err.message)) throw err;
 }
 const { naturalSort, matchImportColumn, remapCsv } = global.window.RE;
+const { buildChecklist } = require('../services/onboardingService');
+const { detectSignature } = require('../services/documentStorage');
 
 // SECTION 14 — offline-queue.js loads after realestate.js (needs
 // window.RE) and never touches `document` at its own top level (only
@@ -144,6 +146,45 @@ function test(name, fn) {
 }
 
 function section(title) { console.log(`\n${title}`); }
+
+section('Onboarding checklist');
+
+test('a pending team invitation completes the invite step, while the owner alone does not', () => {
+  const base = {
+    projectCount: 0, unitCount: 0, buyerCount: 0, reservationCount: 0,
+    paymentCount: 0, settings: null, briefCount: 0,
+  };
+  const solo = buildChecklist({ ...base, memberOrInviteCount: 1 });
+  const invited = buildChecklist({ ...base, memberOrInviteCount: 2 });
+
+  assert.strictEqual(solo.steps.find((step) => step.key === 'team_invited').done, false);
+  assert.strictEqual(invited.steps.find((step) => step.key === 'team_invited').done, true);
+  assert.strictEqual(invited.completed_count, 1);
+  assert.strictEqual(invited.total_count, 8);
+});
+
+section('Upload content sniffing');
+
+test('detectSignature reads the real format from the bytes, not the filename', () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
+  const webp = Buffer.concat([Buffer.from('RIFF'), Buffer.from([0, 0, 0, 0]), Buffer.from('WEBP')]);
+  const pdf = Buffer.from('%PDF-1.4\n%...');
+
+  assert.strictEqual(detectSignature(png), 'image/png');
+  assert.strictEqual(detectSignature(jpeg), 'image/jpeg');
+  assert.strictEqual(detectSignature(webp), 'image/webp');
+  assert.strictEqual(detectSignature(pdf), 'application/pdf');
+});
+
+test('detectSignature refuses a file whose bytes do not match any known format', () => {
+  // The exact scenario the finding this fixes described: a caller can claim
+  // any Content-Type on the wire, but the bytes of an HTML/script payload
+  // (or anything else) never satisfy a real PNG/JPEG/WebP/PDF header.
+  const html = Buffer.from('<html><script>alert(1)</script></html>');
+  assert.strictEqual(detectSignature(html), null);
+  assert.strictEqual(detectSignature(Buffer.alloc(0)), null);
+});
 
 // resolveBranding is the one async function in this offline-only suite, so it
 // gets its own runner rather than forcing `test()` to support promises it

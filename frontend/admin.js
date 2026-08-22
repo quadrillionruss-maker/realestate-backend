@@ -523,7 +523,7 @@
   function onboardingBlock(data) {
     if (!data) return '<div class="onboarding-block"><div class="k">Onboarding</div><div class="muted">Loading…</div></div>';
     var pct = Math.round((data.completed_count / data.total_count) * 100);
-    var bucket = PROGRESS_WIDTH_CLASSES[Math.round(pct / 10)];
+    var bucket = 'onboarding-bar-' + PROGRESS_WIDTH_CLASSES[Math.round(pct / 10)];
     return '<div class="onboarding-block">' +
       '<div class="k">Onboarding — ' + data.completed_count + '/' + data.total_count + '</div>' +
       '<div class="onboarding-bar-track"><div class="onboarding-bar ' + bucket + '"></div></div>' +

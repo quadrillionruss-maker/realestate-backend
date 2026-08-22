@@ -17,6 +17,18 @@
  * Edit PRODUCTION_API below. Nothing else in the app hardcodes a host.
  * Localhost keeps pointing at a local server so `npm start` still works
  * without editing anything.
+ *
+ * Two OTHER files hardcode a deployment host too, independently, because
+ * there is no build step shared across these three deploy targets. Moving
+ * either the API or the frontend to a new domain means updating all three,
+ * by hand, or something breaks silently (a blocked fetch reads as "the app
+ * is broken" with nothing useful in the Network tab):
+ *   1. PRODUCTION_API here — which API host the browser calls
+ *   2. server.js's PRODUCTION_ORIGINS — which frontend origin the API's CORS
+ *      config accepts (the reverse direction of this file)
+ *   3. vercel.json's Content-Security-Policy connect-src, in this same
+ *      folder — which hosts the browser is even allowed to call. JSON has no
+ *      comment syntax, which is why this note lives here instead of there.
  */
 (function () {
   'use strict';
