@@ -306,6 +306,55 @@
     return authApi(path, { method: 'POST', body: JSON.stringify(data || {}), noAuthRedirect: true });
   };
 
+  // ── Global error capture ─────────────────────────────────────────────
+  // renderFailure (further down, in the router) only ever sees an error
+  // that broke a SCREEN'S OWN render — a throw from a click handler, a
+  // timer callback, or a promise with no .catch anywhere in its chain never
+  // passes through router.render()'s try/catch at all, so a bug shaped
+  // exactly like the WhatsApp queue banner one (migrations/054's own
+  // comment on it: a var referenced before its own assignment left
+  // RE.whatsappQueue undefined) could keep throwing on every render and
+  // never once reach the admin dashboard's Errors tab. These two listeners
+  // are the backstop — whatever else on this page throws or rejects
+  // uncaught is reported the same way, through the same /client-errors
+  // route, whether or not it also visibly broke a screen.
+  //
+  // Fire-and-forget and self-contained: an error reporter that itself threw
+  // would just recurse through the very 'error' listener it is registered
+  // on, so the whole body is wrapped rather than trusting any one line.
+  function reportClientError(message, stack) {
+    try {
+      if (!RE.state.user) return; // no session to attach the report to yet
+      api.post('/client-errors', {
+        message: String(message || '(no message)'),
+        stack: stack || null,
+        screen: window.location.hash || null,
+        url: window.location.href,
+        user_agent: navigator.userAgent,
+        timestamp: new Date().toISOString(),
+      }).catch(function () { /* nothing to do if even the report fails */ });
+    } catch (e) { /* the reporter must never itself throw */ }
+  }
+
+  // stub logic.test.js requires this file against has no addEventListener —
+  // same reasoning as the WhatsApp queue's own 'focus' listener further down.
+  try {
+    window.addEventListener('error', function (event) {
+      reportClientError(
+        event.error ? event.error.message : event.message,
+        event.error ? event.error.stack : null
+      );
+    });
+
+    window.addEventListener('unhandledrejection', function (event) {
+      var reason = event.reason;
+      reportClientError(
+        reason instanceof Error ? reason.message : String(reason),
+        reason instanceof Error ? reason.stack : null
+      );
+    });
+  } catch (e) { /* no-op outside a real browser */ }
+
   // ── Toast ─────────────────────────────────────────────────────────────
   function toast(message, kind) {
     var host = el('toasts');

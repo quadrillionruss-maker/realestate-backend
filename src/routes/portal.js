@@ -27,6 +27,7 @@ const satisfactionSurvey = require('../services/satisfactionSurveyService');
 const referrals = require('../services/referralService');
 const portalNotifications = require('../services/portalNotificationService');
 const featureUsage = require('../services/featureUsageService');
+const clientErrors = require('../services/clientErrorService');
 
 const router = express.Router();
 
@@ -70,6 +71,41 @@ async function portalAuth(req, res, next) {
 }
 
 router.use(portalAuth);
+
+// A genuinely broken screen can re-render (and re-throw) on every retry or
+// route change — bounded so that doesn't turn into a flood, not because a
+// real buyer is expected to ever get near this. Same budget and reasoning
+// as the operator app's own reporter (routes/clientErrors.js); a buyer's
+// bearer token has aud:'re-portal', which the operator route's staff
+// `authenticate` middleware rejects outright, so this page needs its own
+// route rather than reusing that one — see portal.js's own comment on why
+// the two tokens are not interchangeable in either direction.
+const clientErrorLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.customer?.id || req.ip,
+  message: { error: 'Too many error reports.' },
+});
+
+router.post('/client-errors', clientErrorLimiter, async (req, res, next) => {
+  try {
+    const { message, stack, screen, url, user_agent } = req.body || {};
+    if (!message) return res.status(400).json({ error: 'message is required' });
+
+    // A buyer is not a `users` row, so userId is always null here — the
+    // same nullable column an error that fires before any session exists at
+    // all already needs (see migrations/054's own comment on that).
+    await clientErrors.report({
+      orgId: req.customer.organization_id,
+      userId: null,
+      app: 'portal',
+      message, stack, screen, url, userAgent: user_agent,
+    });
+    res.status(201).json({ reported: true });
+  } catch (e) { next(e); }
+});
 
 router.get('/me', async (req, res, next) => {
   try {

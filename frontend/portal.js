@@ -219,6 +219,46 @@
     return body;
   }
 
+  // ── Global error capture ──────────────────────────────────────────────
+  // Same backstop realestate.js's own version explains at length: a throw
+  // in a click handler or an unhandled rejection never passes through this
+  // page's own try/catch blocks, so without this it would simply never be
+  // known to have happened. Reported through THIS page's own /client-errors
+  // route (routes/portal.js) rather than the operator app's — a buyer's
+  // bearer token carries aud:'re-portal', which the operator route's staff
+  // auth middleware rejects outright.
+  function reportClientError(message, stack) {
+    try {
+      if (!token) return; // no link/session to attach the report to yet
+      api('/client-errors', {
+        method: 'POST',
+        body: JSON.stringify({
+          message: String(message || '(no message)'),
+          stack: stack || null,
+          screen: window.location.hash || null,
+          url: window.location.href,
+          user_agent: navigator.userAgent,
+          timestamp: new Date().toISOString(),
+        }),
+      }).catch(function () { /* nothing to do if even the report fails */ });
+    } catch (e) { /* the reporter must never itself throw */ }
+  }
+
+  window.addEventListener('error', function (event) {
+    reportClientError(
+      event.error ? event.error.message : event.message,
+      event.error ? event.error.stack : null
+    );
+  });
+
+  window.addEventListener('unhandledrejection', function (event) {
+    var reason = event.reason;
+    reportClientError(
+      reason instanceof Error ? reason.message : String(reason),
+      reason instanceof Error ? reason.stack : null
+    );
+  });
+
   // A buyer is not a developer. "Invalid token" means nothing to them; "ask
   // for a new link" is an instruction they can act on.
   function fail(message, detail) {
