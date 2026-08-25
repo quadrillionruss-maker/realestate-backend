@@ -162,6 +162,12 @@ router.patch('/:id/status', requirePermission('tasks.write'), async (req, res, n
       entityId: data.id,
       summary: `Task "${existing?.title || data.title}" moved from ${existing?.status || '?'} to ${status}`,
       metadata: { from: existing?.status || null, to: status },
+      // FEATURE — system log with undo. Only the two transitions the
+      // product spec names (task_completed/task_dismissed) are reversible
+      // — reopening a task (status:'open') is not itself an action anyone
+      // needs an "undo" for.
+      reversible: status === 'done' || status === 'dismissed',
+      reversalData: { previous_status: existing?.status || 'open' },
     });
 
     res.json(data);

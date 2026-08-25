@@ -182,6 +182,15 @@ router.get('/', requirePermission('dashboard.read'), async (req, res, next) => {
     const rentalPayments = paymentRows.filter(isRentalPayment);
     const salesPayments = paymentRows.filter((row) => !isRentalPayment(row));
 
+    // FEATURE — outright sales. Same reasoning as the rental/sales split
+    // just above, one level narrower: a developer selling both off-plan
+    // installment units and outright units in the same project cannot tell
+    // which of the two actually produced this month's number without it.
+    const isOutrightPayment = (row) => row.re_installment_schedule
+      ?.re_installment_plans?.re_reservations?.property_type === 'outright';
+    const outrightPayments = salesPayments.filter(isOutrightPayment);
+    const installmentPayments = salesPayments.filter((row) => !isOutrightPayment(row));
+
     // Design item 3 — the KPI tiles' own small trend line ("14 payments",
     // "9 installments") reads one of these counts, not a re-derived guess
     // on the frontend — each is free (the row array it counts is already
@@ -195,6 +204,8 @@ router.get('/', requirePermission('dashboard.read'), async (req, res, next) => {
       collected_this_month_count: paymentRows.length,
       collected_sales_this_month: sum(salesPayments, 'amount'),
       collected_rental_this_month: sum(rentalPayments, 'amount'),
+      collected_outright_this_month: sum(outrightPayments, 'amount'),
+      collected_installment_this_month: sum(installmentPayments, 'amount'),
       outstanding_total: sum(scheduleRows, 'amount_due'),
       outstanding_count: scheduleRows.length,
       overdue: {
@@ -244,13 +255,20 @@ router.get('/at-risk', requirePermission('atRisk.read'), async (req, res, next) 
         id, amount_due, due_date,
         re_installment_plans!inner(
           re_reservations!inner(
-            id, escalation_stage,
+            id, escalation_stage, property_type, default_risk_score,
             re_customers(id, full_name, phone, email),
             re_units(unit_number, project_id, re_projects(id, name))
           )
         )`)
       .eq('organization_id', req.orgId)
-      .eq('status', 'overdue');
+      .eq('status', 'overdue')
+      // FEATURE — outright sales. A single lump-sum installment due
+      // immediately is not the kind of "falling behind" this list exists to
+      // surface — a buyer wiring a large one-off payment a few days late is
+      // a normal outright close, not an at-risk pattern the aiBrief.js
+      // escalation ladder was built to describe (see that file's own
+      // exclusion of the same property_type from its overdue read).
+      .neq('re_installment_plans.re_reservations.property_type', 'outright');
 
     if (req.query.project_id) {
       if (!UUID_RE.test(req.query.project_id)) {
@@ -273,6 +291,13 @@ router.get('/at-risk', requirePermission('atRisk.read'), async (req, res, next) 
         unit: reservation.re_units,
         reservation_id: reservation.id,
         escalation_stage: reservation.escalation_stage || 'none',
+        // FEATURE — buyer default prediction. Carried straight through from
+        // the stored value (defaultRiskService.recompute, run after every
+        // payment) rather than computed fresh here — this list can be dozens
+        // of rows and recomputing all five signals per row on every dashboard
+        // load is the kind of cost this product avoids elsewhere too (see
+        // projectHealthService's own daily-snapshot reasoning).
+        default_risk_score: reservation.default_risk_score,
         overdue_count: 0,
         overdue_amount: 0,
         oldest_due: row.due_date,

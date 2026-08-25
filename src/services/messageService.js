@@ -10,6 +10,7 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { audit, auditSystem } = require('./auditService');
 const notify = require('./notificationService');
 const portalNotifications = require('./portalNotificationService');
+const sentiment = require('./sentimentService');
 
 async function listForCustomer(orgId, customerId) {
   const { data, error } = await supabaseAdmin
@@ -110,6 +111,11 @@ async function sendFromBuyer(customer, message) {
   } catch (err) {
     console.warn('[messages] could not notify rep of new buyer message:', err.message);
   }
+
+  // FEATURE — buyer sentiment analysis. Never throws (see
+  // sentimentService.updateCustomerSentiment's own rule) — a classification
+  // failure must not stop the buyer's message from having been sent.
+  await sentiment.updateCustomerSentiment(customer.organization_id, customer.id, trimmed);
 
   return data;
 }

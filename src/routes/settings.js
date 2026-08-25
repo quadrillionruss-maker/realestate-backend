@@ -16,6 +16,7 @@ const { encrypt, last4 } = require('../utils/credentials');
 const { verifyPaystackKey } = require('../services/paystackService');
 const { sendTestEmail, sendTestSms, EMAIL_TEMPLATE_TYPES } = require('../services/notificationService');
 const { buildBackup } = require('../services/backupService');
+const vat = require('../services/vatService');
 const router = express.Router();
 
 const SETTINGS_COLUMNS = `organization_id, company_name, logo_url, address, phone, website,
@@ -556,6 +557,34 @@ router.patch('/receipt-template', requirePermission('settings.write'), async (re
     });
 
     res.json(data);
+  } catch (e) { next(e); }
+});
+
+// ── VAT (SECTION 9 — feature expansion) ──────────────────────────────────
+// Same owner-only gate as receipt-template just above — configuring how
+// much of every payment gets shown as tax is a workspace financial policy,
+// not a director-level operational decision.
+router.get('/vat', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    res.json(await vat.getVatSettings(req.orgId));
+  } catch (e) { next(e); }
+});
+
+router.patch('/vat', requirePermission('settings.write'), async (req, res, next) => {
+  try {
+    const { enabled, rate, inclusive } = req.body || {};
+    const result = await vat.updateVatSettings(req.orgId, { enabled, rate, inclusive });
+
+    audit(req, {
+      action: 'vat_settings.updated',
+      entityType: 're_org_settings',
+      entityId: req.orgId,
+      summary: `VAT ${result.enabled ? 'enabled' : 'disabled'} at ${result.rate}%, `
+        + `prices ${result.inclusive ? 'VAT-inclusive' : 'VAT-exclusive'}`,
+      metadata: result,
+    });
+
+    res.json(result);
   } catch (e) { next(e); }
 });
 

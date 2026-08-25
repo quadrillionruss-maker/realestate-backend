@@ -9,7 +9,22 @@ const { requirePermission } = require('../middleware/rbac');
 const { canAccess } = require('../services/permissions');
 const { toCsv } = require('../utils/csv');
 const { audit } = require('../services/auditService');
+const undoService = require('../services/undoService');
 const router = express.Router();
+
+// FEATURE — system log with undo. 10 per day per WORKSPACE (the product
+// spec's own words), not per user like every other limiter in this
+// file — keyed on req.orgId so it caps the whole team's undo activity
+// together, the same way a single accidental-bulk-action recovery tool
+// should be bounded regardless of who on the team is doing the clicking.
+const undoLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.orgId,
+  message: { error: 'Undo is limited to 10 per day for this workspace. Try again tomorrow.' },
+});
 
 // FEATURE — a full CSV of the audit log is the single most sensitive export
 // this product offers (every action, every actor, every IP, back to day
@@ -172,6 +187,16 @@ router.get('/export', auditExportLimiter, requirePermission('audit.export'), asy
         ['Changes summary', (r) => r.summary || ''],
         ['IP address', (r) => r.ip || ''],
       ], rows));
+  } catch (e) { next(e); }
+});
+
+// FEATURE — system log with undo. Owner only (audit.undo, permissions.js) —
+// several of the actions this can reverse are themselves owner-gated.
+router.patch('/:id/undo', undoLimiter, requirePermission('audit.undo'), async (req, res, next) => {
+  try {
+    const result = await undoService.undo(req, req.params.id);
+    if (result.notFound) return res.status(404).json({ error: 'Audit entry not found' });
+    res.json(result);
   } catch (e) { next(e); }
 });
 

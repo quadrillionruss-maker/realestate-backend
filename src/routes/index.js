@@ -44,5 +44,8 @@ router.use('/community', require('./community'));
 router.use('/push', require('./push'));
 router.use('/scheduled-messages', require('./scheduledMessages'));
 router.use('/client-errors', require('./clientErrors'));
+router.use('/attendance', require('./attendance'));
+router.use('/logs', require('./logs'));
+router.use('/campaigns', require('./campaigns'));
 
 module.exports = router;

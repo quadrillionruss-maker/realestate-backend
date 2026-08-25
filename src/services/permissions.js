@@ -129,6 +129,13 @@ const PERMISSIONS = {
   // screen.
   'reports.forecast': OWNER,
   'commissions.markPaid': OWNER,
+  // FEATURE — system log with undo. Reversing a recorded payment, a void,
+  // a waived debt, a blacklist or a generated legal document is the same
+  // weight as the actions themselves — several of which are already
+  // owner-only (payments.waive, customers.blacklist) — so undo does not
+  // hand a director a back door to reverse a decision only the owner
+  // could make in the first place.
+  'audit.undo': OWNER,
   // There is no delete-workspace route in this product, and there must not be
   // one built casually: CLAUDE.md's "nothing is ever deleted" is the whole
   // data-integrity story. The permission is reserved so that if such a route
@@ -154,6 +161,13 @@ const PERMISSIONS = {
   // breakdown. Same owner-only tier as the investor report and forecast it
   // sits beside on the Reports/Dashboard screens.
   'projectHealth.read': OWNER,
+  // FEATURE — campaign tracking. "Owner can create a campaign" in the
+  // product spec, verbatim — a bulk send to a whole buyer list (or an
+  // overdue/credit-score-filtered slice of it) is a bigger blast radius
+  // than the single-buyer or per-project sends elsewhere in this product,
+  // so it sits at the same tier as waiving debt or deleting a record.
+  'campaigns.write': OWNER,
+  'campaigns.send': OWNER,
   // FEATURE — the owner is the one who actually talks to the bank; moving a
   // financing request forward is that same conversation, not a sales
   // decision a director could make on their behalf.
@@ -172,6 +186,13 @@ const PERMISSIONS = {
   // a colleague's reservation (reservations.read is broader than SELLERS-only
   // in some views) but never touch it.
   'reservations.reassign': DIRECTORS,
+  // FEATURE — joint sales. Setting who splits commission on a deal, and by
+  // how much, is the same DIRECTORS-tier decision as reassigning a rep
+  // just above. Reading the split is gated by reservations.read instead
+  // (broader — SELLERS + documentation), since an internal rep on the deal
+  // needs to see their own terms, and reservations.read already narrows a
+  // Sales Executive to their own book.
+  'reservations.jointSale': DIRECTORS,
   // FEATURE — "pause requires owner or sales_director approval (never
   // automatic)". Same tier as commissions.approve: a judgment call with
   // money and a buyer relationship riding on it.
@@ -191,10 +212,24 @@ const PERMISSIONS = {
   // FEATURE — reading the financing-request queue. Advancing one
   // (financing.manage, above) stays owner-only.
   'financing.read': DIRECTORS,
+  // FEATURE — team attendance. "Owner can mark attendance" in the product
+  // spec, and the route matrix names owner/sales_director for both reading
+  // and marking — the same DIRECTORS tier as team.read/team.manageMembers,
+  // since attendance is workplace oversight of the team, not a sales action.
+  'attendance.read': DIRECTORS,
+  'attendance.manage': DIRECTORS,
+  // FEATURE — campaign tracking. Seeing what went out and to whom is a
+  // narrower decision than sending it — same DIRECTORS tier as audit.read
+  // versus audit.export's owner-only tier for the same reason.
+  'campaigns.read': DIRECTORS,
   'imports.write': DIRECTORS,
   'reports.export': DIRECTORS,
   'reports.collections': DIRECTORS,
   'reports.rental': DIRECTORS,
+  // FEATURE — VAT compliance. Same DIRECTORS tier as the other operational
+  // reports on this screen (collections/rental) — a tax compliance figure,
+  // not the owner-only strategic view reports.investor is.
+  'reports.vat': DIRECTORS,
   // SECTION 5 — referral totals and credits given are business performance
   // numbers, same tier as collections/rental, not the owner-only investor
   // P&L view.
@@ -345,6 +380,12 @@ const PERMISSIONS = {
   'salesReps.read': ['owner', 'sales_director', 'collections', 'documentation'],
   'tasks.read': ALL,
   'tasks.write': ALL,
+  // FEATURE — the log book. Free-text incident/visitor/decision notes, the
+  // same "anyone who works here can write one down" spirit as tasks and
+  // activities above — not restricted by the spec, so it stays open rather
+  // than invented-narrower.
+  'logs.read': ALL,
+  'logs.write': ALL,
   'dashboard.read': ALL,
   'inventory.read': ALL,
   'search.read': ALL,

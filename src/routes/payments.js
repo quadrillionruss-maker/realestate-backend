@@ -392,6 +392,15 @@ router.post('/:paymentId/void', requirePermission('payments.void'), async (req, 
         commission_void_failed: commissionVoidFailed,
         receipt_superseded: staleReceipt?.id || null,
       },
+      // FEATURE — system log with undo. Undo restores the payment
+      // (voided_at/void_reason cleared, schedule recomputed) and, if a
+      // commission was voided alongside it, restores that to 'accrued' —
+      // not necessarily whatever finer-grained status (approved/paid) it
+      // held before, since reconstructing that exactly is a bigger
+      // undertaking than recovering from an accidental void warrants. See
+      // undoService.js's own header on this trade-off.
+      reversible: true,
+      reversalData: { schedule_id: payment.schedule_id, commission_id: commission?.id || null },
     });
 
     res.json({
@@ -440,6 +449,9 @@ router.patch('/:scheduleId/waive', requirePermission('payments.waive'), async (r
       entityId: req.params.scheduleId,
       summary: `Installment ${schedule.installment_number} (₦${Number(schedule.amount_due).toLocaleString('en-NG')}) waived — ${reason}`,
       metadata: { reason, amount_due: schedule.amount_due, was_status: schedule.status },
+      // FEATURE — system log with undo.
+      reversible: true,
+      reversalData: { previous_status: schedule.status },
     });
 
     res.json(data);
@@ -525,6 +537,11 @@ router.post('/bulk-waive-next-overdue', requirePermission('payments.waive'), asy
         entityId: r.scheduleId,
         summary: `Installment (₦${r.amount.toLocaleString('en-NG')}) waived for ${r.buyerName} — bulk: ${reason}`,
         metadata: { reason, amount_due: r.amount, bulk: true },
+        // FEATURE — system log with undo. Every row reaching this point was
+        // filtered to status === 'overdue' above (line ~501) — that is the
+        // one and only previous_status a bulk waive here can ever restore.
+        reversible: true,
+        reversalData: { previous_status: 'overdue' },
       });
     }
 

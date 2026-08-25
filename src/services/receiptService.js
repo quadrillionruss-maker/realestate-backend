@@ -47,9 +47,9 @@ async function loadPaymentContext(orgId, paymentId) {
         re_installment_plans(
           id, total_amount, number_of_installments,
           re_reservations(
-            id, commission_rate,
-            re_customers(id, full_name, email, phone),
-            re_units(unit_number, unit_type, list_price, re_projects(name, location)),
+            id, commission_rate, status, property_type,
+            re_customers(id, full_name, email, phone, whatsapp_opt_out),
+            re_units(id, unit_number, unit_type, list_price, re_projects(name, location)),
             re_sales_reps(id, commission_rate, users(id, full_name))
           )
         )
@@ -145,6 +145,25 @@ function buildReceiptHtml(context, branding = {}, receiptNumber, receiptTemplate
     ? `<tr><td>Reference</td><td>${escapeHtml(payment.paystack_reference)}</td></tr>`
     : '';
 
+  // FEATURE — VAT compliance. Empty (nothing rendered) for any payment
+  // recorded while VAT was disabled for this workspace — vat_amount is
+  // null, not zero, in that case (migrations/058's own distinction).
+  // Inclusive: the amount received already contains the VAT, so the
+  // subtotal is backed out of it. Exclusive: the amount received IS the
+  // subtotal, and VAT is shown as an addition — see vatService.js's own
+  // header for why the "total incl. VAT" line in that case is
+  // informational rather than a claim that more money was collected.
+  let vatRowsBlock = '';
+  if (payment.vat_amount != null) {
+    const amount = Number(payment.amount);
+    const vatAmount = Number(payment.vat_amount);
+    const subtotal = payment.vat_inclusive ? amount - vatAmount : amount;
+    const total = payment.vat_inclusive ? amount : amount + vatAmount;
+    vatRowsBlock = `<tr><td>Subtotal</td><td>${naira(subtotal)}</td></tr>`
+      + `<tr><td>VAT (${payment.vat_rate}%)</td><td>${naira(vatAmount)}</td></tr>`
+      + `<tr><td>Total${payment.vat_inclusive ? '' : ' (incl. VAT)'}</td><td>${naira(total)}</td></tr>`;
+  }
+
   const purpose = schedule
     ? `Installment ${schedule.installment_number} of ${plan.number_of_installments}, due ${formatDate(schedule.due_date)}`
     : 'Payment towards purchase';
@@ -166,6 +185,7 @@ function buildReceiptHtml(context, branding = {}, receiptNumber, receiptTemplate
     .replace(/{{UNIT_NUMBER}}/g, escapeHtml(unit.unit_number || '—'))
     .replace(/{{PAYMENT_PURPOSE}}/g, escapeHtml(purpose))
     .replace(/{{PAYMENT_METHOD}}/g, escapeHtml(METHOD_LABELS[payment.method] || payment.method || '—'))
+    .replace(/{{VAT_ROWS_BLOCK}}/g, vatRowsBlock)
     .replace(/{{REFERENCE_ROW_BLOCK}}/g, referenceRowBlock)
     .replace(/{{PAID_AT}}/g, formatDate(payment.paid_at || new Date()))
     .replace(/{{INSTALLMENT_STATUS}}/g, escapeHtml(installmentStatus))

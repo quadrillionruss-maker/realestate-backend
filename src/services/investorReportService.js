@@ -62,7 +62,7 @@ async function getInvestorReport(orgId, projectId = null) {
 
   const { data: payments, error: payErr } = await supabaseAdmin
     .from('re_payments')
-    .select('amount, paid_at, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(re_units!inner(project_id))))')
+    .select('amount, vat_amount, paid_at, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(property_type, re_units!inner(project_id))))')
     .eq('organization_id', orgId)
     .in('re_installment_schedule.re_installment_plans.re_reservations.re_units.project_id', projectIds)
     .is('voided_at', null);
@@ -77,6 +77,30 @@ async function getInvestorReport(orgId, projectId = null) {
     list.push(payment);
     paymentsByProject.set(pid, list);
   }
+
+  // FEATURE — outright sales. An investor reading "how did this money come
+  // in" cannot tell an outright close from an installment plan drawing down
+  // without this — same reasoning as the existing rental/sales split on the
+  // dashboard KPI tiles, at the whole-report level rather than per project
+  // (an investor's question is "how much of the book is outright", not
+  // "how much of Lekki Gardens specifically").
+  const saleTypeOf = (payment) => payment.re_installment_schedule
+    ?.re_installment_plans?.re_reservations?.property_type || 'off_plan';
+  const revenueBySaleType = {
+    installment: round2(sum((payments || []).filter((p) => saleTypeOf(p) === 'off_plan'), 'amount')),
+    outright: round2(sum((payments || []).filter((p) => saleTypeOf(p) === 'outright'), 'amount')),
+    rental: round2(sum((payments || []).filter((p) => saleTypeOf(p) === 'rental'), 'amount')),
+  };
+
+  // FEATURE — VAT compliance. Same source data as docs/reports/vat's own
+  // dedicated report (routes/reports.js) — vat_amount is null on any
+  // payment recorded before VAT was ever enabled, or while it was
+  // disabled, so this only ever totals what was actually snapshotted.
+  const vatRows = (payments || []).filter((p) => p.vat_amount != null);
+  const vatSummary = {
+    total_vatable_sales: round2(sum(vatRows, 'amount')),
+    total_vat_collected: round2(sum(vatRows, 'vat_amount')),
+  };
 
   const monthStart = today.slice(0, 8) + '01';
 
@@ -164,6 +188,8 @@ async function getInvestorReport(orgId, projectId = null) {
       receivables_outstanding: round2(totals.receivables_outstanding + row.receivables_outstanding),
       receivables_overdue: round2(totals.receivables_overdue + row.receivables_overdue),
     }), emptyTotals()),
+    revenue_by_sale_type: revenueBySaleType,
+    vat_summary: vatSummary,
     contractor_payments: {
       paid_total: round2(sum(cpRows.filter((p) => p.status === 'paid'), 'amount')),
       pending_total: round2(sum(cpRows.filter((p) => p.status === 'pending'), 'amount')),

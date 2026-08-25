@@ -3,11 +3,14 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { canAccess } = require('../services/permissions');
 const { createPlanWithSchedule } = require('../services/installmentService');
+const { lagosToday } = require('../services/overdueService');
 const { assess, preview, restructure } = require('../services/restructureService');
 const { assessTenancy, renewTenancy } = require('../services/rentalService');
 const { audit } = require('../services/auditService');
 const planRecommendations = require('../services/planRecommendationService');
 const handover = require('../services/handoverService');
+const defaultRisk = require('../services/defaultRiskService');
+const jointSale = require('../services/jointSaleService');
 const router = express.Router();
 
 // Documentation has reservations.read (permissions.js) — "which unit, which
@@ -44,7 +47,7 @@ router.get('/', requirePermission('reservations.read'), async (req, res, next) =
 
     let query = supabaseAdmin
       .from('re_reservations')
-      .select('*, re_customers(full_name, phone), re_units(unit_number, list_price, project_id, re_projects(name)), re_installment_plans(id, total_amount, number_of_installments)')
+      .select('*, re_customers(full_name, phone), re_units(unit_number, list_price, project_id, re_projects(name)), re_installment_plans(id, total_amount, number_of_installments), re_joint_sales(id)')
       .eq('organization_id', req.orgId)
       .order('created_at', { ascending: false })
       .limit(limit);
@@ -179,6 +182,28 @@ router.post('/', requirePermission('reservations.create'), async (req, res, next
         .eq('id', sales_rep_id).eq('organization_id', req.orgId).maybeSingle();
       if (!rep) return res.status(404).json({ error: 'Sales rep not found' });
       repCommissionRate = rep.commission_rate;
+    }
+
+    // FEATURE — outright sales. property_type 'outright' used to mean
+    // nothing beyond a label: a plan was optional, and "no plan" meant the
+    // buyer's payment happened entirely off the books, untracked, with no
+    // way to ever record it in Archta (the buyer drawer's own fallback text
+    // for this case is literally "Outright purchase — no installment
+    // plan."). An outright sale now always gets a real, one-row plan due
+    // immediately — reusing the entire existing installment/payment/
+    // commission/receipt machinery for free — rather than a second,
+    // parallel payment-recording path with none of that behind it. The one
+    // installment IS the full price, so "the buyer pays once" falls out of
+    // number_of_installments=1 rather than needing its own enforcement.
+    // paymentEvents.js is what then fires the allocation letter and
+    // completes the reservation the moment that one row is paid.
+    if (property_type === 'outright') {
+      if (!plan || plan.total_amount == null) {
+        return res.status(400).json({ error: 'An outright sale needs a total_amount.' });
+      }
+      plan.number_of_installments = 1;
+      plan.frequency = 'monthly'; // irrelevant to a single installment; installmentService still wants a value
+      plan.start_date = plan.start_date || lagosToday();
     }
 
     // Reject bad plan input before touching the unit, so a validation error
@@ -573,6 +598,46 @@ router.post('/:id/handover', requirePermission('handover.manage'), async (req, r
       documentsProvided: body.documents_provided,
     });
     if (result.notFound) return res.status(404).json({ error: 'Reservation not found' });
+    res.status(201).json(result);
+  } catch (e) { next(e); }
+});
+
+// FEATURE — buyer default prediction. Same tier as the at-risk list itself
+// (atRisk.read) — this is a per-reservation drill-down of exactly the
+// numbers that screen already surfaces at a glance.
+router.get('/:id/default-risk', requirePermission('atRisk.read'), async (req, res, next) => {
+  try {
+    const result = await defaultRisk.computeBreakdown(req.orgId, req.params.id);
+    if (!result) return res.status(404).json({ error: 'Reservation not found' });
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+// FEATURE — joint sales. GET is reservations.read-tier (a rep on the deal
+// needs to see their own split); POST/replace is DIRECTORS-tier
+// (reservations.jointSale) — the same asymmetry reservations.reassign has
+// for the same reason.
+router.get('/:id/joint-sale', requirePermission('reservations.read'), async (req, res, next) => {
+  try {
+    const result = await jointSale.getForReservation(req.orgId, req.params.id);
+    if (!result) return res.status(404).json({ error: 'This reservation has no joint sale on file.' });
+    res.json(result);
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/joint-sale', requirePermission('reservations.jointSale'), async (req, res, next) => {
+  try {
+    const result = await jointSale.createOrReplace(req, req.params.id, { parties: req.body?.parties });
+    if (result.notFound) return res.status(404).json({ error: 'Reservation not found' });
+
+    audit(req, {
+      action: 'reservation.joint_sale_set',
+      entityType: 're_reservations',
+      entityId: req.params.id,
+      summary: `Joint sale set with ${result.parties.length} parties`,
+      metadata: { parties: result.parties.map((p) => ({ party_type: p.party_type, pct: p.commission_split_percentage })) },
+    });
+
     res.status(201).json(result);
   } catch (e) { next(e); }
 });

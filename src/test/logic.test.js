@@ -62,6 +62,15 @@ const {
 const {
   WEIGHTS, computeFromHistory, tier, assessDefaultRisk, OVERDUE_RISK_OVERRIDE_THRESHOLD,
 } = require('../services/creditScoreService');
+const {
+  WEIGHTS: RISK_WEIGHTS, computeFromHistory: computeDefaultRisk,
+} = require('../services/defaultRiskService');
+const {
+  computeOptimalContact, nextOccurrenceUTC, describeOptimalContact,
+} = require('../services/contactTimingService');
+const { computeVatBreakdown } = require('../services/vatService');
+const { splitCommission } = require('../services/jointSaleService');
+const { keywordSentiment, hashMessage } = require('../services/sentimentService');
 const { allocateCredit } = require('../services/referralService');
 const { buildFallbackForecast, resolveRefs: resolveForecastRefs } = require('../services/forecastService');
 const { buildFallbackRecommendation } = require('../services/planRecommendationService');
@@ -1212,6 +1221,33 @@ test('omits the reference row rather than printing an empty one', () => {
   assert.ok(!buildReceiptHtml(noRef, {}, 'RCPT-1').includes('<td>Reference</td>'));
 });
 
+// FEATURE — VAT compliance.
+test('omits the VAT breakdown entirely for a payment recorded while VAT was disabled', () => {
+  assert.ok(!buildReceiptHtml(receiptContext, {}, 'RCPT-1').includes('VAT'));
+});
+
+test('shows subtotal/VAT/total when the payment carries a VAT snapshot — inclusive', () => {
+  const withVat = JSON.parse(JSON.stringify(receiptContext));
+  withVat.payment.vat_rate = 7.5;
+  withVat.payment.vat_inclusive = true;
+  withVat.payment.vat_amount = 261.63; // amount(3,750,000) - amount/1.075, rounded
+  const html = buildReceiptHtml(withVat, {}, 'RCPT-1');
+  assert.ok(html.includes('VAT (7.5%)'));
+  assert.ok(html.includes('<td>Subtotal</td>'));
+  // Inclusive: the total line shows the SAME figure already received —
+  // nothing is added on top of what was actually recorded.
+  assert.ok(html.includes('<td>Total</td>'));
+});
+
+test('shows an "incl. VAT" total, not a bare Total, when the payment was exclusive', () => {
+  const withVat = JSON.parse(JSON.stringify(receiptContext));
+  withVat.payment.vat_rate = 7.5;
+  withVat.payment.vat_inclusive = false;
+  withVat.payment.vat_amount = 281_250; // 7.5% of 3,750,000
+  const html = buildReceiptHtml(withVat, {}, 'RCPT-1');
+  assert.ok(html.includes('Total (incl. VAT)'));
+});
+
 test('ignores a non-https logo url', () => {
   const html = buildReceiptHtml(receiptContext, { logo_url: 'file:///etc/passwd' }, 'RCPT-1');
   assert.ok(!html.includes('etc/passwd'));
@@ -2061,6 +2097,296 @@ test('computeFromHistory: every payment on time, nothing overdue, scores above 8
   assert.ok(score > 85, `expected a score above 85 for a buyer with a perfect on-time record, got ${score}`);
 });
 
+// FEATURE — buyer default prediction (defaultRiskService.js). A
+// per-RESERVATION companion to the per-BUYER credit score just tested above
+// — higher here means MORE risk, the opposite polarity, so every fixture
+// below is read as "risk evidence", not "good behaviour". A fixed `today`
+// is always passed explicitly rather than relying on the function's own
+// lagosToday() default, so these never go stale the way a hardcoded date
+// near "now" would (see this file's own note on the 2099 fixture above).
+function riskReservation(overrides) {
+  return {
+    created_at: '2026-01-01T00:00:00.000Z',
+    escalation_stage: 'none',
+    escalated_at: null,
+    re_installment_plans: [{ re_installment_schedule: [] }],
+    ...overrides,
+  };
+}
+
+test('computeDefaultRisk: no evidence at all scores 0 — nothing on record is not a penalty', () => {
+  const { score, breakdown } = computeDefaultRisk({
+    reservation: riskReservation(), payments: [], promises: [], activities: [],
+  }, '2026-06-01');
+  assert.strictEqual(score, 0);
+  assert.strictEqual(breakdown.payment_trend.risk_points, 0);
+  assert.strictEqual(breakdown.timing.risk_points, 0);
+  assert.strictEqual(breakdown.promise_reliability.risk_points, 0);
+  assert.strictEqual(breakdown.escalation_velocity.risk_points, 0);
+  assert.strictEqual(breakdown.response_rate.risk_points, 0);
+});
+
+test('computeDefaultRisk: a growing gap between the last 3 payments carries trend risk; a shrinking one carries none', () => {
+  const growing = computeDefaultRisk({
+    reservation: riskReservation(),
+    // 10 days between payment 1 and 2, 40 between 2 and 3 — the buyer is
+    // taking noticeably longer each time.
+    payments: [{ paid_at: '2026-01-01' }, { paid_at: '2026-01-11' }, { paid_at: '2026-02-20' }],
+    promises: [], activities: [],
+  }, '2026-03-01');
+  assert.ok(growing.breakdown.payment_trend.risk_points > 0,
+    `expected trend risk for a widening payment gap, got ${growing.breakdown.payment_trend.risk_points}`);
+  assert.strictEqual(growing.breakdown.payment_trend.growing, true);
+
+  const shrinking = computeDefaultRisk({
+    reservation: riskReservation(),
+    payments: [{ paid_at: '2026-01-01' }, { paid_at: '2026-02-10' }, { paid_at: '2026-02-20' }],
+    promises: [], activities: [],
+  }, '2026-03-01');
+  assert.strictEqual(shrinking.breakdown.payment_trend.risk_points, 0);
+  assert.strictEqual(shrinking.breakdown.payment_trend.growing, false);
+});
+
+test('computeDefaultRisk: fewer than 3 payments is not evidence of a trend either way', () => {
+  const { breakdown } = computeDefaultRisk({
+    reservation: riskReservation(),
+    payments: [{ paid_at: '2026-01-01' }, { paid_at: '2026-02-01' }],
+    promises: [], activities: [],
+  }, '2026-03-01');
+  assert.strictEqual(breakdown.payment_trend.risk_points, 0);
+  assert.strictEqual(breakdown.payment_trend.evidence, false);
+});
+
+test('computeDefaultRisk: timing risk is one point per day the earliest unpaid installment is overdue, capped at 20', () => {
+  const rows = [{ status: 'overdue', due_date: '2026-01-01' }];
+  const tenDaysLate = computeDefaultRisk({
+    reservation: riskReservation({ re_installment_plans: [{ re_installment_schedule: rows }] }),
+    payments: [], promises: [], activities: [],
+  }, '2026-01-11');
+  assert.strictEqual(tenDaysLate.breakdown.timing.risk_points, 10);
+
+  const wayOverdue = computeDefaultRisk({
+    reservation: riskReservation({ re_installment_plans: [{ re_installment_schedule: rows }] }),
+    payments: [], promises: [], activities: [],
+  }, '2026-06-01');
+  assert.strictEqual(wayOverdue.breakdown.timing.risk_points, RISK_WEIGHTS.timing, 'capped at the dimension\'s own weight');
+});
+
+test('computeDefaultRisk: promise reliability is broken ÷ resolved, same shape as credit_score\'s own dimension', () => {
+  const { breakdown } = computeDefaultRisk({
+    reservation: riskReservation(),
+    payments: [], activities: [],
+    promises: [{ status: 'broken' }, { status: 'broken' }, { status: 'kept' }, { status: 'open' }],
+  }, '2026-01-01');
+  assert.strictEqual(breakdown.promise_reliability.resolved, 3); // open excluded
+  // round(20 * 2/3) = 13
+  assert.strictEqual(breakdown.promise_reliability.risk_points, Math.round(RISK_WEIGHTS.promises * (2 / 3)));
+});
+
+test('computeDefaultRisk: escalating fast after the reservation was created carries more velocity risk than escalating slowly', () => {
+  const fast = computeDefaultRisk({
+    reservation: riskReservation({ escalation_stage: 'legal', escalated_at: '2026-01-15T00:00:00.000Z' }),
+    payments: [], promises: [], activities: [],
+  }, '2026-06-01');
+  const slow = computeDefaultRisk({
+    reservation: riskReservation({ escalation_stage: 'legal', escalated_at: '2026-11-01T00:00:00.000Z' }),
+    payments: [], promises: [], activities: [],
+  }, '2026-12-01');
+  assert.ok(fast.breakdown.escalation_velocity.risk_points > slow.breakdown.escalation_velocity.risk_points,
+    'reaching the same stage within two weeks of creation should read as riskier than taking most of a year');
+  assert.strictEqual(slow.breakdown.escalation_velocity.risk_points, 0, 'ten months to escalate is past the slow-escalation floor');
+});
+
+test('computeDefaultRisk: response rate is the share of logged activities that went unanswered', () => {
+  const allNoAnswer = computeDefaultRisk({
+    reservation: riskReservation(), payments: [], promises: [],
+    activities: [{ outcome: 'no_answer' }, { outcome: 'no_answer' }],
+  }, '2026-01-01');
+  assert.strictEqual(allNoAnswer.breakdown.response_rate.risk_points, RISK_WEIGHTS.response);
+
+  const allResponded = computeDefaultRisk({
+    reservation: riskReservation(), payments: [], promises: [],
+    activities: [{ outcome: 'interested' }, { outcome: 'promised_payment' }],
+  }, '2026-01-01');
+  assert.strictEqual(allResponded.breakdown.response_rate.risk_points, 0);
+});
+
+test('computeDefaultRisk: every dimension maxed out sums to exactly 100, and the score never exceeds it', () => {
+  const rows = [{ status: 'overdue', due_date: '2020-01-01' }]; // decades overdue — timing risk clamps at its cap
+  const { score, breakdown } = computeDefaultRisk({
+    reservation: riskReservation({
+      escalation_stage: 'legal', created_at: '2026-01-01T00:00:00.000Z', escalated_at: '2026-01-02T00:00:00.000Z',
+      re_installment_plans: [{ re_installment_schedule: rows }],
+    }),
+    payments: [{ paid_at: '2026-01-01' }, { paid_at: '2026-01-02' }, { paid_at: '2026-06-01' }],
+    promises: [{ status: 'broken' }, { status: 'broken' }],
+    activities: [{ outcome: 'no_answer' }, { outcome: 'no_answer' }],
+  }, '2026-06-15');
+  const sumOfWeights = Object.values(RISK_WEIGHTS).reduce((a, b) => a + b, 0);
+  assert.strictEqual(sumOfWeights, 100);
+  assert.strictEqual(score, 100);
+  assert.strictEqual(breakdown.timing.risk_points, RISK_WEIGHTS.timing);
+});
+
+// FEATURE — VAT compliance (vatService.js).
+test('computeVatBreakdown: disabled leaves the amount untouched and every VAT field null', () => {
+  const { applied, vat_rate, vat_amount, subtotal, total } = computeVatBreakdown(3_750_000, { enabled: false });
+  assert.strictEqual(applied, false);
+  assert.strictEqual(vat_rate, null);
+  assert.strictEqual(vat_amount, null);
+  assert.strictEqual(subtotal, 3_750_000);
+  assert.strictEqual(total, 3_750_000);
+});
+
+test('computeVatBreakdown: inclusive backs the VAT out of the recorded amount, total unchanged', () => {
+  const { vat_amount, subtotal, total } = computeVatBreakdown(107.5, { enabled: true, rate: 7.5, inclusive: true });
+  assert.strictEqual(subtotal, 100);
+  assert.strictEqual(vat_amount, 7.5);
+  assert.strictEqual(total, 107.5, 'inclusive: the total is exactly what was recorded, nothing added');
+});
+
+test('computeVatBreakdown: exclusive adds VAT on top for disclosure, subtotal is the recorded amount', () => {
+  const { vat_amount, subtotal, total } = computeVatBreakdown(100, { enabled: true, rate: 7.5, inclusive: false });
+  assert.strictEqual(subtotal, 100);
+  assert.strictEqual(vat_amount, 7.5);
+  assert.strictEqual(total, 107.5);
+});
+
+test('computeVatBreakdown: 0% VAT still marks applied:true but changes nothing', () => {
+  const { applied, vat_amount, total } = computeVatBreakdown(1000, { enabled: true, rate: 0, inclusive: false });
+  assert.strictEqual(applied, true);
+  assert.strictEqual(vat_amount, 0);
+  assert.strictEqual(total, 1000);
+});
+
+// FEATURE — joint sales (jointSaleService.js). splitCommission is the exact
+// math both the external-agent PDF statement and the commissions screen's
+// "Joint sale commissions" section read from, so it is worth pinning down
+// on its own — a rounding or percentage-direction bug here misstates real
+// money owed to a co-seller.
+test('splitCommission: each party gets their own percentage of the SAME total, not a further split of what remains', () => {
+  var parties = [
+    { agent_name: 'A', commission_split_percentage: 60 },
+    { agent_name: 'B', commission_split_percentage: 40 },
+  ];
+  var shares = splitCommission(100000, parties);
+  assert.strictEqual(shares[0].share_amount, 60000);
+  assert.strictEqual(shares[1].share_amount, 40000);
+});
+
+test('splitCommission: rounds to the kobo, same as every other money figure in this product', () => {
+  var parties = [{ agent_name: 'A', commission_split_percentage: 33.33 }];
+  var shares = splitCommission(100, parties);
+  assert.strictEqual(shares[0].share_amount, 33.33);
+});
+
+// FEATURE — buyer sentiment analysis (sentimentService.js). keywordSentiment
+// is the no-OPENAI_API_KEY fallback — same "the AI is a convenience, not a
+// requirement" rule every other classifier in this product already follows
+// (whatsappBotService's own keywordIntent has an identical offline suite
+// section for the same reason).
+test('keywordSentiment recognises at_risk, concerned and positive signal words', () => {
+  assert.strictEqual(keywordSentiment("I'm going to report you to my lawyer, this is unacceptable"), 'at_risk');
+  assert.strictEqual(keywordSentiment('I am worried about the delay on my unit'), 'concerned');
+  assert.strictEqual(keywordSentiment('Thank you so much, appreciate the quick response!'), 'positive');
+});
+
+test('keywordSentiment defaults to neutral for a plain message with no signal', () => {
+  assert.strictEqual(keywordSentiment('What time does the office close today?'), 'neutral');
+  assert.strictEqual(keywordSentiment(''), 'neutral');
+});
+
+test('keywordSentiment: at_risk outranks a milder concerned phrase in the same message', () => {
+  // "unacceptable" (at_risk) and "issue" (concerned) both appear — at_risk
+  // must win, since a buyer this upset is the more urgent read either way.
+  assert.strictEqual(keywordSentiment('This delay is an issue and honestly unacceptable at this point'), 'at_risk');
+});
+
+test('hashMessage: identical text (modulo case and surrounding whitespace) hashes identically — the whole point of the cache', () => {
+  assert.strictEqual(hashMessage('Thank you!'), hashMessage('  thank you!  '));
+  assert.notStrictEqual(hashMessage('Thank you!'), hashMessage('Thank you'));
+});
+
+// FEATURE — dynamic reminder timing (contactTimingService.js). Every
+// timestamp below is UTC on purpose, exercising the Lagos (UTC+1)
+// conversion rather than assuming it away.
+test('computeOptimalContact: fewer than 3 payments is no pattern at all, not day/hour 0', () => {
+  const { day, hour } = computeOptimalContact({
+    payments: [{ paid_at: '2026-06-02T08:00:00Z' }, { paid_at: '2026-05-26T08:00:00Z' }],
+    activities: [],
+  });
+  assert.strictEqual(day, null);
+  assert.strictEqual(hour, null);
+});
+
+test('computeOptimalContact: reads the LAGOS calendar day, not the UTC one, across a midnight rollover', () => {
+  // 23:30 UTC on a Tuesday is 00:30 Lagos-local on WEDNESDAY — every payment
+  // below is deliberately timed to straddle that exact boundary.
+  const { day, hour } = computeOptimalContact({
+    payments: [
+      { paid_at: '2026-06-02T23:30:00Z' },
+      { paid_at: '2026-05-26T23:15:00Z' },
+      { paid_at: '2026-05-19T23:45:00Z' },
+    ],
+    activities: [],
+  });
+  assert.strictEqual(day, 2, 'Wednesday is Monday=0 index 2, not the UTC date\'s Tuesday (index 1)');
+  assert.strictEqual(hour, 0);
+});
+
+test('computeOptimalContact: picks the day/hour by simple majority', () => {
+  const { day, hour } = computeOptimalContact({
+    payments: [
+      { paid_at: '2026-06-02T08:00:00Z' }, // Lagos Tue 09:00
+      { paid_at: '2026-05-26T08:00:00Z' }, // Lagos Tue 09:00
+      { paid_at: '2026-06-02T23:30:00Z' }, // Lagos Wed 00:30 — the minority
+    ],
+    activities: [],
+  });
+  assert.strictEqual(day, 1); // Tuesday, 2 of 3 votes
+  assert.strictEqual(hour, 9);
+});
+
+test('computeOptimalContact: a responded activity\'s hour outranks the payment hour', () => {
+  const { hour } = computeOptimalContact({
+    payments: [
+      { paid_at: '2026-06-02T08:00:00Z' }, { paid_at: '2026-05-26T08:00:00Z' }, { paid_at: '2026-05-19T08:00:00Z' },
+    ],
+    activities: [
+      { outcome: 'interested', created_at: '2026-06-01T15:00:00Z' }, // Lagos 16:00
+      { outcome: 'no_answer', created_at: '2026-06-01T09:00:00Z' }, // excluded — no answer is not a response
+    ],
+  });
+  assert.strictEqual(hour, 16, 'the one RESPONDED activity should win over the payment hour of 9');
+});
+
+test('describeOptimalContact: renders the exact "Weekday part-of-day" phrasing the buyer drawer shows', () => {
+  assert.strictEqual(describeOptimalContact(1, 9), 'Tuesday mornings');
+  assert.strictEqual(describeOptimalContact(4, 14), 'Friday afternoons');
+  assert.strictEqual(describeOptimalContact(6, 19), 'Sunday evenings');
+  assert.strictEqual(describeOptimalContact(null, 9), null);
+});
+
+test('nextOccurrenceUTC: later today if the target hour has not passed yet', () => {
+  const from = new Date('2026-06-02T08:00:00Z'); // Lagos Tuesday 09:00
+  assert.strictEqual(nextOccurrenceUTC(1, 15, from), '2026-06-02T14:00:00.000Z');
+});
+
+test('nextOccurrenceUTC: next week if today IS the target day but its hour already passed', () => {
+  const from = new Date('2026-06-02T08:00:00Z'); // Lagos Tuesday 09:00 — 07:00 already passed
+  assert.strictEqual(nextOccurrenceUTC(1, 7, from), '2026-06-09T06:00:00.000Z');
+});
+
+test('nextOccurrenceUTC: a different weekday lands on the correct future date', () => {
+  const from = new Date('2026-06-02T08:00:00Z'); // Lagos Tuesday
+  assert.strictEqual(nextOccurrenceUTC(2, 10, from), '2026-06-03T09:00:00.000Z'); // Wednesday
+});
+
+test('nextOccurrenceUTC: null day or hour (no pattern yet) returns null, never a bogus date', () => {
+  assert.strictEqual(nextOccurrenceUTC(null, null), null);
+  assert.strictEqual(nextOccurrenceUTC(3, null), null);
+});
+
 // SECTION 6 — forecastService's default-risk override. A stored
 // credit_score can lag a buyer's most recent overdue installments (the bug
 // above); assessDefaultRisk is what stops that lag from ever reading as
@@ -2376,6 +2702,24 @@ test('keywordIntent recognises each of the five intents from plain phrasing', ()
   assert.strictEqual(keywordIntent('what is my outstanding balance'), 'check_balance');
   assert.strictEqual(keywordIntent('when is my next payment due'), 'next_payment');
   assert.strictEqual(keywordIntent('my agent never called me back, this is unacceptable'), 'speak_to_agent');
+});
+
+// FEATURE — WhatsApp payment collection loop. The three exact trigger
+// words the product spec names, as a buyer would plausibly send them
+// (WhatsApp messages arrive in whatever case the buyer typed).
+test('keywordIntent recognises PAY, PAYMENT and I WANT TO PAY as pay_now, case-insensitively', () => {
+  assert.strictEqual(keywordIntent('PAY'), 'pay_now');
+  assert.strictEqual(keywordIntent('Payment'), 'pay_now');
+  assert.strictEqual(keywordIntent('I want to pay'), 'pay_now');
+});
+
+// THE BUG this test guards: adding a bare "payment" match for the case
+// above will silently swallow "next payment" phrasing into pay_now unless
+// check_balance/next_payment are checked first — see keywordIntent's own
+// comment on the ordering this depends on.
+test('keywordIntent: "payment" inside a next-payment question still reads as next_payment, not pay_now', () => {
+  assert.strictEqual(keywordIntent('when is my next payment due'), 'next_payment');
+  assert.strictEqual(keywordIntent('what is my next installment amount'), 'next_payment');
 });
 
 test('keywordIntent defaults to speak_to_agent for a genuinely unclear message', () => {

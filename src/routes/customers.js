@@ -7,6 +7,7 @@ const notify = require('../services/notificationService');
 const { audit } = require('../services/auditService');
 const { sanitizeSearchTerm } = require('../utils/searchFilter');
 const creditScore = require('../services/creditScoreService');
+const contactTiming = require('../services/contactTimingService');
 const referrals = require('../services/referralService');
 const messages = require('../services/messageService');
 const router = express.Router();
@@ -101,7 +102,8 @@ router.get('/:id', requirePermission('customers.read'), async (req, res, next) =
       .select(`
         *,
         re_reservations(
-          id, status, reserved_at, sales_rep_id, escalation_stage,
+          id, status, reserved_at, sales_rep_id, escalation_stage, property_type,
+          re_joint_sales(id),
           re_sales_reps(id, active, users(full_name, email)),
           re_units(unit_number, list_price, re_projects(name, location)),
           re_installment_plans(
@@ -343,6 +345,8 @@ router.post('/:id/blacklist', requirePermission('customers.blacklist'), async (r
       entityId: data.id,
       summary: `${data.full_name || 'Buyer'} blacklisted — ${reason}`,
       metadata: { reason },
+      // FEATURE — system log with undo.
+      reversible: true,
     });
 
     res.json(data);
@@ -479,6 +483,14 @@ router.post('/:id/activities', requirePermission('activities.write'), async (req
       summary: `${activity_type} logged for customer`,
       metadata: { customer_id: customer.id, activity_type, outcome: outcome || null },
     });
+
+    // FEATURE — dynamic reminder timing. An activity's outcome is one of
+    // contactTimingService's two signals (the other is a payment) —
+    // awaited the same way paymentEvents.js awaits creditScore.recompute
+    // and defaultRisk.recompute: the function itself never throws, so
+    // awaiting it costs nothing and keeps this consistent with every other
+    // derived-figure recompute in the product.
+    await contactTiming.recompute(req.orgId, customer.id);
 
     res.status(201).json(data);
   } catch (e) { next(e); }

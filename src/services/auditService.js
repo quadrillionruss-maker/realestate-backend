@@ -30,7 +30,14 @@ function callerIp(req) {
 //   audit(req, { action: 'payment.record', entityType: 're_payments', ... })
 // Not awaited by most callers on purpose — the response should not wait on a
 // second round trip to write history.
-function audit(req, { action, entityType, entityId = null, summary = null, metadata = {} }) {
+// FEATURE — system log with undo. reversible/reversalData are optional and
+// default to "not reversible" — every existing call site that doesn't pass
+// them keeps writing exactly what it always has. Only the handful of
+// action types undoService.js actually knows how to reverse ever pass
+// reversible:true, and reversalData is that same handler's own before-state
+// snapshot (see undoService.js's REVERSIBLE_ACTIONS for the full list and
+// each one's own header for what it stores and why).
+function audit(req, { action, entityType, entityId = null, summary = null, metadata = {}, reversible = false, reversalData = null }) {
   return write({
     orgId: req.orgId,
     actorId: req.userId || null,
@@ -42,6 +49,8 @@ function audit(req, { action, entityType, entityId = null, summary = null, metad
     entityId,
     summary,
     metadata,
+    reversible,
+    reversalData,
   });
 }
 
@@ -56,6 +65,8 @@ function auditSystem({
   summary = null,
   metadata = {},
   actorEmail = null,
+  reversible = false,
+  reversalData = null,
 }) {
   return write({
     orgId,
@@ -68,6 +79,8 @@ function auditSystem({
     entityId,
     summary,
     metadata,
+    reversible,
+    reversalData,
   });
 }
 
@@ -88,6 +101,8 @@ async function write(entry) {
       summary: entry.summary,
       metadata: entry.metadata || {},
       ip: entry.ip,
+      reversible: Boolean(entry.reversible),
+      reversal_data: entry.reversalData || null,
     });
   } catch (err) {
     console.warn(`[audit] could not record ${entry.action}:`, err.message);

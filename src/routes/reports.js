@@ -199,6 +199,54 @@ router.get('/rental', requirePermission('reports.rental'), async (req, res, next
   } catch (e) { next(e); }
 });
 
+// FEATURE — VAT compliance report. Total VATable sales and total VAT
+// actually collected, with a month-by-month breakdown — the return this
+// workspace's own accountant needs to file, built from the same
+// per-payment snapshot (re_payments.vat_amount) the receipt shows,
+// so the two can never disagree.
+router.get('/vat', requirePermission('reports.vat'), async (req, res, next) => {
+  try {
+    const months = Math.max(1, Math.min(Number(req.query.months) || 12, 36));
+    const since = new Date();
+    since.setUTCDate(1);
+    since.setUTCMonth(since.getUTCMonth() - (months - 1));
+    const sinceIso = since.toISOString().slice(0, 10);
+
+    const { data: payments, error } = await supabaseAdmin
+      .from('re_payments')
+      .select('amount, vat_amount, vat_rate, vat_inclusive, paid_at')
+      .eq('organization_id', req.orgId)
+      .not('vat_amount', 'is', null)
+      .gte('paid_at', sinceIso)
+      .is('voided_at', null)
+      .order('paid_at', { ascending: true });
+    if (error) throw error;
+
+    const rows = payments || [];
+    const byMonth = new Map();
+    for (const row of rows) {
+      const month = String(row.paid_at).slice(0, 7); // YYYY-MM
+      const entry = byMonth.get(month) || { month, vatable_sales: 0, vat_collected: 0, payment_count: 0 };
+      entry.vatable_sales += Number(row.amount || 0);
+      entry.vat_collected += Number(row.vat_amount || 0);
+      entry.payment_count += 1;
+      byMonth.set(month, entry);
+    }
+
+    res.json({
+      generated_at: new Date().toISOString(),
+      period_start: sinceIso,
+      period_end: lagosToday(),
+      total_vatable_sales: round2(sum(rows, 'amount')),
+      total_vat_collected: round2(sum(rows, 'vat_amount')),
+      payment_count: rows.length,
+      period_breakdown: [...byMonth.values()]
+        .map((e) => ({ ...e, vatable_sales: round2(e.vatable_sales), vat_collected: round2(e.vat_collected) }))
+        .sort((a, b) => a.month.localeCompare(b.month)),
+    });
+  } catch (e) { next(e); }
+});
+
 // Month-by-month collections, for the chart on the reports screen and the
 // "are we speeding up or slowing down" question underneath it.
 router.get('/collections', requirePermission('reports.collections'), async (req, res, next) => {

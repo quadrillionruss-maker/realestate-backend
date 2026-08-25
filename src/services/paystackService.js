@@ -11,6 +11,7 @@ const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { isPastDue } = require('./overdueService');
 const { decrypt } = require('../utils/credentials');
+const { applyVatToPayment } = require('./vatService');
 
 const PAYSTACK_BASE = 'https://api.paystack.co';
 const REFERENCE_PREFIX = 'REINST-';
@@ -367,6 +368,11 @@ async function handleRealEstateCharge(event, verification = null) {
   const excessKobo = priorKobo + toKobo(amountNaira) - toKobo(schedule.amount_due);
   const overpayment = excessKobo > 0 ? toNaira(excessKobo) : 0;
 
+  // FEATURE — VAT compliance. Snapshotted at insert time — see
+  // vatService.js's own header for why a live join to settings would be
+  // wrong here.
+  const vat = await applyVatToPayment(schedule.organization_id, amountNaira);
+
   const { error: insertErr } = await supabaseAdmin.from('re_payments').insert({
     organization_id: schedule.organization_id,
     schedule_id: schedule.id,
@@ -375,6 +381,9 @@ async function handleRealEstateCharge(event, verification = null) {
     method: 'paystack',
     paid_at: event.data.paid_at || new Date().toISOString(),
     overpayment,
+    vat_rate: vat.vat_rate,
+    vat_amount: vat.vat_amount,
+    vat_inclusive: vat.vat_inclusive,
   });
 
   // 23505 = unique violation: a concurrent delivery won the race and already
@@ -447,6 +456,10 @@ async function recordManualPayment(orgId, scheduleId, {
     .limit(1);
   const possibleDuplicate = Boolean(recentSame?.length);
 
+  // FEATURE — VAT compliance. Same snapshot-at-insert-time reasoning as
+  // the Paystack path above.
+  const vat = await applyVatToPayment(orgId, numericAmount);
+
   const { data: payment, error: payErr } = await supabaseAdmin
     .from('re_payments')
     .insert({
@@ -457,6 +470,9 @@ async function recordManualPayment(orgId, scheduleId, {
       paystack_reference: reference,
       overpayment,
       payer_name: String(payerName || '').trim() || null,
+      vat_rate: vat.vat_rate,
+      vat_amount: vat.vat_amount,
+      vat_inclusive: vat.vat_inclusive,
     })
     .select()
     .single();

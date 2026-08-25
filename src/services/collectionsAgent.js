@@ -18,8 +18,17 @@ const { logPromise } = require('./promiseService');
 const { STAGES, describeStage } = require('./escalationService');
 const { auditSystem } = require('./auditService');
 const { lagosToday } = require('./overdueService');
+const { nextOccurrenceUTC } = require('./contactTimingService');
+const scheduledMessages = require('./scheduledMessageService');
 
 const AGENT_NAME = 'collections_agent';
+// FEATURE — dynamic reminder timing. If a buyer's own optimal send time is
+// within this many minutes of right now, send in this same sweep rather
+// than creating a scheduled-message row for a moment that has, for all
+// practical purposes, already arrived — jobs/daily.js runs this once a day,
+// not continuously, so "close enough" has to mean something coarser than
+// it would on a per-minute scheduler.
+const IMMEDIATE_WINDOW_MINUTES = 60;
 // aiBrief.js's own rule, reused here rather than re-derived: index 4 (legal)
 // never gets an automated message. Index 0 (none) has nothing overdue to
 // chase. 1-3 (reminder/formal_notice/final_notice) is where this agent
@@ -55,10 +64,44 @@ async function run(orgId) {
 
     const { data: customer } = await supabaseAdmin
       .from('re_customers')
-      .select('id, full_name, phone, whatsapp_opt_out')
+      .select('id, full_name, phone, whatsapp_opt_out, optimal_contact_day, optimal_contact_hour')
       .eq('id', reservation.customer_id)
       .maybeSingle();
     if (!customer) continue;
+
+    // FEATURE — dynamic reminder timing. No pattern yet (fewer than 3
+    // payments — contactTimingService's own threshold) falls back to
+    // sending in this same run, exactly as it always has — this is the
+    // "default 7am" the product spec asks for, since that is when this
+    // sweep itself runs.
+    const nextSlot = nextOccurrenceUTC(customer.optimal_contact_day, customer.optimal_contact_hour);
+    const minutesUntilSlot = nextSlot ? (Date.parse(nextSlot) - Date.now()) / 60_000 : 0;
+
+    if (nextSlot && minutesUntilSlot > IMMEDIATE_WINDOW_MINUTES) {
+      // Too far off to send now — hand it to the existing scheduled-message
+      // pathway (scheduledMessageService's own hourly sweep, migrations/049)
+      // rather than building a second delivery mechanism. Trade-off worth
+      // naming: that sweep sends directly and does not re-run
+      // dealManager.sendWithClearance's opt-out/duplicate/human-handling
+      // checks at the moment it actually fires, since nothing in this
+      // product re-evaluates clearance for an already-scheduled row. Given
+      // the whole point of this feature is to move WHEN a message goes out,
+      // not whether, this is accepted rather than building a second
+      // clearance re-check that nothing else in the scheduled-message
+      // system has either.
+      try {
+        await scheduledMessages.schedule(orgId, {
+          customerId: customer.id,
+          message: followUp.whatsapp_draft,
+          scheduledFor: nextSlot,
+        });
+        await dealManager.logAction(orgId, AGENT_NAME, customer.id, 'followup_scheduled_for_optimal_time',
+          `scheduled for ${nextSlot}`);
+      } catch (err) {
+        console.warn('[collections-agent] could not schedule optimal-time follow-up:', err.message);
+      }
+      continue;
+    }
 
     const result = await dealManager.sendWithClearance(orgId, AGENT_NAME, customer, {
       template: 'collections_agent_followup',

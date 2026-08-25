@@ -18,6 +18,7 @@ const { initInstallmentPayment } = require('./paystackService');
 // guard against here the way documentService.js's lazy require of
 // receiptService has to.
 const collectionsAgent = require('./collectionsAgent');
+const sentimentService = require('./sentimentService');
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 const MODEL = env.openai.briefModel;
@@ -66,9 +67,23 @@ const CLASSIFY_FUNCTION = {
 function keywordIntent(text) {
   const t = String(text || '').toLowerCase();
   if (/\breceipt\b/.test(t)) return 'get_receipt';
-  if (/\b(pay now|payment link|pay online|make.*payment|how do i pay)\b/.test(t)) return 'pay_now';
+  // FEATURE — WhatsApp payment collection loop. The product spec names
+  // three exact trigger words — PAY, PAYMENT, I WANT TO PAY — which the
+  // OpenAI classifier (when configured) already handles correctly on its
+  // own judgment; this is the KEYWORD fallback path, used when no OpenAI
+  // key is set or the model call fails, and it must catch the same three
+  // bare words on its own rather than silently degrading to speak_to_agent.
+  // A message actually about having ALREADY paid ("I already paid", "I've
+  // paid") never reaches this far — collectionsAgent.parseReply's
+  // ALREADY_PAID_RE intercepts it earlier in handleInboundMessage, before
+  // the general classifier ever runs.
+  // Checked BEFORE the broad bare "pay"/"payment" rule below: "next
+  // payment", once that rule also matches bare "payment" anywhere, would
+  // otherwise be swallowed by pay_now before ever reaching this line —
+  // "when is my next payment due" is asking WHEN, not asking to pay now.
   if (/\b(balance|how much.*owe|outstanding|total paid)\b/.test(t)) return 'check_balance';
   if (/\b(next payment|when.*due|due date|next installment)\b/.test(t)) return 'next_payment';
+  if (/\b(pay now|payment link|pay online|make.*payment|how do i pay|i want to pay|pay|payment)\b/.test(t)) return 'pay_now';
   return 'speak_to_agent';
 }
 
@@ -211,7 +226,13 @@ async function handlePayNow(orgId, customer) {
   const email = customer.email || `buyer-${customer.id}@no-email.archta`;
   try {
     const result = await initInstallmentPayment(orgId, next.id, email, {});
-    return `Hi ${customer.full_name}, here's your payment link for ${naira(result.amount)}: ${result.authorization_url}`;
+    // FEATURE — WhatsApp payment collection loop. The product spec is
+    // explicit: the link goes back "with the amount and due date" — the
+    // amount alone (what this said before) leaves the buyer to go find the
+    // due date themselves, exactly the extra step this feature exists to
+    // remove.
+    return `Hi ${customer.full_name}, here's your payment link for ${naira(result.amount)}`
+      + ` (due ${fmtDate(next.due_date)}): ${result.authorization_url}`;
   } catch (err) {
     console.warn('[whatsapp-bot] pay_now link generation failed:', err.message);
     return `Hi ${customer.full_name}, we couldn't generate a payment link right now. Please contact your sales office.`;
@@ -325,6 +346,14 @@ async function handleInboundMessage({ phoneNumberId, from, text }) {
       await notify.sendWhatsApp({ orgId, to: from, body: "You're subscribed to automated messages again." });
       return;
     }
+
+    // FEATURE — buyer sentiment analysis. Every genuine inbound message
+    // past this point (not a bare STOP/START command) updates the buyer's
+    // latest_sentiment — never awaited into the rest of this handler's
+    // outcome (see sentimentService's own "never throws" rule), so a
+    // classification hiccup cannot stop the buyer from getting their
+    // balance/receipt/payment-link reply.
+    await sentimentService.updateCustomerSentiment(orgId, customer.id, text);
 
     // SECTION 11 — a reply to a collections conversation ("I will pay
     // Friday", "already paid", "can't pay") means something specific that

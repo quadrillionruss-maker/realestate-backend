@@ -772,6 +772,36 @@
                   '</div>'
                 : '') +
 
+              // FEATURE — buyer default prediction. Deterministically
+              // computed (aiBrief.js's own comment: a ranking by a stored
+              // number, not something worth asking the model for), so it
+              // is present whether today's brief was written by AI or the
+              // rule-based fallback — same convention as every other
+              // notice block above.
+              (brief && brief.payload && (brief.payload.top_default_risks || []).length
+                ? '<div class="notice mt-1 mb-0">' +
+                    '<b>Likely to default this month</b><br>' +
+                    brief.payload.top_default_risks.map(function (r) {
+                      return esc(r.customer_name) +
+                        (r.unit_number ? ' — Unit ' + esc(r.unit_number) : '') +
+                        (r.project ? ' (' + esc(r.project) + ')' : '') +
+                        ' — risk score ' + r.default_risk_score + '/100';
+                    }).join('<br>') +
+                  '</div>'
+                : '') +
+
+              // FEATURE — buyer sentiment analysis. Same deterministic,
+              // code-computed treatment as top_default_risks just above —
+              // present regardless of whether the model or the fallback
+              // wrote today's brief.
+              (brief && brief.payload && (brief.payload.at_risk_sentiment || []).length
+                ? '<div class="notice mt-1 mb-0">' +
+                    brief.payload.at_risk_sentiment.map(function (s) {
+                      return esc(s.customer_name) + ' — sentiment flagged as at-risk based on recent messages';
+                    }).join('<br>') +
+                  '</div>'
+                : '') +
+
               (risks.length
                 ? '<ol class="risk-list">' + risks.slice(0, 3).map(function (r, i) {
                     var buyerId = buyerIdByName[r.customer_name];
@@ -1025,6 +1055,13 @@
       flags += '<span class="' + lateClass + '">' + R.plural(c.days_late, 'day') + ' late</span>';
     }
     if (c.escalation && c.escalation.stage !== 'none') flags += badge(c.escalation.stage);
+    // FEATURE — buyer default prediction. Above 70 specifically (the
+    // product spec's own threshold) — the score already drives the sort
+    // order server-side isn't relevant here, so this is purely "does this
+    // one number cross the line worth a rep's attention".
+    if (c.default_risk_score != null && c.default_risk_score > 70) {
+      flags += '<span class="late-tag danger">DEFAULT RISK HIGH</span>';
+    }
     if (c.promise) {
       flags += '<span class="promise-tag' + (c.promise.status === 'broken' ? ' broken' : '') + '">' +
         (c.promise.status === 'broken' ? 'Broke promise of ' : 'Promised ') + esc(fmtDate(c.promise.promised_date)) +
@@ -1322,6 +1359,112 @@
       '<div class="task-title muted">' + (t.source === 'ai' ? '<span class="tag-ai">Auto</span>' : '') + esc(t.title) + '</div>' +
       '<div class="task-meta">' + esc(fmtDate(t.created_at)) + '</div>' +
     '</div></div>';
+  }
+
+  /* ══ LOG BOOK ═══════════════════════════════════════════════════════════
+     FEATURE — team attendance & log book. Free-text operational notes
+     (an incident, a visitor, a decision), filterable by project and type —
+     the Operations-group counterpart to Tasks: things that happened, rather
+     than things still to do. */
+  var LOG_ENTRY_TYPES = [
+    ['incident', 'Incident'], ['update', 'Update'], ['communication', 'Communication'],
+    ['decision', 'Decision'], ['visitor', 'Visitor'],
+  ];
+
+  R.screens.logs = {
+    render: async function (view, params, query) {
+      var projectId = query.project_id || '';
+      var entryType = query.entry_type || '';
+
+      var qs = [];
+      if (projectId) qs.push('project_id=' + encodeURIComponent(projectId));
+      if (entryType) qs.push('entry_type=' + encodeURIComponent(entryType));
+
+      var results = await Promise.all([
+        api('/logs' + (qs.length ? '?' + qs.join('&') : '')),
+        api('/projects'),
+      ]);
+      var entries = results[0], projects = results[1];
+
+      view.innerHTML =
+        head('Log Book', 'Incidents, visitors, decisions and updates — one place for what happened, not what to do next.',
+          '<button class="btn primary" id="btn-new-log">New entry</button>') +
+        '<div class="filter-row">' +
+          '<select class="select" id="log-filter-project">' +
+            '<option value="">All projects</option>' +
+            projects.map(function (p) {
+              return '<option value="' + esc(p.id) + '"' + (projectId === p.id ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+            }).join('') +
+          '</select>' +
+          '<select class="select" id="log-filter-type">' +
+            '<option value="">All types</option>' +
+            LOG_ENTRY_TYPES.map(function (t) {
+              return '<option value="' + t[0] + '"' + (entryType === t[0] ? ' selected' : '') + '>' + t[1] + '</option>';
+            }).join('') +
+          '</select>' +
+        '</div>' +
+        card(null, entries.length
+          ? entries.map(logEntryRow).join('')
+          : R.emptyState('No log entries', 'Nothing has been logged yet for this filter.',
+              '<button class="btn primary" id="btn-empty-log">Add an entry</button>'),
+          { flush: true });
+
+      function goto() {
+        var next = [];
+        var p = R.el('log-filter-project').value;
+        var t = R.el('log-filter-type').value;
+        if (p) next.push('project_id=' + encodeURIComponent(p));
+        if (t) next.push('entry_type=' + encodeURIComponent(t));
+        window.location.hash = '#/logs' + (next.length ? '?' + next.join('&') : '');
+      }
+      R.el('log-filter-project').addEventListener('change', goto);
+      R.el('log-filter-type').addEventListener('change', goto);
+
+      R.qsa('#btn-new-log, #btn-empty-log', view).forEach(function (b) {
+        b.addEventListener('click', function () {
+          R.modal({
+            title: 'New log entry',
+            body:
+              '<div class="field"><label for="log-type">Type</label>' +
+                '<select class="select" id="log-type" name="entry_type" required>' +
+                  LOG_ENTRY_TYPES.map(function (t) { return '<option value="' + t[0] + '">' + t[1] + '</option>'; }).join('') +
+                '</select></div>' +
+              '<div class="field"><label for="log-project">Project (optional)</label>' +
+                '<select class="select" id="log-project" name="project_id">' +
+                  '<option value="">Not tied to a project</option>' +
+                  projects.map(function (p) { return '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>'; }).join('') +
+                '</select></div>' +
+              '<div class="field"><label for="log-content">What happened</label>' +
+                '<textarea class="textarea" id="log-content" name="content" rows="4" required></textarea></div>',
+            submitLabel: 'Add entry',
+            onSubmit: async function (form, close) {
+              var v = R.values(form);
+              if (!v.content || !v.content.trim()) throw new Error('Describe what happened.');
+              await api.post('/logs', {
+                entry_type: v.entry_type, content: v.content.trim(), project_id: v.project_id || null,
+              });
+              close();
+              toast('Logged.', 'ok');
+              R.reload();
+            },
+          });
+        });
+      });
+    },
+  };
+
+  function logEntryRow(entry) {
+    var who = entry.users ? (entry.users.full_name || entry.users.email) : 'Someone';
+    var type = LOG_ENTRY_TYPES.find(function (t) { return t[0] === entry.entry_type; });
+    return '<div class="log-entry">' +
+      '<div class="flex-row justify-between gap-10">' +
+        '<div>' + badge(entry.entry_type) + ' <b>' + esc(type ? type[1] : entry.entry_type) + '</b>' +
+          (entry.re_projects ? ' <span class="page-sub">· ' + esc(entry.re_projects.name) + '</span>' : '') + '</div>' +
+        '<span class="page-sub nowrap">' + esc(R.fmtDateTime(entry.created_at)) + '</span>' +
+      '</div>' +
+      '<p class="mt-1">' + esc(entry.content) + '</p>' +
+      '<div class="page-sub">Logged by ' + esc(who) + '</div>' +
+    '</div>';
   }
 
   /* ══ PROJECTS ═══════════════════════════════════════════════════════════ */
@@ -2321,6 +2464,33 @@
     return '<span class="badge credit-' + t.key + '">' + score + ' · ' + esc(t.label) + '</span>';
   }
 
+  // FEATURE — buyer sentiment analysis. A colored dot plus the label, per
+  // the product spec's own wording — green/positive, grey/neutral,
+  // amber/concerned, red/at-risk.
+  var SENTIMENT_META = {
+    positive: ['sentiment-positive', 'Positive'],
+    neutral: ['sentiment-neutral', 'Neutral'],
+    concerned: ['sentiment-concerned', 'Concerned'],
+    at_risk: ['sentiment-at-risk', 'At-risk'],
+  };
+  function sentimentIndicator(value) {
+    var meta = SENTIMENT_META[value];
+    if (!meta) return '';
+    return '<div class="page-sub mb-2"><span class="sentiment-dot ' + meta[0] + '"></span> Sentiment: ' + meta[1] + '</div>';
+  }
+
+  // FEATURE — dynamic reminder timing. Mirrors
+  // contactTimingService.describeOptimalContact server-side exactly (same
+  // day labels, same morning/afternoon/evening buckets) — a display-only
+  // computation from two numbers the API already sends, not worth its own
+  // round trip.
+  var CONTACT_DAY_LABELS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  function optimalContactHint(c) {
+    if (c.optimal_contact_day == null || c.optimal_contact_hour == null) return null;
+    var part = c.optimal_contact_hour < 12 ? 'mornings' : c.optimal_contact_hour < 17 ? 'afternoons' : 'evenings';
+    return CONTACT_DAY_LABELS[c.optimal_contact_day] + ' ' + part;
+  }
+
   R.screens.customers = {
     render: async function (view, params, query) {
       // #/customers/<id> opens the buyer straight from a search result.
@@ -2835,6 +3005,19 @@
           ? '<div class="mb-2">' + creditBadge(c.credit_score) + '</div>'
           : '') +
 
+        // FEATURE — buyer sentiment analysis. Null until this buyer has
+        // sent at least one portal message or WhatsApp reply — nothing
+        // renders rather than a "no signal yet" placeholder, same
+        // convention the contact-timing hint just below already follows.
+        (sentimentIndicator(c.latest_sentiment)) +
+
+        // FEATURE — dynamic reminder timing. Null until at least 3 payments
+        // exist (contactTimingService's own threshold) — nothing renders
+        // rather than a "no pattern yet" placeholder nobody asked for.
+        (optimalContactHint(c)
+          ? '<p class="page-sub mb-2">Best time to reach — ' + esc(optimalContactHint(c)) + '</p>'
+          : '') +
+
         // SECTION 7 — the badge on the Buyers row is a glance; this is the
         // reason, front and center every time someone opens this specific
         // buyer, since forgetting WHY somebody was blacklisted is how a
@@ -2922,10 +3105,17 @@
               '<div><b>' + esc(unit.unit_number ? 'Unit ' + unit.unit_number : 'Reservation') + '</b>' +
               '<div class="page-sub">' + esc([project.name, project.location].filter(Boolean).join(', ')) + '</div></div>' +
               badge(r.status) +
+              // FEATURE — joint sales.
+              (asArray(r.re_joint_sales).length ? ' <span class="badge joint-sale">Joint sale</span>' : '') +
             '</div>' +
             (R.can('reservations.reassign')
               ? '<div class="page-sub mt-1">Rep: ' + esc(repName || 'Unassigned') +
                   ' <button class="btn-quiet" data-change-rep="' + esc(r.id) + '" data-rep-name="' + esc(repName || '') + '">Change rep</button></div>'
+              : '') +
+            (R.can('reservations.jointSale')
+              ? '<div class="page-sub mt-1"><button class="btn-quiet" data-joint-sale="' + esc(r.id) +
+                  '" data-buyer-name="' + esc(c.full_name) + '">' +
+                  (asArray(r.re_joint_sales).length ? 'Edit joint sale' : 'Set up joint sale') + '</button></div>'
               : '') +
             (r.escalation_stage === 'legal' && R.can('legal.manage')
               ? '<div class="notice mt-1">Escalated to legal review. ' +
@@ -2936,7 +3126,14 @@
               ? '<div class="page-sub mt-1"><button class="btn-quiet" data-manage-handover="' + esc(r.id) +
                   '" data-buyer-name="' + esc(c.full_name) + '">Handover checklist</button></div>'
               : '') +
-            (plan
+            (r.property_type === 'outright' && plan
+              // FEATURE — outright sales. One amount, one row — the generic
+              // "N installments" line and the paid-rows-collapse UI (built
+              // for a buyer eighteen months into a real schedule) have
+              // nothing to summarize here, so this is just the row itself.
+              ? '<div class="page-sub mt-1">Outright sale · ' + naira(plan.total_amount) + '</div>' +
+                '<div class="mt-1">' + schedule.map(scheduleRow).join('') + '</div>'
+              : plan
               ? '<div class="page-sub mt-1">' + plan.number_of_installments + ' ' + esc(plan.frequency) +
                 ' installments · ' + naira(plan.total_amount) + ' · from ' + esc(fmtDate(plan.start_date)) + '</div>' +
                 '<div class="mt-1">' + openRows.map(scheduleRow).join('') + '</div>' +
@@ -3094,6 +3291,11 @@
       R.onClick(panel.body, '[data-change-rep]', async function (button) {
         await changeRepModal(button.dataset.changeRep, button.dataset.repName);
         openCustomer(id); // the row has to reflect the new rep immediately
+      });
+
+      R.onClick(panel.body, '[data-joint-sale]', async function (button) {
+        await jointSaleModal(button.dataset.jointSale, button.dataset.buyerName);
+        openCustomer(id); // the badge has to reflect the new joint sale immediately
       });
 
       R.onClick(panel.body, '[data-open-legal-case]', async function (button) {
@@ -3462,7 +3664,10 @@
                 (rental && plan ? '<div class="cell-meta">/month</div>' : '') +
               '</td>' +
               '<td class="muted hide-mobile">' + esc(fmtDate(r.reserved_at)) + '</td>' +
-              '<td>' + badge(r.status) + (r.escalation_stage && r.escalation_stage !== 'none' ? ' ' + badge(r.escalation_stage) : '') + '</td>' +
+              '<td>' + badge(r.status) + (r.escalation_stage && r.escalation_stage !== 'none' ? ' ' + badge(r.escalation_stage) : '') +
+                // FEATURE — joint sales.
+                (asArray(r.re_joint_sales).length ? ' <span class="badge joint-sale">Joint sale</span>' : '') +
+              '</td>' +
               '<td class="right nowrap">' +
                 (rental
                   ? (canRenew
@@ -3473,6 +3678,11 @@
                     ? '<button class="btn-quiet" data-restructure="' + esc(r.id) + '" data-buyer-name="' +
                       esc((r.re_customers && r.re_customers.full_name) || '') + '">Restructure</button> '
                     : '') +
+                // FEATURE — joint sales. DIRECTORS-tier, same as Restructure.
+                (R.can('reservations.jointSale')
+                  ? '<button class="btn-quiet" data-joint-sale="' + esc(r.id) + '" data-buyer-name="' +
+                    esc((r.re_customers && r.re_customers.full_name) || '') + '">Joint sale</button> '
+                  : '') +
                 '<button class="btn-quiet" data-res-menu="' + esc(r.id) + '" data-status="' + esc(r.status) +
                   '" data-rental="' + (rental ? '1' : '') + '" data-buyer-name="' + esc((r.re_customers && r.re_customers.full_name) || '') + '">Change</button>' +
               '</td>' +
@@ -3508,8 +3718,255 @@
       R.onClick(view, '[data-renew]', async function (button) {
         await renewTenancyModal(button.dataset.renew, button.dataset.buyerName);
       });
+
+      R.onClick(view, '[data-joint-sale]', async function (button) {
+        await jointSaleModal(button.dataset.jointSale, button.dataset.buyerName);
+      });
     },
   };
+
+  /* ══ JOINT SALE ═════════════════════════════════════════════════════════
+     FEATURE — joint sales. Co-sellers on one deal, splitting commission by
+     percentage. Two fixed row shapes (internal rep / external agent)
+     rather than a per-row type switcher — simpler to get right, and a
+     deal's co-sellers do not change type mid-edit. */
+  function jointSalePartyRow(type, party) {
+    party = party || {};
+    var repRow = type === 'internal_rep';
+    return '<div class="field-row js-party-row" data-party-type="' + type + '">' +
+      (repRow
+        ? '<div class="field"><label>Sales rep</label><select class="select js-party-user" data-user-id="' + esc(party.user_id || '') + '"></select></div>'
+        : '<div class="field"><label>Agent name</label><input class="input js-party-name" value="' + esc(party.agent_name || '') + '" placeholder="Full name"></div>' +
+          '<div class="field"><label>Email</label><input class="input js-party-email" type="email" value="' + esc(party.agent_email || '') + '"></div>' +
+          '<div class="field"><label>Phone</label><input class="input js-party-phone" value="' + esc(party.agent_phone || '') + '"></div>') +
+      '<div class="field"><label>Split %</label><input class="input js-party-pct" type="number" min="0.01" max="100" step="0.01" value="' + esc(party.commission_split_percentage || '') + '"></div>' +
+      '<button type="button" class="icon-btn js-remove-party" aria-label="Remove">×</button>' +
+    '</div>';
+  }
+
+  async function jointSaleModal(reservationId, buyerName) {
+    var results = await Promise.all([
+      api('/sales-reps'),
+      api('/reservations/' + reservationId + '/joint-sale').catch(function () { return null; }),
+    ]);
+    var reps = results[0], existing = results[1];
+
+    var initialRows = (existing && existing.parties && existing.parties.length)
+      ? existing.parties.map(function (p) { return jointSalePartyRow(p.party_type, p); }).join('')
+      : jointSalePartyRow('internal_rep') + jointSalePartyRow('external_agent');
+
+    var panel = R.modal({
+      title: 'Joint sale — ' + buyerName,
+      wide: true,
+      body:
+        '<p class="field-hint mb-2">Co-sellers on this deal and their commission split. Splits must total 100%.</p>' +
+        '<div id="js-parties">' + initialRows + '</div>' +
+        '<div class="btn-row mt-1">' +
+          '<button type="button" class="btn-quiet" id="js-add-rep">+ Add sales rep</button>' +
+          '<button type="button" class="btn-quiet" id="js-add-agent">+ Add external agent</button>' +
+        '</div>',
+      submitLabel: 'Save joint sale',
+      onSubmit: async function (form, close) {
+        var rows = R.qsa('.js-party-row', panel.form);
+        var parties = rows.map(function (row) {
+          var type = row.dataset.partyType;
+          var pct = Number(R.qs('.js-party-pct', row).value);
+          if (type === 'internal_rep') {
+            return { party_type: type, user_id: R.qs('.js-party-user', row).value, commission_split_percentage: pct };
+          }
+          return {
+            party_type: type,
+            agent_name: R.qs('.js-party-name', row).value.trim(),
+            agent_email: R.qs('.js-party-email', row).value.trim() || null,
+            agent_phone: R.qs('.js-party-phone', row).value.trim() || null,
+            commission_split_percentage: pct,
+          };
+        });
+
+        var total = parties.reduce(function (sum, p) { return sum + (p.commission_split_percentage || 0); }, 0);
+        if (Math.abs(total - 100) > 0.05) {
+          throw new Error('Splits must total 100% — these total ' + Math.round(total * 100) / 100 + '%.');
+        }
+
+        await api.post('/reservations/' + reservationId + '/joint-sale', { parties: parties });
+        close();
+        toast('Joint sale saved.', 'ok');
+        R.reload();
+      },
+    });
+
+    // Rep dropdowns are populated after the modal exists (so the select
+    // element is already in the DOM to select against), same reasoning
+    // the reservation form's own "New reservation" rep field is built
+    // from a pre-fetched list rather than an inline fetch per row.
+    function populateRepSelect(select) {
+      var chosen = select.dataset.userId;
+      select.innerHTML = '<option value="">Choose a rep</option>' + reps.map(function (rep) {
+        var userId = rep.users && rep.users.id || rep.user_id || '';
+        var name = (rep.users && (rep.users.full_name || rep.users.email)) || 'Rep';
+        return '<option value="' + esc(userId) + '"' + (userId === chosen ? ' selected' : '') + '>' + esc(name) + '</option>';
+      }).join('');
+    }
+    R.qsa('.js-party-user', panel.form).forEach(populateRepSelect);
+
+    function addRow(type) {
+      var container = R.el('js-parties');
+      container.insertAdjacentHTML('beforeend', jointSalePartyRow(type));
+      var added = container.lastElementChild;
+      var select = R.qs('.js-party-user', added);
+      if (select) populateRepSelect(select);
+      wireRemove(added);
+    }
+    function wireRemove(row) {
+      R.qs('.js-remove-party', row).addEventListener('click', function () { row.remove(); });
+    }
+    R.qsa('.js-party-row', panel.form).forEach(wireRemove);
+
+    R.el('js-add-rep').addEventListener('click', function () { addRow('internal_rep'); });
+    R.el('js-add-agent').addEventListener('click', function () { addRow('external_agent'); });
+  }
+
+  /* ══ CAMPAIGNS ══════════════════════════════════════════════════════════
+     FEATURE — email/SMS/WhatsApp campaign tracking. Reading the list is
+     campaigns.read (owner + director); creating and sending is owner-only
+     (campaigns.write/campaigns.send) — see permissions.js's own comment. */
+  var CAMPAIGN_AUDIENCES = [
+    ['all', 'All buyers'], ['overdue', 'Overdue buyers only'],
+    ['project', 'Buyers in a specific project'], ['credit_below', 'Buyers with credit score below…'],
+  ];
+
+  function campaignAudienceLabel(filter) {
+    filter = filter || {};
+    var found = CAMPAIGN_AUDIENCES.find(function (a) { return a[0] === (filter.audience || 'all'); });
+    var label = found ? found[1] : 'All buyers';
+    if (filter.audience === 'credit_below') label = 'Credit score below ' + filter.credit_score_below;
+    return label;
+  }
+
+  R.screens.campaigns = {
+    render: async function (view) {
+      var canWrite = R.can('campaigns.write');
+      var canSend = R.can('campaigns.send');
+      var list = await api('/campaigns');
+
+      view.innerHTML =
+        head('Campaigns', 'Bulk email, SMS and WhatsApp sends to a chosen slice of your buyer list.',
+          canWrite ? '<button class="btn primary" id="btn-new-campaign">New campaign</button>' : '') +
+        card(null, table(
+          [{ label: 'Name' }, { label: 'Type' }, { label: 'Audience', hideMobile: true }, { label: 'Status' },
+            { label: 'Sent', num: true, hideMobile: true }, { label: 'Failed', num: true, hideMobile: true }, { label: '' }],
+          list,
+          function (c) {
+            return '<tr>' +
+              '<td class="cell-primary">' + esc(c.name) + '</td>' +
+              '<td class="muted">' + esc(c.type) + '</td>' +
+              '<td class="muted hide-mobile">' + esc(campaignAudienceLabel(c.target_filter)) + '</td>' +
+              '<td>' + badge(c.status) + '</td>' +
+              '<td class="num hide-mobile">' + c.sent_count + '</td>' +
+              '<td class="num hide-mobile ' + (c.failed_count ? 'clay' : 'muted') + '">' + c.failed_count + '</td>' +
+              '<td class="right">' +
+                (c.status !== 'sent' && canSend
+                  ? '<button class="btn-quiet" data-send-campaign="' + esc(c.id) + '" data-name="' + esc(c.name) + '">Send</button>'
+                  : '') +
+              '</td>' +
+            '</tr>';
+          },
+          {
+            emptyTitle: 'No campaigns yet',
+            emptyHint: 'Reach a slice of your buyer list — overdue, a project, or everyone — in one send.',
+            emptyAction: canWrite ? '<button class="btn primary" id="btn-empty-campaign">New campaign</button>' : null,
+          }
+        ), { flush: true });
+
+      R.qsa('[data-send-campaign]', view).forEach(function (button) {
+        button.addEventListener('click', async function () {
+          var confirmed = await R.confirm({
+            title: 'Send campaign',
+            message: 'Send "' + button.dataset.name + '" now? This cannot be undone.',
+            confirmLabel: 'Send',
+          });
+          if (!confirmed) return;
+          var result = await api.post('/campaigns/' + button.dataset.sendCampaign + '/send', {});
+          toast('Sent to ' + result.sent_count + ' buyers' + (result.failed_count ? ', ' + result.failed_count + ' failed' : '') + '.', 'ok');
+          R.reload();
+        });
+      });
+
+      R.qsa('#btn-new-campaign, #btn-empty-campaign', view).forEach(function (b) {
+        b.addEventListener('click', newCampaignModal);
+      });
+    },
+  };
+
+  async function newCampaignModal() {
+    var projects = await api('/projects');
+    var panel = R.modal({
+      title: 'New campaign',
+      wide: true,
+      body:
+        '<div class="field"><label for="cmp-name">Name</label>' +
+          '<input class="input" id="cmp-name" name="name" required placeholder="March overdue reminder"></div>' +
+        '<div class="field"><label for="cmp-type">Channel</label>' +
+          '<select class="select" id="cmp-type" name="type">' +
+            '<option value="email">Email</option><option value="sms">SMS</option><option value="whatsapp">WhatsApp</option>' +
+          '</select></div>' +
+        '<div class="field"><label for="cmp-audience">Audience</label>' +
+          '<select class="select" id="cmp-audience" name="audience">' +
+            CAMPAIGN_AUDIENCES.map(function (a) { return '<option value="' + a[0] + '">' + a[1] + '</option>'; }).join('') +
+          '</select></div>' +
+        '<div class="field-row" id="cmp-project-row" hidden>' +
+          '<div class="field"><label for="cmp-project">Project</label>' +
+            '<select class="select" id="cmp-project" name="project_id">' +
+              projects.map(function (p) { return '<option value="' + esc(p.id) + '">' + esc(p.name) + '</option>'; }).join('') +
+            '</select></div>' +
+        '</div>' +
+        '<div class="field-row" id="cmp-credit-row" hidden>' +
+          '<div class="field"><label for="cmp-credit">Credit score below</label>' +
+            '<input class="input" id="cmp-credit" name="credit_score_below" type="number" min="0" max="100" value="50"></div>' +
+        '</div>' +
+        '<div class="field"><label for="cmp-body">Message</label>' +
+          '<textarea class="textarea" id="cmp-body" name="message_body" rows="4" required></textarea></div>' +
+        '<button type="button" class="btn-quiet mb-2" id="cmp-preview">Preview recipients</button>' +
+        '<p class="field-hint" id="cmp-preview-result"></p>',
+      submitLabel: 'Save campaign',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        if (!v.name || !v.message_body) throw new Error('Give the campaign a name and a message.');
+        await api.post('/campaigns', {
+          name: v.name, type: v.type, message_body: v.message_body,
+          target_filter: buildTargetFilter(v),
+        });
+        close();
+        toast('Campaign saved as a draft.', 'ok');
+        R.reload();
+      },
+    });
+
+    function buildTargetFilter(v) {
+      if (v.audience === 'project') return { audience: 'project', project_id: v.project_id };
+      if (v.audience === 'credit_below') return { audience: 'credit_below', credit_score_below: Number(v.credit_score_below) };
+      return { audience: v.audience };
+    }
+
+    R.qs('#cmp-audience', panel.form).addEventListener('change', function (e) {
+      R.el('cmp-project-row').hidden = e.target.value !== 'project';
+      R.el('cmp-credit-row').hidden = e.target.value !== 'credit_below';
+    });
+
+    R.qs('#cmp-preview', panel.form).addEventListener('click', async function (button) {
+      button.disabled = true;
+      try {
+        var v = R.values(panel.form);
+        var result = await api.post('/campaigns/preview-audience', { target_filter: buildTargetFilter(v) });
+        R.el('cmp-preview-result').textContent = R.plural(result.count, 'buyer') + ' would receive this' +
+          (result.sample.length ? ' — e.g. ' + result.sample.slice(0, 3).map(function (s) { return s.full_name; }).join(', ') : '');
+      } catch (err) {
+        toast(err.message, 'err');
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
 
   /* ══ HANDOVER CHECKLIST ══════════════════════════════════════════════════
      SECTION 11. Owner/sales_director only (handover.manage). Created once,
@@ -3901,6 +4358,17 @@
             '<div class="field"><label for="r-tenancy-start">Tenancy start date</label>' +
               '<input class="input" id="r-tenancy-start" name="tenancy_start_date" type="date" value="' + R.todayISO() + '"></div>' +
             '<p class="field-hint" id="r-rental-preview"></p>' +
+          '</div>' +
+
+          // FEATURE — outright sales. No schedule to configure: one amount,
+          // due today, settled by one payment — so this replaces the whole
+          // "Set up an installment plan" checkbox and its fields rather than
+          // sitting alongside them, same treatment the rental block above
+          // gets for its own reason.
+          '<div id="r-plan-outright" class="hidden">' +
+            '<div class="field"><label for="r-outright-amount">Full sale amount</label>' +
+              '<div class="input-money"><input class="input" id="r-outright-amount" name="outright_amount" type="number" min="1" step="1"></div></div>' +
+            '<p class="field-hint">Due immediately. Allocation letter generates automatically the moment this is paid in full.</p>' +
           '</div>'
         ),
       submitLabel: 'Create reservation',
@@ -3924,6 +4392,14 @@
             frequency: 'monthly',
             start_date: v.tenancy_start_date,
           };
+        } else if (v.property_type === 'outright') {
+          if (!v.outright_amount) {
+            throw new Error('An outright sale needs a full sale amount.');
+          }
+          // number_of_installments/frequency/start_date are set server-side
+          // (routes/reservations.js) for an outright sale regardless of what
+          // travels here — total_amount is the one real input.
+          payload.plan = { total_amount: Number(v.outright_amount) };
         } else if (v.has_plan) {
           if (!v.total_amount || !v.number_of_installments || !v.start_date) {
             throw new Error('A plan needs a total, a count and a start date.');
@@ -3960,7 +4436,9 @@
         close();
         toast(result.queued
           ? 'No connection — reservation saved and will sync automatically.'
-          : (v.property_type === 'rental' ? 'Tenancy created.' : 'Reservation created.'), 'ok');
+          : (v.property_type === 'rental' ? 'Tenancy created.'
+            : v.property_type === 'outright' ? 'Outright sale reserved — record the payment to complete it.'
+            : 'Reservation created.'), 'ok');
         if (!result.queued) R.reload();
       },
     });
@@ -4010,12 +4488,16 @@
     });
 
     // The whole point of requirement #10: picking "Rental" swaps the plan
-    // fields for rent fields rather than showing both at once.
+    // fields for rent fields rather than showing both at once. "Outright"
+    // (FEATURE — outright sales) gets the same treatment, its own single
+    // amount field replacing the installment-plan fields entirely.
     R.el('r-property-type').addEventListener('change', function (e) {
       var rental = e.target.value === 'rental';
+      var outright = e.target.value === 'outright';
       R.el('r-plan-rental').classList.toggle('hidden', !rental);
-      R.el('r-has-plan-row').classList.toggle('hidden', rental);
-      R.el('r-plan').classList.toggle('hidden', rental || !R.el('r-has-plan').checked);
+      R.el('r-plan-outright').classList.toggle('hidden', !outright);
+      R.el('r-has-plan-row').classList.toggle('hidden', rental || outright);
+      R.el('r-plan').classList.toggle('hidden', rental || outright || !R.el('r-has-plan').checked);
       if (rental) updateRentalPreview();
     });
 
@@ -5187,7 +5669,13 @@
       }
 
       if (tab === 'entries') {
-        var entries = await api('/commissions');
+        // FEATURE — joint sales. "My own" regardless of role, same
+        // reasoning as the entries list above it — see
+        // jointSaleService.myJointSaleCommissions's own header for why
+        // this is a split of the SAME rows the entries table already
+        // lists, not separate commission money.
+        var entriesResults = await Promise.all([api('/commissions'), api('/commissions/joint-sales')]);
+        var entries = entriesResults[0], jointCommissions = entriesResults[1];
         view.innerHTML = head('Commission entries', 'One row per payment. This is where a rep\'s total comes from.') +
           commissionTabs(tab) +
           card(null, table(
@@ -5220,7 +5708,28 @@
               emptyHint: 'Commission accrues when a payment lands against a reservation with a rep on it.',
               emptyAction: '<a class="btn-quiet" href="#/payments">Go to Payments</a>',
             }
-          ), { flush: true });
+          ), { flush: true }) +
+
+          // FEATURE — joint sales. Only rendered once there is something to
+          // show — a rep who has never been tagged as a co-seller on a deal
+          // sees nothing extra here, same "no card for zero rows" rule the
+          // rest of this screen already follows.
+          (jointCommissions.length
+            ? '<div class="mt-2">' + card('Joint sale commissions', table(
+                [{ label: 'Buyer' }, { label: 'Unit', hideMobile: true }, { label: 'Total commission', num: true, hideMobile: true },
+                  { label: 'Your split', num: true }, { label: 'Your share', num: true }],
+                jointCommissions,
+                function (jc) {
+                  return '<tr>' +
+                    '<td class="cell-primary">' + esc(jc.customer_name || '—') + '</td>' +
+                    '<td class="muted hide-mobile">' + esc(jc.unit_number || '—') + '</td>' +
+                    '<td class="num muted hide-mobile">' + naira(jc.total_amount) + '</td>' +
+                    '<td class="num muted">' + jc.split_percentage + '%</td>' +
+                    '<td class="num gold">' + naira(jc.your_share) + '</td>' +
+                  '</tr>';
+                }
+              ), { flush: true }) + '</div>'
+            : '');
 
         R.qsa('[data-approve]', view).forEach(function (button) {
           button.addEventListener('click', async function () {
@@ -5937,13 +6446,14 @@
       var tab = query.tab || 'workspace';
 
       var tabs = '<div class="filter-row">' +
-        [['workspace', 'Workspace'], ['team', 'Team & reps'], ['notifications', 'Notifications'], ['templates', 'Document templates'],
+        [['workspace', 'Workspace'], ['team', 'Team & reps'], ['attendance', 'Attendance'], ['notifications', 'Notifications'], ['templates', 'Document templates'],
           ['activity', 'Activity log'], ['bin', 'Bin']].map(function (t) {
           return '<a class="pill' + (tab === t[0] ? ' is-on' : '') + '" href="#/settings?tab=' + t[0] + '">' + t[1] + '</a>';
         }).join('') + '</div>';
 
       if (tab === 'activity') return activityTab(view, tabs);
       if (tab === 'team') return teamTab(view, tabs);
+      if (tab === 'attendance') return attendanceTab(view, tabs, query.month);
       if (tab === 'notifications') return notificationsTab(view, tabs);
       if (tab === 'templates') return templatesTab(view, tabs);
       if (tab === 'bin') return binTab(view, tabs, query.of || 'customers');
@@ -6071,7 +6581,13 @@
   }
 
   async function workspaceTab(view, tabs) {
-    var settings = await api('/settings');
+    // FEATURE — VAT compliance. Its own endpoint (not folded into GET
+    // /settings) because it is owner-only end to end, same as Paystack/
+    // WhatsApp above — only fetched at all when this caller can act on it,
+    // matching those two cards' own conditional render.
+    var canConfigureVat = R.can('settings.write');
+    var results = await Promise.all([api('/settings'), canConfigureVat ? api('/settings/vat') : Promise.resolve(null)]);
+    var settings = results[0], vatSettings = results[1];
 
     view.innerHTML = head('Settings', 'Workspace configuration — letterhead, provider keys, commission default and who gets told what. Your own profile and password are under your name, bottom left of the sidebar.') + tabs +
       '<div class="grid cols-2">' +
@@ -6160,6 +6676,27 @@
                   : 'Not configured — referral notifications will not reach buyers over WhatsApp.') +
                 ' Only the workspace owner can change this.</p>')) +
 
+          // FEATURE — VAT compliance. Owner only, same tier as Paystack and
+          // WhatsApp above — this decides what every receipt from here on
+          // states was charged in tax, workspace-wide.
+          (canConfigureVat
+            ? card('VAT Configuration', '<p class="field-hint mb-2">' +
+                'Nigeria standard rate is 7.5%. Applies to every payment recorded from the moment you save this, ' +
+                'not retroactively — past receipts keep showing whatever was true when they were issued.</p>' +
+                '<form id="form-vat">' +
+                  '<label class="check mb-2"><input type="checkbox" id="s-vat-enabled" name="enabled"' +
+                    (vatSettings.enabled ? ' checked' : '') + '> <span>Enable VAT</span></label>' +
+                  '<div class="field"><label for="s-vat-rate">VAT rate (%)</label>' +
+                    '<input class="input" id="s-vat-rate" name="rate" type="number" min="0" max="100" step="0.1" value="' + esc(vatSettings.rate) + '"></div>' +
+                  '<div class="field"><label for="s-vat-inclusive">Prices are</label>' +
+                    '<select class="select" id="s-vat-inclusive" name="inclusive">' +
+                      '<option value="false"' + (!vatSettings.inclusive ? ' selected' : '') + '>VAT-exclusive (added on top)</option>' +
+                      '<option value="true"' + (vatSettings.inclusive ? ' selected' : '') + '>VAT-inclusive (already included)</option>' +
+                    '</select></div>' +
+                  '<button class="btn primary mt-1" type="submit">Save VAT settings</button>' +
+                '</form>')
+            : '') +
+
           // SECTION 25 — owner only, same tier as everything else this
           // workspace's whole book is worth (the investor report, the full
           // audit export).
@@ -6203,6 +6740,16 @@
       var result = await api.post('/settings/paystack/test', { secret_key: secretKey });
       toast(result.valid ? 'Paystack key is valid.' : (result.reason || 'Paystack rejected this key.'), result.valid ? 'ok' : 'err');
     });
+
+    var vatForm = R.qs('#form-vat', view);
+    if (vatForm) {
+      guardedSubmit(vatForm, async function (form) {
+        var v = R.values(form);
+        await api.patch('/settings/vat', { enabled: v.enabled, rate: v.rate, inclusive: v.inclusive === 'true' });
+        toast('VAT settings saved.', 'ok');
+        R.reload();
+      });
+    }
 
     var whatsappForm = R.qs('#form-whatsapp', view);
     if (whatsappForm) {
@@ -6847,6 +7394,131 @@
     });
   }
 
+  // FEATURE — team attendance & log book. A calendar-style grid: one row per
+  // active team member, one column per day of the selected month. Owner and
+  // Sales Director only (attendance.read/attendance.manage in
+  // permissions.js) — this tab is not reachable at all by any other role,
+  // same convention every owner/director-only Settings section already
+  // follows (see templatesTab's own comment on this).
+  var ATTENDANCE_STATUSES = [
+    ['present', 'Present', 'P'], ['late', 'Late', 'L'],
+    ['half_day', 'Half day', 'H'], ['absent', 'Absent', 'A'],
+  ];
+
+  function attendanceStatusMeta(status) {
+    return ATTENDANCE_STATUSES.find(function (s) { return s[0] === status; });
+  }
+
+  async function attendanceTab(view, tabs, monthParam) {
+    if (!R.can('attendance.read')) {
+      view.innerHTML = head('Attendance', '') + tabs +
+        card(null, R.emptyState('Not available', 'Attendance is visible to the owner and Head of Sales.'));
+      return;
+    }
+
+    var now = new Date();
+    var month = /^\d{4}-\d{2}$/.test(monthParam || '') ? monthParam
+      : String(now.getFullYear()) + '-' + String(now.getMonth() + 1).padStart(2, '0');
+    var year = Number(month.slice(0, 4));
+    var monthIndex = Number(month.slice(5, 7)) - 1;
+    var daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
+    var days = [];
+    for (var d = 1; d <= daysInMonth; d++) days.push(d);
+
+    var results = await Promise.all([
+      api('/settings/team'),
+      api('/attendance?month=' + month),
+    ]);
+    var team = results[0], rows = results[1];
+
+    // Invited-but-not-joined rows have no user_id yet — nothing to mark
+    // attendance against until they actually have an account.
+    var people = team.members.filter(function (m) { return m.user_id && m.status === 'active'; });
+
+    var byPersonDay = {};
+    rows.forEach(function (r) {
+      byPersonDay[r.user_id + '|' + r.date] = r;
+    });
+
+    var canManage = R.can('attendance.manage');
+    var monthLabel = new Date(year, monthIndex, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+    var prevMonth = monthIndex === 0 ? (year - 1) + '-12' : year + '-' + String(monthIndex).padStart(2, '0');
+    var nextMonth = monthIndex === 11 ? (year + 1) + '-01' : year + '-' + String(monthIndex + 2).padStart(2, '0');
+
+    view.innerHTML = head('Attendance', 'Who was in, and when — one grid per month.') + tabs +
+      '<div class="filter-row justify-between align-center">' +
+        '<div class="btn-row">' +
+          '<a class="btn-quiet" href="#/settings?tab=attendance&month=' + prevMonth + '">&larr; Prev</a>' +
+          '<b>' + esc(monthLabel) + '</b>' +
+          '<a class="btn-quiet" href="#/settings?tab=attendance&month=' + nextMonth + '">Next &rarr;</a>' +
+        '</div>' +
+        '<div class="page-sub">' +
+          ATTENDANCE_STATUSES.map(function (s) { return '<span class="attendance-legend-item">' + s[2] + ' = ' + s[1] + '</span>'; }).join('  ') +
+        '</div>' +
+      '</div>' +
+      (people.length
+        ? '<div class="table-wrap"><table class="data attendance-grid"><thead><tr>' +
+            '<th>Name</th>' +
+            days.map(function (dNum) { return '<th>' + dNum + '</th>'; }).join('') +
+          '</tr></thead><tbody>' +
+            people.map(function (p) {
+              return '<tr>' +
+                '<td class="cell-primary nowrap">' + esc(p.full_name || p.email) + '</td>' +
+                days.map(function (dNum) {
+                  var date = month + '-' + String(dNum).padStart(2, '0');
+                  var mark = byPersonDay[p.user_id + '|' + date];
+                  var meta = mark && attendanceStatusMeta(mark.status);
+                  return '<td class="attendance-cell' + (canManage ? ' is-clickable' : '') + (meta ? ' status-' + mark.status : '') + '"' +
+                    (canManage ? ' data-mark-attendance data-user-id="' + esc(p.user_id) + '" data-user-name="' + esc(p.full_name || p.email) +
+                      '" data-date="' + date + '" data-status="' + (mark ? mark.status : '') + '"' : '') +
+                    '>' + (meta ? meta[2] : '') + '</td>';
+                }).join('') +
+              '</tr>';
+            }).join('') +
+          '</tbody></table></div>'
+        : card(null, R.emptyState('No one to mark yet', 'Invite a team member from the Team & reps tab first.'))) +
+      (canManage
+        ? '<p class="page-sub mt-2">Click any day to mark or correct that person\'s attendance.</p>'
+        : '');
+
+    if (canManage) {
+      R.qsa('[data-mark-attendance]', view).forEach(function (cell) {
+        cell.addEventListener('click', function () {
+          var userId = cell.dataset.userId, userName = cell.dataset.userName;
+          var date = cell.dataset.date, current = cell.dataset.status;
+          R.modal({
+            title: 'Mark attendance — ' + userName,
+            body:
+              '<p class="page-sub mb-2">' + esc(fmtDate(date)) + '</p>' +
+              '<div class="field"><label for="att-status">Status</label>' +
+                '<select class="select" id="att-status" name="status">' +
+                  ATTENDANCE_STATUSES.map(function (s) {
+                    return '<option value="' + s[0] + '"' + (current === s[0] ? ' selected' : '') + '>' + s[1] + '</option>';
+                  }).join('') +
+                '</select></div>' +
+              '<div class="field-row">' +
+                '<div class="field"><label for="att-in">Check-in</label><input class="input" id="att-in" name="check_in_time" type="time"></div>' +
+                '<div class="field"><label for="att-out">Check-out</label><input class="input" id="att-out" name="check_out_time" type="time"></div>' +
+              '</div>' +
+              '<div class="field"><label for="att-notes">Notes</label><textarea class="textarea" id="att-notes" name="notes"></textarea></div>',
+            submitLabel: 'Save',
+            onSubmit: async function (form, close) {
+              var v = R.values(form);
+              await api.post('/attendance', {
+                user_id: userId, date: date, status: v.status,
+                check_in_time: v.check_in_time || null, check_out_time: v.check_out_time || null,
+                notes: v.notes || null,
+              });
+              close();
+              toast('Attendance saved.', 'ok');
+              R.reload();
+            },
+          });
+        });
+      });
+    }
+  }
+
   // The bin. Soft delete is only a real safety net if the person who deleted
   // something by mistake can find it and put it back without asking anyone.
   async function binTab(view, tabs, of) {
@@ -7034,6 +7706,9 @@
     // audit.read itself: a sales director may look at this screen, but
     // walking away with the whole log as a file is a different decision.
     var canExportAudit = R.can('audit.export');
+    // FEATURE — system log with undo. Owner only (audit.undo, same tier as
+    // several of the actions this can reverse).
+    var canUndo = R.can('audit.undo');
 
     view.innerHTML = head('Activity log', 'Who did what, when. Append-only — nothing in this product can edit or delete it.',
       canExportAudit ? '<button class="btn" id="btn-export-audit">Export audit log</button>' : '') + tabs +
@@ -7043,14 +7718,21 @@
         : '') +
 
       card('Actions', table(
-        [{ label: 'When' }, { label: 'Who', hideMobile: true }, { label: 'Action' }, { label: 'Detail' }],
+        [{ label: 'When' }, { label: 'Who', hideMobile: true }, { label: 'Action' }, { label: 'Detail' }, { label: '' }],
         entries,
         function (e) {
           return '<tr>' +
             '<td class="muted nowrap">' + esc(R.fmtDateTime(e.created_at)) + '</td>' +
             '<td class="muted hide-mobile">' + esc(e.actor_email || e.actor_kind) + '</td>' +
             '<td><span class="mono fs-11-5">' + esc(e.action) + '</span></td>' +
-            '<td class="muted">' + esc(e.summary || '') + '</td>' +
+            '<td class="muted">' + esc(e.summary || '') +
+              (e.reversed_at ? '<div class="cell-meta">Undone ' + esc(R.fmtRelative(e.reversed_at)) + '</div>' : '') +
+            '</td>' +
+            '<td class="right">' +
+              (canUndo && e.reversible && !e.reversed_at
+                ? '<button class="btn-quiet" data-undo-audit="' + esc(e.id) + '" data-summary="' + esc(e.summary || e.action) + '">Undo</button>'
+                : '') +
+            '</td>' +
           '</tr>';
         },
         { emptyTitle: 'Nothing recorded yet' }
@@ -7085,6 +7767,25 @@
         }
       });
     }
+
+    // FEATURE — system log with undo.
+    R.qsa('[data-undo-audit]', view).forEach(function (button) {
+      button.addEventListener('click', async function () {
+        var confirmed = await R.confirm({
+          title: 'Undo this action?',
+          message: 'This will reverse: "' + button.dataset.summary + '". Undo is limited to 10 per day for this workspace.',
+          confirmLabel: 'Undo',
+        });
+        if (!confirmed) return;
+        try {
+          await api.patch('/audit/' + button.dataset.undoAudit + '/undo', {});
+          toast('Undone.', 'ok');
+          R.reload();
+        } catch (err) {
+          toast(err.message || 'Could not undo this action.', 'err');
+        }
+      });
+    });
   }
 
   // SECTION 2 — 2FA setup/disable, opened from openAccountModal (realestate.js)

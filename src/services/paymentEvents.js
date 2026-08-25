@@ -29,10 +29,14 @@ const notify = require('./notificationService');
 const { auditSystem } = require('./auditService');
 const { escapeHtml } = require('../utils/escapeHtml');
 const creditScore = require('./creditScoreService');
+const defaultRisk = require('./defaultRiskService');
+const contactTiming = require('./contactTimingService');
+const jointSale = require('./jointSaleService');
 const referrals = require('./referralService');
 const pushService = require('./pushService');
 const portalNotifications = require('./portalNotificationService');
 const featureUsage = require('./featureUsageService');
+const { generateDocument } = require('./documentService');
 
 const naira = (amount) => {
   const n = Number(amount || 0);
@@ -50,6 +54,7 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
     receipt: 'skipped',
     buyer_email: 'skipped',
     buyer_sms: 'skipped',
+    buyer_whatsapp: 'skipped',
     promise: 'none',
     overpayment: Number(overpayment) || 0,
   };
@@ -80,13 +85,24 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
   if (!context) return outcome;
 
   const { payment, schedule, plan, reservation, customer, unit, project, salesRep } = context;
+  const settings = await orgSettings(orgId);
 
   // ── Commission ───────────────────────────────────────────────────────────
   const accrual = await commissions.accrueForPayment({ orgId, payment, reservation, salesRep });
   outcome.commission = accrual.accrued ? `accrued ${naira(accrual.commission.amount)}` : accrual.reason;
 
+  // ── Joint sale — external agent statements (FEATURE — joint sales) ───────
+  // Only when a commission actually accrued — no accrual (no rep, no rate,
+  // already accrued) means nothing to split or state.
+  if (accrual.accrued) {
+    await jointSale.notifyExternalParties(orgId, {
+      reservation, customer, unit, project, payment,
+      commissionAmount: accrual.commission.amount,
+      companyName: settings.company_name,
+    });
+  }
+
   // ── Tell the buyer ───────────────────────────────────────────────────────
-  const settings = await orgSettings(orgId);
   if (settings.notify_on_payment !== false) {
     const projectLine = [project.name, unit.unit_number && `Unit ${unit.unit_number}`]
       .filter(Boolean).join(' · ');
@@ -145,6 +161,28 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
       });
       outcome.buyer_sms = result.status;
     }
+
+    // FEATURE — WhatsApp payment collection loop. "When the Paystack
+    // webhook confirms payment: send a WhatsApp receipt confirmation
+    // automatically" — the last link in the loop (reminder → buyer replies
+    // PAY → Paystack link → pays → receipt), specifically for the Paystack
+    // door: a bank transfer recorded by staff already gets exactly this
+    // information by email and SMS above, and staff were already in the
+    // buyer's conversation to record it. whatsapp_opt_out is honoured here
+    // too, same as every other automated send.
+    if (source === 'paystack' && customer.phone && !customer.whatsapp_opt_out) {
+      const result = await notify.sendWhatsApp({
+        orgId,
+        to: customer.phone,
+        body: `${settings.company_name || 'Your developer'}: payment received! ` +
+          `${naira(payment.amount)} for ${projectLine || 'your unit'}. Balance ${naira(context.balance)}. ` +
+          'Your receipt has been emailed to you.',
+        template: 'payment_receipt_whatsapp',
+        relatedType: 're_payments',
+        relatedId: paymentId,
+      });
+      outcome.buyer_whatsapp = result.status;
+    }
   }
 
   // ── Close the loop on a promise ──────────────────────────────────────────
@@ -169,11 +207,36 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
     await maybeDeescalate(orgId, reservation.id);
   }
 
+  // ── Outright sale completion (FEATURE — outright sales) ──────────────────
+  // An outright reservation always has a one-row plan due immediately (see
+  // routes/reservations.js) — its single schedule row reaching 'paid' IS the
+  // full price arriving, so this is "one payment records the full amount"
+  // exactly, no per-cent tracking needed. Never blocks a payment already in
+  // the database — same rule as everything else in this file.
+  if (reservation.property_type === 'outright' && schedule?.status === 'paid') {
+    try {
+      await completeOutrightSale({ orgId, reservation, unit, source, actor });
+    } catch (err) {
+      console.warn('[payment-events] could not complete outright sale:', err.message);
+    }
+  }
+
   // ── Credit score (SECTION 3) ─────────────────────────────────────────────
   // Every payment can move either the consistency or default-history
   // dimension, so it is recomputed after every one — never throws, per this
   // file's own rule.
   await creditScore.recompute(orgId, customer.id);
+
+  // ── Default risk score (SECTION 5 — feature expansion) ───────────────────
+  // Reservation-scoped, updated after every payment event exactly like the
+  // customer-level credit score just above — see defaultRiskService.js for
+  // why this is a separate number from credit_score rather than the same one.
+  await defaultRisk.recompute(orgId, reservation.id);
+
+  // ── Optimal contact time (SECTION 6 — feature expansion) ──────────────────
+  // A payment is one of the two signals this reads (the other is activity
+  // log entries) — see contactTimingService.js.
+  await contactTiming.recompute(orgId, customer.id);
 
   // ── Referral completion (SECTION 5) ──────────────────────────────────────
   // A no-op unless this customer was referred AND this is their first ever
@@ -229,9 +292,78 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
       commission: outcome.commission,
       overpayment: outcome.overpayment || undefined,
     },
+    // FEATURE — system log with undo. Undoing a recorded payment means
+    // voiding it — undoService.js calls the exact same voidPayment()
+    // paystackService already exposes for a manual void, so this needs
+    // nothing beyond the ids that already identify what to void.
+    reversible: true,
+    reversalData: { payment_id: paymentId, commission_id: accrual.accrued ? accrual.commission.id : null },
   });
 
   return outcome;
+}
+
+// Idempotent on reservation.status: a webhook retry or a second call finding
+// the reservation already 'completed' does nothing further, same reasoning
+// as every other step in this file being safe to run more than once.
+async function completeOutrightSale({ orgId, reservation, unit, source, actor }) {
+  if (reservation.status === 'completed') return;
+
+  // One allocation letter per reservation is a database-enforced rule
+  // (migrations/005's partial unique index) — checked here first, the same
+  // way routes/documents.js's bulk-generate checks superseded_at is null,
+  // so a payment retried after a successful first run never tries to
+  // insert a second live letter for the same reservation.
+  const { data: existingDoc } = await supabaseAdmin
+    .from('re_documents')
+    .select('id')
+    .eq('organization_id', orgId)
+    .eq('reservation_id', reservation.id)
+    .eq('doc_type', 'allocation_letter')
+    .is('superseded_at', null)
+    .maybeSingle();
+
+  if (!existingDoc) {
+    try {
+      const { data: doc, error } = await supabaseAdmin
+        .from('re_documents')
+        .insert({ organization_id: orgId, reservation_id: reservation.id, doc_type: 'allocation_letter' })
+        .select('id')
+        .single();
+      if (error) throw error;
+      await generateDocument(orgId, doc.id);
+    } catch (err) {
+      // A failed render must not stop the reservation from completing — the
+      // sale happened; the letter can be regenerated by hand from Documents.
+      console.warn('[payment-events] outright allocation letter failed:', err.message);
+    }
+  }
+
+  await supabaseAdmin
+    .from('re_reservations')
+    .update({ status: 'completed' })
+    .eq('id', reservation.id)
+    .eq('organization_id', orgId)
+    .neq('status', 'completed');
+
+  if (unit?.id) {
+    await supabaseAdmin
+      .from('re_units')
+      .update({ status: 'sold' })
+      .eq('id', unit.id)
+      .eq('organization_id', orgId);
+  }
+
+  await auditSystem({
+    orgId,
+    actorKind: source === 'paystack' ? 'paystack' : source === 'portal' ? 'portal' : 'user',
+    actorEmail: actor?.email || null,
+    action: 'reservation.completed',
+    entityType: 're_reservations',
+    entityId: reservation.id,
+    summary: 'Outright sale paid in full — reservation completed and allocation letter generated automatically',
+    metadata: { property_type: 'outright', unit_id: unit?.id || null },
+  });
 }
 
 function nextDueBlock(context) {

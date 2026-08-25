@@ -15,6 +15,8 @@ const { lagosToday } = require('./overdueService');
 const { openAndBrokenForBrief } = require('./promiseService');
 const { describeStage } = require('./escalationService');
 const projectHealth = require('./projectHealthService');
+const defaultRisk = require('./defaultRiskService');
+const sentimentService = require('./sentimentService');
 const pushService = require('./pushService');
 const featureUsage = require('./featureUsageService');
 
@@ -118,6 +120,11 @@ async function gatherOrgState(orgId) {
       .select(scheduleSelect)
       .eq('organization_id', orgId)
       .eq('status', 'overdue')
+      // FEATURE — outright sales. A one-off lump sum a few days late is not
+      // the buyer-falling-behind pattern this brief exists to flag — see
+      // routes/dashboard.js's /at-risk route for the identical exclusion
+      // and the same reasoning.
+      .neq('re_installment_plans.re_reservations.property_type', 'outright')
       .order('due_date', { ascending: true }),
     supabaseAdmin
       .from('re_installment_schedule')
@@ -771,6 +778,29 @@ async function generateDailyBrief(orgId) {
   const nothingToReport =
     !state.overdue.length && !state.upcomingWeek.length && !state.pendingDocuments.length;
 
+  // FEATURE — buyer default prediction. Deterministic and numeric (a
+  // ranking by a stored score), so it is computed here directly rather than
+  // asked of the model — an LLM ranking dozens of buyers by a number in a
+  // text prompt is exactly the kind of thing this file's own architecture
+  // (see the module header) keeps out of the model's hands. Attached to the
+  // payload the same way project_health_summary is below: present whether
+  // the brief itself was written by the model or the fallback.
+  let topDefaultRisks = [];
+  try {
+    topDefaultRisks = await defaultRisk.topDefaultRisks(orgId, 3);
+  } catch (err) {
+    console.warn('[re-brief] could not load top default risks:', err.message);
+  }
+
+  // FEATURE — buyer sentiment analysis. Same deterministic, code-computed
+  // treatment as top_default_risks just above.
+  let atRiskSentiment = [];
+  try {
+    atRiskSentiment = await sentimentService.atRiskSentimentBuyers(orgId, 5);
+  } catch (err) {
+    console.warn('[re-brief] could not load at-risk sentiment buyers:', err.message);
+  }
+
   // Attached to the brief's own payload rather than folded into `summary`
   // (which sales_director also reads, per dashboard.js) — the DASHBOARD
   // decides whether to render this block, gated on projectHealth.read
@@ -793,6 +823,8 @@ async function generateDailyBrief(orgId) {
       follow_ups: [],
       recommendations: [],
       project_health_summary: projectHealthSummary,
+      top_default_risks: topDefaultRisks,
+      at_risk_sentiment: atRiskSentiment,
     };
     await storeBrief(orgId, quiet, 'fallback');
     return { ...quiet, generated_by: 'fallback' };
@@ -846,6 +878,8 @@ async function generateDailyBrief(orgId) {
   }
 
   brief.project_health_summary = projectHealthSummary;
+  brief.top_default_risks = topDefaultRisks;
+  brief.at_risk_sentiment = atRiskSentiment;
 
   await storeBrief(orgId, brief, generatedBy);
   await fileRecommendationsAsTasks(orgId, brief.recommendations);

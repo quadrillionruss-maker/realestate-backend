@@ -247,6 +247,12 @@ router.post('/:id/generate', generateLimiter, requirePermission('documents.gener
         previous_storage_path: result.previous_storage_path || undefined,
         superseded_document_id: result.was_regeneration ? req.params.id : undefined,
       },
+      // FEATURE — system log with undo. First-time generation only — a
+      // REGENERATION superseding an earlier version is a different,
+      // more involved reversal (restoring the OLD version as live again)
+      // than resetting a document back to 'pending', and the product spec
+      // names document_generated specifically, not document_regenerated.
+      reversible: !result.was_regeneration,
     });
 
     // signing_url is included so staff can also copy/share it directly

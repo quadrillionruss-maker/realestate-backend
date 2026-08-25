@@ -2,6 +2,7 @@ const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission, assertPermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { summaryByRep, repPerformance } = require('../services/commissionService');
+const { myJointSaleCommissions } = require('../services/jointSaleService');
 const { audit } = require('../services/auditService');
 const router = express.Router();
 
@@ -16,6 +17,18 @@ router.get('/summary', requirePermission('commissions.readAll'), async (req, res
       from: req.query.from || null,
       to: req.query.to || null,
     }));
+  } catch (e) { next(e); }
+});
+
+// FEATURE — joint sales. Always "my own" regardless of role — this answers
+// "what am I personally owed from deals I co-sold", the same question GET
+// / below answers for a rep's ordinary commission lines. See
+// jointSaleService.js's own header for why this is a split of the SAME
+// re_commissions rows summaryByRep/leaderboard already total, not a second
+// source of commission money.
+router.get('/joint-sales', requirePermission('commissions.read'), async (req, res, next) => {
+  try {
+    res.json(await myJointSaleCommissions(req.orgId, req.userId));
   } catch (e) { next(e); }
 });
 

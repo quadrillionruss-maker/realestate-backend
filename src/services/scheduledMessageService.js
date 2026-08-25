@@ -90,16 +90,36 @@ async function checkScheduledMessages() {
     .from('re_scheduled_messages')
     .select(`
       id, organization_id, customer_id, message, scheduled_for,
-      re_customers(full_name, phone)`)
+      re_customers(full_name, phone, whatsapp_opt_out)`)
     .eq('status', 'pending')
     .lte('scheduled_for', nowIso);
   if (error) throw error;
 
   let sent = 0;
   let failed = 0;
+  let optedOut = 0;
 
   await mapWithConcurrency(data || [], SWEEP_CONCURRENCY, async (row) => {
     const customer = row.re_customers || {};
+
+    // FEATURE — WhatsApp payment collection loop / opt-out enforcement.
+    // "Excluded from ALL automated messages" has to mean this sweep too,
+    // not just dealManager.sendWithClearance's own agents — this is a
+    // second, independent send path (a rep's own scheduled follow-up, or
+    // (SECTION 6) collectionsAgent's optimal-time deferral) that reached
+    // straight for notify.sendWhatsApp with no clearance check at all.
+    // Cancelled, not failed: nothing went wrong, and filing the usual
+    // fallback task below would mean asking a rep to chase down someone who
+    // explicitly asked not to be messaged — the opposite of honouring STOP.
+    if (customer.whatsapp_opt_out) {
+      await supabaseAdmin
+        .from('re_scheduled_messages')
+        .update({ status: 'cancelled' })
+        .eq('id', row.id);
+      optedOut += 1;
+      return;
+    }
+
     const result = customer.phone
       ? await notify.sendWhatsApp({
           orgId: row.organization_id,
@@ -133,7 +153,7 @@ async function checkScheduledMessages() {
     if (taskError) console.warn('[scheduled-messages] could not file fallback task:', taskError.message);
   });
 
-  return { evaluated: (data || []).length, sent, failed };
+  return { evaluated: (data || []).length, sent, failed, opted_out: optedOut };
 }
 
 module.exports = { listForCustomer, schedule, cancel, checkScheduledMessages };
