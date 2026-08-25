@@ -569,7 +569,18 @@ const MIGRATION_CHECKPOINTS = {
   '030': 're_hardship_requests', '031': 're_messages', '033': 're_legal_cases',
   '034': 're_financing_requests', '035': 're_handover_checklists', '036': 're_contractors',
   '037': 're_community_posts', '038': 're_project_health', '039': 're_cron_runs',
-  '040': 're_admin_actions',
+  '040': 're_admin_actions', '044': 're_email_templates', '045': 're_push_subscriptions',
+  '047': 're_sessions', '048': 're_receipt_templates', '049': 're_scheduled_messages',
+  '050': 're_satisfaction_surveys', '051': 're_portal_notifications', '052': 're_subscriptions',
+  '053': 're_feature_events', '054': 're_client_errors',
+  // FEATURE EXPANSION SESSION — this map stopped at '040' for several
+  // migrations' worth of new tables (044-054), which meant every one of them
+  // (and everything alter-only in between, via the forward-fill below) read
+  // as "not applied" on the Health tab regardless of the database's real
+  // state. Extended through the current highest migration so the same class
+  // of false negative doesn't recur for this batch.
+  '055': 're_attendance', '059': 're_joint_sales', '060': 're_campaigns',
+  '062': 're_sentiment_cache',
 };
 
 // Reads which migration files exist on disk and, best-effort, whether the
