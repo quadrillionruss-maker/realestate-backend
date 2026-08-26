@@ -78,6 +78,14 @@ async function loadReservationHistory(orgId, reservationId) {
           .eq('organization_id', orgId)
           .in('re_installment_schedule.id', scheduleIds)
           .is('voided_at', null)
+          // AUDIT FIX (F5) — a reallocation row's paid_at is set to whenever
+          // staff processed the reallocation (an arbitrary back-office
+          // action time), not when the buyer actually paid. Counting it as
+          // a real payment event double-counts one genuine transfer and
+          // skews the payment-trend signal — the same exclusion
+          // receiptService.js/commissionService.js already apply when
+          // summing "real" payments.
+          .is('reallocated_from_payment_id', null)
           .order('paid_at', { ascending: true })
       : Promise.resolve({ data: [], error: null }),
     scheduleIds.length

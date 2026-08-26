@@ -26,7 +26,7 @@ const SETTINGS_COLUMNS = `organization_id, company_name, logo_url, address, phon
   resend_from_email, resend_api_key_last4,
   termii_sender_id, termii_api_key_last4,
   referral_reward_type, referral_reward_amount,
-  whatsapp_phone_number_id, whatsapp_business_account_id, whatsapp_token_last4`;
+  whatsapp_phone_number_id, whatsapp_business_account_id, whatsapp_token_last4, whatsapp_app_secret_last4`;
 
 // A logo is a handful of uploads a year, not traffic — this just keeps one
 // account from hammering Storage.
@@ -97,6 +97,7 @@ router.get('/', requirePermission('settings.read'), async (req, res, next) => {
       whatsapp_phone_number_id: null,
       whatsapp_business_account_id: null,
       whatsapp_token_last4: null,
+      whatsapp_app_secret_last4: null,
     };
 
     // A team's logo upload (POST /logo below) writes to teams.logo_url, not
@@ -120,6 +121,7 @@ router.get('/', requirePermission('settings.read'), async (req, res, next) => {
     settings.resend_configured = !!settings.resend_api_key_last4;
     settings.termii_configured = !!settings.termii_api_key_last4;
     settings.whatsapp_configured = !!settings.whatsapp_token_last4;
+    settings.whatsapp_app_secret_configured = !!settings.whatsapp_app_secret_last4;
 
     res.json(settings);
   } catch (e) { next(e); }
@@ -685,6 +687,21 @@ router.put('/whatsapp', requirePermission('settings.write'), async (req, res, ne
       }
     }
 
+    // AUDIT FIX (Security #1) — the App Secret Meta signs inbound webhook
+    // deliveries with. Optional, same as every other secret here: a
+    // workspace that leaves this blank keeps receiving WhatsApp messages
+    // exactly as before, just unverified (see routes/webhooks.js).
+    if (body.whatsapp_app_secret !== undefined) {
+      const appSecret = String(body.whatsapp_app_secret || '').trim();
+      if (appSecret) {
+        updates.whatsapp_app_secret_encrypted = encrypt(appSecret);
+        updates.whatsapp_app_secret_last4 = last4(appSecret);
+      } else {
+        updates.whatsapp_app_secret_encrypted = null;
+        updates.whatsapp_app_secret_last4 = null;
+      }
+    }
+
     if (Object.keys(updates).length === 1) {
       return res.status(400).json({ error: 'No updatable fields provided' });
     }
@@ -692,7 +709,7 @@ router.put('/whatsapp', requirePermission('settings.write'), async (req, res, ne
     const { data, error } = await supabaseAdmin
       .from('re_org_settings')
       .upsert(updates, { onConflict: 'organization_id' })
-      .select('whatsapp_phone_number_id, whatsapp_business_account_id, whatsapp_token_last4')
+      .select('whatsapp_phone_number_id, whatsapp_business_account_id, whatsapp_token_last4, whatsapp_app_secret_last4')
       .single();
     if (error) throw error;
 
@@ -703,7 +720,11 @@ router.put('/whatsapp', requirePermission('settings.write'), async (req, res, ne
         ? (data.whatsapp_token_last4
           ? 'Workspace WhatsApp token updated'
           : 'Workspace WhatsApp token cleared')
-        : 'Workspace WhatsApp phone/business account id updated',
+        : body.whatsapp_app_secret !== undefined
+          ? (data.whatsapp_app_secret_last4
+            ? 'Workspace WhatsApp app secret updated'
+            : 'Workspace WhatsApp app secret cleared')
+          : 'Workspace WhatsApp phone/business account id updated',
       metadata: { whatsapp_configured: !!data.whatsapp_token_last4 },
     });
 
@@ -712,6 +733,8 @@ router.put('/whatsapp', requirePermission('settings.write'), async (req, res, ne
       whatsapp_business_account_id: data.whatsapp_business_account_id,
       whatsapp_token_last4: data.whatsapp_token_last4,
       whatsapp_configured: !!data.whatsapp_token_last4,
+      whatsapp_app_secret_last4: data.whatsapp_app_secret_last4,
+      whatsapp_app_secret_configured: !!data.whatsapp_app_secret_last4,
     });
   } catch (e) { next(e); }
 });

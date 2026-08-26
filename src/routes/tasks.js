@@ -167,7 +167,11 @@ router.patch('/:id/status', requirePermission('tasks.write'), async (req, res, n
       // — reopening a task (status:'open') is not itself an action anyone
       // needs an "undo" for.
       reversible: status === 'done' || status === 'dismissed',
-      reversalData: { previous_status: existing?.status || 'open' },
+      // AUDIT FIX (NF8) — resulting_status lets undoTaskStatusChanged
+      // refuse to fire if the task has since moved on again (done ->
+      // dismissed), rather than blindly overwriting whatever the CURRENT
+      // status is with whatever this one action's "before" was.
+      reversalData: { previous_status: existing?.status || 'open', resulting_status: status },
     });
 
     res.json(data);

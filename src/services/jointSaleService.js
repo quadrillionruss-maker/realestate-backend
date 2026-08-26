@@ -18,7 +18,16 @@ const { escapeHtml } = require('../utils/escapeHtml');
 
 const PARTY_TYPES = ['internal_rep', 'external_agent'];
 const round2 = (value) => Math.round(Number(value) * 100) / 100;
-const naira = (amount) => `₦${round2(amount).toLocaleString('en-NG')}`;
+// AUDIT FIX (F15) — matches receiptService.js/documentService.js's own
+// naira() exactly (whole naira, sign before the symbol) rather than a
+// third, diverging convention: the external-party commission statement PDF
+// used to be able to show kobo-level decimals and a trailing minus sign
+// ("₦-1,234") for the same payment the buyer's own receipt renders as
+// whole naira with a leading one ("-₦1,234").
+const naira = (amount) => {
+  const n = Number(amount || 0);
+  return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
+};
 
 async function getForReservation(orgId, reservationId) {
   const { data: sale, error } = await supabaseAdmin
@@ -49,6 +58,14 @@ function validateParties(parties) {
     if (party.party_type === 'external_agent' && !String(party.agent_name || '').trim()) {
       throw Object.assign(new Error('An external_agent party needs an agent_name.'), { statusCode: 400 });
     }
+    // AUDIT FIX (F12) — notifyExternalParties only ever sends the
+    // commission-statement PDF by email; an external agent saved with only
+    // a phone number was silently dropped from that notification with
+    // nothing surfaced anywhere. Required here instead, so the gap can't
+    // be created in the first place.
+    if (party.party_type === 'external_agent' && !String(party.agent_email || '').trim()) {
+      throw Object.assign(new Error('An external_agent party needs an agent_email — that is how their commission statement is sent.'), { statusCode: 400 });
+    }
     const pct = Number(party.commission_split_percentage);
     if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
       throw Object.assign(new Error('Each party needs a commission_split_percentage between 0 and 100.'), { statusCode: 400 });
@@ -76,32 +93,32 @@ async function createOrReplace(req, reservationId, { parties }) {
     .maybeSingle();
   if (!reservation) return { notFound: true };
 
-  const { data: sale, error: saleErr } = await supabaseAdmin
-    .from('re_joint_sales')
-    .upsert({ organization_id: req.orgId, reservation_id: reservationId }, { onConflict: 'reservation_id' })
-    .select('id')
-    .single();
-  if (saleErr) throw saleErr;
-
-  const { error: deleteErr } = await supabaseAdmin
-    .from('re_joint_sale_parties').delete().eq('joint_sale_id', sale.id);
-  if (deleteErr) throw deleteErr;
-
-  const { data: inserted, error: insertErr } = await supabaseAdmin
-    .from('re_joint_sale_parties')
-    .insert(parties.map((p) => ({
-      joint_sale_id: sale.id,
+  // AUDIT FIX (F8/F9) — delete-then-insert used to be two separate,
+  // non-transactional round trips: two concurrent saves on the same
+  // reservation could interleave them, leaving both the old and new party
+  // rows live at once with a split that no longer sums to 100%.
+  // replace_joint_sale_parties (migrations/064) does the upsert, delete and
+  // insert inside one Postgres transaction, and a deferred constraint
+  // trigger validates the sum only once, at that transaction's commit —
+  // rejecting the whole save outright if it doesn't land on 100%, the same
+  // database-enforced guarantee every other financial invariant in this
+  // product already gets.
+  const { data: inserted, error } = await supabaseAdmin.rpc('replace_joint_sale_parties', {
+    p_org_id: req.orgId,
+    p_reservation_id: reservationId,
+    p_parties: parties.map((p) => ({
       party_type: p.party_type,
       user_id: p.party_type === 'internal_rep' ? p.user_id : null,
       agent_name: p.party_type === 'external_agent' ? String(p.agent_name).trim() : null,
       agent_email: p.agent_email ? String(p.agent_email).trim() : null,
       agent_phone: p.agent_phone ? String(p.agent_phone).trim() : null,
       commission_split_percentage: Number(p.commission_split_percentage),
-    })))
-    .select();
-  if (insertErr) throw insertErr;
+    })),
+  });
+  if (error) throw error;
 
-  return { id: sale.id, reservation_id: reservationId, parties: inserted };
+  const saleId = inserted?.[0]?.joint_sale_id || null;
+  return { id: saleId, reservation_id: reservationId, parties: inserted || [] };
 }
 
 // Pure — each party's share of a given commission amount. Exported so this

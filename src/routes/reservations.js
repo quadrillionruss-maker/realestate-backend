@@ -154,7 +154,7 @@ router.post('/', requirePermission('reservations.create'), async (req, res, next
     }
 
     const [{ data: unit }, { data: customer }] = await Promise.all([
-      supabaseAdmin.from('re_units').select('id, status')
+      supabaseAdmin.from('re_units').select('id, status, list_price')
         .eq('id', unit_id).eq('organization_id', req.orgId).maybeSingle(),
       supabaseAdmin.from('re_customers').select('id, blacklisted, blacklist_reason')
         .eq('id', customer_id).eq('organization_id', req.orgId).maybeSingle(),
@@ -200,6 +200,23 @@ router.post('/', requirePermission('reservations.create'), async (req, res, next
     if (property_type === 'outright') {
       if (!plan || plan.total_amount == null) {
         return res.status(400).json({ error: 'An outright sale needs a total_amount.' });
+      }
+      // AUDIT FIX (F6) — an outright sale auto-completes the moment its one
+      // installment is paid (paymentEvents.completeOutrightSale): the unit
+      // is marked sold and a legally significant allocation letter is
+      // auto-generated with no further review. Pricing it below the unit's
+      // own list price with no one senior involved would let that whole
+      // cascade run on a discount nobody approved. A Sales Executive
+      // pricing below list is refused here; an owner or Head of Sales
+      // creating (or approving) the deal themselves IS the confirmation —
+      // the same reservations.reassign/jointSale asymmetry already used
+      // elsewhere in this file for a decision a rep may see but not make.
+      if (unit.list_price != null && Number(plan.total_amount) < Number(unit.list_price) && isOwnRecordsOnly(req.orgRole)) {
+        return res.status(403).json({
+          error: `This price (₦${Number(plan.total_amount).toLocaleString('en-NG')}) is below the unit's list price `
+            + `(₦${Number(unit.list_price).toLocaleString('en-NG')}). An owner or the Head of Sales must create or `
+            + 'approve a discounted outright sale.',
+        });
       }
       plan.number_of_installments = 1;
       plan.frequency = 'monthly'; // irrelevant to a single installment; installmentService still wants a value
@@ -619,6 +636,26 @@ router.get('/:id/default-risk', requirePermission('atRisk.read'), async (req, re
 // for the same reason.
 router.get('/:id/joint-sale', requirePermission('reservations.read'), async (req, res, next) => {
   try {
+    // Same boundary as every other :id-scoped route in this file: a Sales
+    // Executive may see their OWN deal's split, never a colleague's — a
+    // commission-split percentage and an external agent's identity are
+    // exactly the kind of thing "never see another executive's book" exists
+    // to cover, and reservations.read alone (broad enough to include
+    // sales_rep, for the "can see their own split" case) does not narrow
+    // that on its own.
+    if (isOwnRecordsOnly(req.orgRole)) {
+      const { data: existing } = await supabaseAdmin
+        .from('re_reservations')
+        .select('sales_rep_id')
+        .eq('id', req.params.id)
+        .eq('organization_id', req.orgId)
+        .maybeSingle();
+      const repIds = await salesRepIdsFor(req);
+      if (!existing || !existing.sales_rep_id || !repIds.includes(existing.sales_rep_id)) {
+        return res.status(404).json({ error: 'Reservation not found' });
+      }
+    }
+
     const result = await jointSale.getForReservation(req.orgId, req.params.id);
     if (!result) return res.status(404).json({ error: 'This reservation has no joint sale on file.' });
     res.json(result);

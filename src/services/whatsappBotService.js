@@ -149,7 +149,7 @@ async function findCustomerByWhatsAppNumber(orgId, fromNumber) {
 
   const { data: candidates } = await supabaseAdmin
     .from('re_customers')
-    .select('id, full_name, phone, email')
+    .select('id, full_name, phone, email, whatsapp_opt_out')
     .eq('organization_id', orgId)
     .ilike('phone', `%${last10}`);
 
@@ -211,7 +211,34 @@ async function handleNextPayment(orgId, customer) {
     + (next.status === 'overdue' ? ' — this is currently overdue.' : '.');
 }
 
+// AUDIT FIX (NF3) — long enough that a buyer's own retry/impatience within
+// a normal conversation doesn't mint a second Paystack transaction, short
+// enough that someone who genuinely needs a fresh link a few minutes later
+// (the first one failed to open, they changed their mind about paying now)
+// isn't stuck waiting.
+const PAY_NOW_COOLDOWN_MS = 5 * 60 * 1000;
+
 async function handlePayNow(orgId, customer) {
+  // Every inbound-message reply shares one template ('whatsapp_bot_reply'),
+  // so this can't filter on that alone — a payment link is the one reply
+  // that ever contains a Paystack checkout URL, which is what actually
+  // distinguishes it from a balance/receipt/next-payment reply.
+  const { data: recentLink } = await supabaseAdmin
+    .from('re_notifications')
+    .select('created_at')
+    .eq('organization_id', orgId)
+    .eq('channel', 'whatsapp')
+    .eq('related_type', 're_customers')
+    .eq('related_id', customer.id)
+    .ilike('body', '%paystack%')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (recentLink && Date.now() - new Date(recentLink.created_at).getTime() < PAY_NOW_COOLDOWN_MS) {
+    return `Hi ${customer.full_name}, we already sent you a payment link a few minutes ago — please check your recent messages.`;
+  }
+
   const { rows } = await loadActiveScheduleRows(orgId, customer.id);
   const open = rows
     .filter((r) => r.status === 'pending' || r.status === 'overdue')
@@ -347,13 +374,27 @@ async function handleInboundMessage({ phoneNumberId, from, text }) {
       return;
     }
 
+    // Everything past this point is an automated reply — sentiment
+    // classification, intent classification, and all five mini-app
+    // handlers below. An opted-out buyer gets NONE of it; STOP/START just
+    // above are the only two commands this bot ever answers once opted out.
+    if (customer.whatsapp_opt_out) return;
+
     // FEATURE — buyer sentiment analysis. Every genuine inbound message
     // past this point (not a bare STOP/START command) updates the buyer's
     // latest_sentiment — never awaited into the rest of this handler's
     // outcome (see sentimentService's own "never throws" rule), so a
     // classification hiccup cannot stop the buyer from getting their
     // balance/receipt/payment-link reply.
-    await sentimentService.updateCustomerSentiment(orgId, customer.id, text);
+    //
+    // AUDIT FIX (NF11) — this comment always claimed "not awaited", but the
+    // code below it was awaited anyway: classifySentiment's OpenAI call has
+    // a 12-second timeout, so every genuine inbound message waited up to
+    // 12 extra seconds — on Nigerian mobile networks — before the bot's
+    // actual reply went out, for a secondary analytics feature that never
+    // needs its result. Now genuinely fire-and-forget, matching what the
+    // comment always said was happening.
+    sentimentService.updateCustomerSentiment(orgId, customer.id, text).catch(() => {});
 
     // SECTION 11 — a reply to a collections conversation ("I will pay
     // Friday", "already paid", "can't pay") means something specific that

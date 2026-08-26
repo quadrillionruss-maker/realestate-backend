@@ -162,6 +162,14 @@ function buildReceiptHtml(context, branding = {}, receiptNumber, receiptTemplate
     vatRowsBlock = `<tr><td>Subtotal</td><td>${naira(subtotal)}</td></tr>`
       + `<tr><td>VAT (${payment.vat_rate}%)</td><td>${naira(vatAmount)}</td></tr>`
       + `<tr><td>Total${payment.vat_inclusive ? '' : ' (incl. VAT)'}</td><td>${naira(total)}</td></tr>`;
+  } else if (payment.reallocated_from_payment_id) {
+    // AUDIT FIX (F14) — a reallocated payment deliberately carries no
+    // vat_amount of its own (paystackService.js's own comment: the credit
+    // it moves was already taxed once, on the original payment's own
+    // receipt — applying VAT again here would double-count it). Left
+    // silently blank, that read as an omission to anyone reviewing the
+    // receipt on a VAT-enabled workspace; this states the reason instead.
+    vatRowsBlock = '<tr><td>VAT</td><td>Included in the receipt for the original payment</td></tr>';
   }
 
   const purpose = schedule

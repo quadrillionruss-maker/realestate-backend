@@ -36,11 +36,17 @@ async function report({ orgId, userId, app, message, stack, screen, url, userAge
 async function list() {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
+  // AUDIT FIX (P7) — bounded only by the 30-day window before this, unlike
+  // every comparable "recent activity" list elsewhere in the admin surface
+  // (adminService.agentActionsLog, routes/logs.js's own GET /), both of
+  // which cap at 500. A platform having a genuinely bad day (a client bug
+  // firing repeatedly across many sessions) had no ceiling here.
   const { data: rows, error } = await supabaseRaw
     .from('re_client_errors')
     .select('id, organization_id, user_id, app, message, stack, screen, url, user_agent, created_at, resolved_at')
     .gte('created_at', since)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(2000);
   if (error) throw error;
 
   const orgIds = [...new Set((rows || []).map((r) => r.organization_id).filter(Boolean))];

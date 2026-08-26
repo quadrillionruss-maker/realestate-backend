@@ -56,7 +56,10 @@ async function overview() {
     { count: activeWorkspaces },
     { count: totalBuyers },
     { count: totalPayments },
-    { data: collectedRows },
+    // AUDIT FIX (P2) — used to fetch the `amount` column of every
+    // non-voided payment on the whole platform just to sum it here; the
+    // sum is now computed in Postgres (migrations/068).
+    { data: totalCollectionsRow },
     { data: lastRun },
   ] = await Promise.all([
     supabaseRaw.from('teams').select('id', { count: 'exact', head: true }),
@@ -64,14 +67,14 @@ async function overview() {
     supabaseRaw.from('users').select('id', { count: 'exact', head: true }).gte('last_login_at', sevenDaysAgo()),
     db.from('re_customers').select('id', { count: 'exact', head: true }),
     db.from('re_payments').select('id', { count: 'exact', head: true }).is('voided_at', null),
-    db.from('re_payments').select('amount').is('voided_at', null),
+    supabaseRaw.rpc('admin_total_collections'),
     supabaseRaw.from('re_cron_runs').select('job_name, started_at, finished_at').order('started_at', { ascending: false }).limit(1),
   ]);
 
   // Workspaces here means teams; a solo account (no teams row) is still a
   // real workspace but is counted through totalUsers instead — team count
   // alone would undercount the platform by every solo signup.
-  const totalCollections = (collectedRows || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const totalCollections = Number(totalCollectionsRow || 0);
 
   return {
     total_workspaces: totalWorkspaces || 0,
@@ -112,30 +115,23 @@ async function listWorkspaces() {
 
   if (!orgIds.length) return [];
 
+  // AUDIT FIX (P1) — this used to fetch the full organization_id column of
+  // five platform-wide tables (including re_ai_briefs, which gains a new
+  // row per org every single day forever) just to count rows per org here.
+  // admin_workspace_counts (migrations/068) returns one already-grouped row
+  // per organization instead of one row per underlying record.
   const [
-    { data: projects, error: projErr },
-    { data: units, error: unitsErr },
-    { data: customers, error: custErr },
-    { data: reservations, error: resErr },
-    { data: payments, error: payErr },
+    { data: workspaceCounts, error: countsErr },
     { data: briefs, error: briefErr },
     { data: agentActions, error: agentErr },
     { data: settings, error: settingsErr },
   ] = await Promise.all([
-    db.from('re_projects').select('organization_id'),
-    db.from('re_units').select('organization_id'),
-    db.from('re_customers').select('organization_id'),
-    db.from('re_reservations').select('organization_id'),
-    db.from('re_payments').select('organization_id').is('voided_at', null),
+    supabaseRaw.rpc('admin_workspace_counts'),
     supabaseRaw.from('re_ai_briefs').select('organization_id, created_at').order('created_at', { ascending: false }),
     supabaseRaw.from('re_agent_actions').select('organization_id').gte('created_at', sevenDaysAgo()),
     supabaseRaw.from('re_org_settings').select('organization_id, whatsapp_token_encrypted, paystack_secret_key_encrypted'),
   ]);
-  if (projErr) throw projErr;
-  if (unitsErr) throw unitsErr;
-  if (custErr) throw custErr;
-  if (resErr) throw resErr;
-  if (payErr) throw payErr;
+  if (countsErr) throw countsErr;
   if (briefErr) throw briefErr;
   if (agentErr) throw agentErr;
   if (settingsErr) throw settingsErr;
@@ -145,11 +141,11 @@ async function listWorkspaces() {
     for (const row of rows || []) map.set(row.organization_id, (map.get(row.organization_id) || 0) + 1);
     return map;
   };
-  const projectCounts = countBy(projects);
-  const unitCounts = countBy(units);
-  const customerCounts = countBy(customers);
-  const reservationCounts = countBy(reservations);
-  const paymentCounts = countBy(payments);
+  const projectCounts = new Map((workspaceCounts || []).map((r) => [r.organization_id, Number(r.project_count)]));
+  const unitCounts = new Map((workspaceCounts || []).map((r) => [r.organization_id, Number(r.unit_count)]));
+  const customerCounts = new Map((workspaceCounts || []).map((r) => [r.organization_id, Number(r.customer_count)]));
+  const reservationCounts = new Map((workspaceCounts || []).map((r) => [r.organization_id, Number(r.reservation_count)]));
+  const paymentCounts = new Map((workspaceCounts || []).map((r) => [r.organization_id, Number(r.payment_count)]));
   const agentActionCounts = countBy(agentActions);
 
   const lastBriefByOrg = new Map();
@@ -508,10 +504,14 @@ async function agentActionsLog({ orgId, agentName, outcome } = {}) {
 
 // ── Notifications ───────────────────────────────────────────────────────────
 async function notificationStats() {
-  const [{ count: total }, { count: failed }, { data: allRows }, { data: failedRows, error: failedErr }] = await Promise.all([
+  // AUDIT FIX (P3) — this used to fetch the `channel` column of the
+  // ENTIRE re_notifications table (append-only, retained forever per
+  // CLAUDE.md's "Data retention" section) just to bucket counts by channel
+  // in JavaScript; grouped in Postgres instead (migrations/068).
+  const [{ count: total }, { count: failed }, { data: byChannelRows, error: byChannelErr }, { data: failedRows, error: failedErr }] = await Promise.all([
     supabaseRaw.from('re_notifications').select('id', { count: 'exact', head: true }),
     supabaseRaw.from('re_notifications').select('id', { count: 'exact', head: true }).eq('status', 'failed'),
-    supabaseRaw.from('re_notifications').select('channel'),
+    supabaseRaw.rpc('admin_notification_counts_by_channel'),
     // TASK 3 FOLLOW-UP FIX — the column is `error` (migrations/003), not
     // `reason`; nothing caught this at write time since supabase-js only
     // reports a bad column name once the query actually runs.
@@ -521,10 +521,11 @@ async function notificationStats() {
       .order('created_at', { ascending: false })
       .limit(100),
   ]);
+  if (byChannelErr) throw byChannelErr;
   if (failedErr) throw failedErr;
 
   const byType = {};
-  for (const row of allRows || []) byType[row.channel] = (byType[row.channel] || 0) + 1;
+  for (const row of byChannelRows || []) byType[row.channel] = Number(row.cnt);
 
   return {
     total_sent: total || 0,
@@ -581,6 +582,12 @@ const MIGRATION_CHECKPOINTS = {
   // of false negative doesn't recur for this batch.
   '055': 're_attendance', '059': 're_joint_sales', '060': 're_campaigns',
   '062': 're_sentiment_cache',
+  // AUDIT FIX SESSION — same class of gap, caught this time before it could
+  // recur: 072 is the only migration in this audit-fix batch (063-072) that
+  // creates a genuinely new table (the rest are alter-only constraint/index/
+  // function changes, which the forward-fill below already reports
+  // correctly). Everything from 063 up to it forward-fills from this entry.
+  '072': 're_processed_whatsapp_messages',
 };
 
 // Reads which migration files exist on disk and, best-effort, whether the
@@ -600,13 +607,26 @@ async function migrationStatus() {
     return [];
   }
 
+  // AUDIT FIX (P8) — one round trip instead of one per checkpoint (currently
+  // in the high 20s, growing by roughly one per future feature migration
+  // that introduces a new table). admin_tables_exist (migrations/071) does
+  // the existence check for every table name in a single query.
+  const prefixesByTable = new Map();
+  for (const [prefix, table] of Object.entries(MIGRATION_CHECKPOINTS)) {
+    if (!prefixesByTable.has(table)) prefixesByTable.set(table, []);
+    prefixesByTable.get(table).push(prefix);
+  }
+  const { data: existenceRows, error: existenceErr } = await supabaseRaw.rpc('admin_tables_exist', {
+    table_names: [...prefixesByTable.keys()],
+  });
+  if (existenceErr) throw existenceErr;
+
   const checkpointApplied = {};
-  await Promise.all(
-    Object.entries(MIGRATION_CHECKPOINTS).map(async ([prefix, table]) => {
-      const { error } = await supabaseRaw.from(table).select('*').limit(0);
-      checkpointApplied[prefix] = !error;
-    })
-  );
+  for (const row of existenceRows || []) {
+    for (const prefix of prefixesByTable.get(row.table_name) || []) {
+      checkpointApplied[prefix] = row.table_exists;
+    }
+  }
 
   // Forward-fill: an alter-only file between two checkpoints is reported
   // applied exactly when the next checkpoint at or after it is.

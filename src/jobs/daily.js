@@ -27,6 +27,7 @@ const { sweepOverdueContractorPayments } = require('../services/contractorServic
 const { computeAndStoreForAllProjects } = require('../services/projectHealthService');
 const { sweepExpiredDocuments } = require('../services/documentService');
 const { checkScheduledMessages } = require('../services/scheduledMessageService');
+const { sendDueScheduledCampaigns } = require('../services/campaignService');
 const { mapWithConcurrency } = require('../utils/concurrency');
 const collectionsAgent = require('../services/collectionsAgent');
 const documentAgent = require('../services/documentAgent');
@@ -282,6 +283,18 @@ async function runScheduledMessagesCheck() {
   return result;
 }
 
+// AUDIT FIX (D5) — same hourly cadence as the scheduled-message sweep
+// above, for the identical reason: a campaign scheduled for 2pm must not
+// sit unsent until the next morning's brief run (there isn't one for
+// campaigns at all otherwise).
+async function runScheduledCampaignsCheck() {
+  const result = await sendDueScheduledCampaigns();
+  if (result.evaluated) {
+    console.log(`[re-scheduled-campaigns] ${result.sent} sent, ${result.failed} failed`);
+  }
+  return result;
+}
+
 // TASK 1 — wraps a scheduled run (not every direct call of runDailyJob/
 // runEveningSweep, which tests and smoke scripts also make) with a
 // re_cron_runs row, so the admin dashboard's Health section has something to
@@ -307,6 +320,7 @@ async function recordedRun(jobName, fn) {
 let task = null;
 let eveningTask = null;
 let scheduledMessagesTask = null;
+let scheduledCampaignsTask = null;
 
 function start() {
   if (env.cron.disabled) {
@@ -328,9 +342,15 @@ function start() {
       .catch((err) => console.error('[re-scheduled-messages] check failed:', err.message));
   }, { timezone: 'Africa/Lagos' });
 
+  scheduledCampaignsTask = cron.schedule(SCHEDULED_MESSAGES_SCHEDULE, () => {
+    recordedRun('scheduled_campaigns', runScheduledCampaignsCheck)
+      .catch((err) => console.error('[re-scheduled-campaigns] check failed:', err.message));
+  }, { timezone: 'Africa/Lagos' });
+
   console.log(`[re-daily] scheduled "${SCHEDULE}" Africa/Lagos (brief)`);
   console.log(`[re-daily] scheduled "${EVENING_SCHEDULE}" Africa/Lagos (post-cutoff sweep)`);
   console.log(`[re-daily] scheduled "${SCHEDULED_MESSAGES_SCHEDULE}" Africa/Lagos (scheduled messages)`);
+  console.log(`[re-daily] scheduled "${SCHEDULED_MESSAGES_SCHEDULE}" Africa/Lagos (scheduled campaigns)`);
   return task;
 }
 

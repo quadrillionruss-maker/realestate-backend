@@ -27,7 +27,7 @@
  * general-purpose offline replica of the whole product.
  */
 
-var SHELL_CACHE = 'archta-shell-v1';
+var SHELL_CACHE = 'archta-shell-v2';
 var DATA_CACHE = 'archta-data-v1';
 var CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 

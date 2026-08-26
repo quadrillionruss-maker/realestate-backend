@@ -52,7 +52,9 @@ router.get('/:id', requirePermission('campaigns.read'), async (req, res, next) =
 
 router.get('/:id/deliveries', requirePermission('campaigns.read'), async (req, res, next) => {
   try {
-    const result = await campaigns.deliveries(req.orgId, req.params.id);
+    const result = await campaigns.deliveries(req.orgId, req.params.id, {
+      limit: req.query.limit, offset: req.query.offset,
+    });
     if (!result) return res.status(404).json({ error: 'Campaign not found' });
     res.json(result);
   } catch (e) { next(e); }
@@ -76,7 +78,7 @@ router.patch('/:id', requirePermission('campaigns.write'), async (req, res, next
 
 router.post('/:id/send', requirePermission('campaigns.send'), async (req, res, next) => {
   try {
-    const result = await campaigns.send(req, req.params.id);
+    const result = await campaigns.send(req.orgId, req.params.id);
     if (result.notFound) return res.status(404).json({ error: 'Campaign not found' });
 
     audit(req, {

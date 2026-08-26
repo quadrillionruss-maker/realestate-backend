@@ -17,11 +17,21 @@ const router = express.Router();
 // file — keyed on req.orgId so it caps the whole team's undo activity
 // together, the same way a single accidental-bulk-action recovery tool
 // should be bounded regardless of who on the team is doing the clicking.
+// AUDIT FIX (Security #5 / NF10) — skipFailedRequests means a 404/400 (a
+// bad id, "already undone", "not reversible") never touches the budget —
+// an owner probing which entries are undoable, or a UI double-click, no
+// longer burns through this tiny daily allowance without ever succeeding.
+// This limiter is also now mounted AFTER requirePermission('audit.undo')
+// on the route below (it used to run first): counting a request that was
+// going to be rejected anyway meant any workspace member with zero undo
+// permission could send ten throwaway requests and exhaust the OWNER's
+// entire daily budget before the owner ever needed it.
 const undoLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000,
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
+  skipFailedRequests: true,
   keyGenerator: (req) => req.orgId,
   message: { error: 'Undo is limited to 10 per day for this workspace. Try again tomorrow.' },
 });
@@ -192,7 +202,7 @@ router.get('/export', auditExportLimiter, requirePermission('audit.export'), asy
 
 // FEATURE — system log with undo. Owner only (audit.undo, permissions.js) —
 // several of the actions this can reverse are themselves owner-gated.
-router.patch('/:id/undo', undoLimiter, requirePermission('audit.undo'), async (req, res, next) => {
+router.patch('/:id/undo', requirePermission('audit.undo'), undoLimiter, async (req, res, next) => {
   try {
     const result = await undoService.undo(req, req.params.id);
     if (result.notFound) return res.status(404).json({ error: 'Audit entry not found' });

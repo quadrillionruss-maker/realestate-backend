@@ -598,6 +598,17 @@
       ]);
 
       var d = results[0], atRisk = results[1], tasks = results[2], onboarding = results[3];
+      // AUDIT FIX (DC4) — d.overdue/d.open_tasks/d.projects are read below
+      // with plain dot-access, unlike the brief-related fields further down
+      // this same function, which are all consistently guarded. Safe today
+      // only because routes/dashboard.js always returns these three keys
+      // unconditionally on every success response — normalized once here so
+      // a future backend change that makes any of them conditionally absent
+      // (the way latest_brief/critical_projects already are, per role)
+      // degrades to "0/empty" instead of crashing the whole dashboard.
+      d.overdue = d.overdue || { count: 0, amount: 0 };
+      d.open_tasks = d.open_tasks || { total: 0, from_ai: 0 };
+      d.projects = d.projects || [];
       // The 4 KPI tiles read a lot better as ₦28.5m than ₦28,450,000 once
       // the grid has collapsed to one column — checked at render time, not
       // in a media query, because there is no CSS way to swap which STRING
@@ -844,6 +855,18 @@
             '</div>'
           : '') +
 
+        // AUDIT FIX (NF5) — the API has computed this split since outright
+        // sales shipped; nothing ever rendered it, so a developer selling
+        // both outright and installment units had no way to see which
+        // actually drove this month's number. Same "only shown once there
+        // is something to report" convention as the rental split above.
+        (d.collected_outright_this_month
+          ? '<div class="grid cols-2 mt-2">' +
+              stat('Outright sales this month', naira(d.collected_outright_this_month), { tone: 'gold' }) +
+              stat('Installment collections this month', naira(d.collected_installment_this_month)) +
+            '</div>'
+          : '') +
+
         // ZONE 3 — at risk, full width, the third and last thing this screen
         // leads with. Capped at 5 (not 6): "who to call" is a short list to
         // scan before the first call of the day, not a second table.
@@ -1007,6 +1030,13 @@
   // Okafor" matches before a shorter name that happens to be a substring of
   // it. Always returns escaped, safe-to-insert HTML, even with an empty map.
   function linkifyBuyerNames(text, nameMap) {
+    // AUDIT FIX (DC3) — pattern.exec(text) coerces a non-string text to
+    // the string "undefined" for MATCHING purposes only; the text.slice()
+    // calls below still operate on the real (non-string) variable, which
+    // throws if a match is ever found. Currently unreachable (every
+    // aiBrief.js code path populates brief.summary), but a malformed or
+    // manually-edited brief row would otherwise crash the whole dashboard.
+    if (typeof text !== 'string') return esc(text);
     var names = Object.keys(nameMap).filter(Boolean).sort(function (a, b) { return b.length - a.length; });
     if (!names.length) return esc(text);
     var pattern = new RegExp('(' + names.map(function (n) {
@@ -1185,7 +1215,14 @@
   // is sessionStorage-backed and can change from outside this render entirely.
   function whatsappQueueBannerHtml() {
     var queue = R.whatsappQueue.current();
-    if (!queue) return '';
+    // AUDIT FIX (DC2) — queue is read straight off sessionStorage
+    // (readWhatsappQueue), which survives a reload and outlives this
+    // browser tab's own code — a shape it wrote before a future change to
+    // this object's fields would sit there un-versioned and mismatched.
+    // Guarding queue.items being an array (not just queue itself) is what
+    // keeps that a "the banner quietly doesn't show" case rather than a
+    // full dashboard crash.
+    if (!queue || !Array.isArray(queue.items)) return '';
     return '<div class="notice info mb-2 flex-row justify-between align-center gap-10">' +
       '<span>Sending ' + (queue.index + 1) + ' of ' + queue.total +
         ' — ' + esc(queue.items[queue.index] ? queue.items[queue.index].name : '') + '</span>' +
@@ -3073,6 +3110,15 @@
                 ? '<button class="btn-quiet" id="d-unblacklist">Unblacklist</button>'
                 : '<button class="btn-quiet" id="d-blacklist">Blacklist buyer</button>')
             : '') +
+          // AUDIT FIX (NF2) — the only product path to this used to be the
+          // buyer themselves texting STOP/START; a request made by phone or
+          // email had nowhere to go except a direct, unaudited database
+          // write. Director-tier, same as the blacklist toggle beside it.
+          (R.can('customers.whatsappOptOut')
+            ? '<button class="btn-quiet" id="d-wa-optout">' +
+                (c.whatsapp_opt_out ? 'Re-subscribe to WhatsApp' : 'Opt out of WhatsApp') +
+              '</button>'
+            : '') +
         '</div>' +
 
         reservations.map(function (r) {
@@ -3275,6 +3321,21 @@
         if (!confirmed) return;
         await api.post('/customers/' + c.id + '/unblacklist');
         toast(c.full_name + ' unblacklisted.', 'ok');
+        openCustomer(id);
+      });
+
+      R.onClick(panel.body, '#d-wa-optout', async function () {
+        var optingOut = !c.whatsapp_opt_out;
+        var confirmed = await R.confirm({
+          title: (optingOut ? 'Opt out ' : 'Re-subscribe ') + c.full_name + '?',
+          message: optingOut
+            ? 'They will stop receiving payment reminders, receipts and campaign messages over WhatsApp.'
+            : 'They will start receiving automated WhatsApp messages again.',
+          confirmLabel: optingOut ? 'Opt out' : 'Re-subscribe',
+        });
+        if (!confirmed) return;
+        await api.patch('/customers/' + c.id, { whatsapp_opt_out: optingOut });
+        toast(c.full_name + (optingOut ? ' opted out of WhatsApp.' : ' re-subscribed to WhatsApp.'), 'ok');
         openCustomer(id);
       });
 
@@ -3737,10 +3798,23 @@
       (repRow
         ? '<div class="field"><label>Sales rep</label><select class="select js-party-user" data-user-id="' + esc(party.user_id || '') + '"></select></div>'
         : '<div class="field"><label>Agent name</label><input class="input js-party-name" value="' + esc(party.agent_name || '') + '" placeholder="Full name"></div>' +
-          '<div class="field"><label>Email</label><input class="input js-party-email" type="email" value="' + esc(party.agent_email || '') + '"></div>' +
+          // AUDIT FIX (F12) — required: this is how the agent's commission
+          // statement is actually sent (jointSaleService.notifyExternalParties
+          // emails it, and only emails it); an agent saved with no email was
+          // silently skipped with no statement ever reaching them.
+          '<div class="field"><label>Email</label><input class="input js-party-email" type="email" required value="' + esc(party.agent_email || '') + '"></div>' +
           '<div class="field"><label>Phone</label><input class="input js-party-phone" value="' + esc(party.agent_phone || '') + '"></div>') +
-      '<div class="field"><label>Split %</label><input class="input js-party-pct" type="number" min="0.01" max="100" step="0.01" value="' + esc(party.commission_split_percentage || '') + '"></div>' +
-      '<button type="button" class="icon-btn js-remove-party" aria-label="Remove">×</button>' +
+      // AUDIT FIX (FE4) — the split-% field and the remove button share ONE
+      // grid cell (via flex) instead of each being its own cell in the
+      // fixed 2-column .field-row grid: an internal_rep row now has 2 real
+      // cells (select, this combined one) and an external_agent row has 4
+      // (name/email/phone, this combined one) — both divide evenly, where
+      // 3 and 5 did not, which used to leave the remove button orphaned
+      // alone on its own row.
+      '<div class="field flex-row align-end">' +
+        '<div class="field" style="flex:1;margin-bottom:0"><label>Split %</label><input class="input js-party-pct" type="number" min="0.01" max="100" step="0.01" value="' + esc(party.commission_split_percentage || '') + '"></div>' +
+        '<button type="button" class="icon-btn js-remove-party" aria-label="Remove">×</button>' +
+      '</div>' +
     '</div>';
   }
 
@@ -3854,7 +3928,13 @@
           canWrite ? '<button class="btn primary" id="btn-new-campaign">New campaign</button>' : '') +
         card(null, table(
           [{ label: 'Name' }, { label: 'Type' }, { label: 'Audience', hideMobile: true }, { label: 'Status' },
-            { label: 'Sent', num: true, hideMobile: true }, { label: 'Failed', num: true, hideMobile: true }, { label: '' }],
+            { label: 'Sent', num: true, hideMobile: true },
+            // AUDIT FIX (D2) — shown separately from Failed: a skip (no
+            // email/phone on file, opted out) is not a delivery problem,
+            // and folding it into "Failed" made a buyer list with a lot of
+            // missing contact info read as a send that went badly wrong.
+            { label: 'Skipped', num: true, hideMobile: true },
+            { label: 'Failed', num: true, hideMobile: true }, { label: '' }],
           list,
           function (c) {
             return '<tr>' +
@@ -3863,6 +3943,7 @@
               '<td class="muted hide-mobile">' + esc(campaignAudienceLabel(c.target_filter)) + '</td>' +
               '<td>' + badge(c.status) + '</td>' +
               '<td class="num hide-mobile">' + c.sent_count + '</td>' +
+              '<td class="num hide-mobile muted">' + (c.skipped_count || 0) + '</td>' +
               '<td class="num hide-mobile ' + (c.failed_count ? 'clay' : 'muted') + '">' + c.failed_count + '</td>' +
               '<td class="right">' +
                 (c.status !== 'sent' && canSend
@@ -3878,18 +3959,23 @@
           }
         ), { flush: true });
 
-      R.qsa('[data-send-campaign]', view).forEach(function (button) {
-        button.addEventListener('click', async function () {
-          var confirmed = await R.confirm({
-            title: 'Send campaign',
-            message: 'Send "' + button.dataset.name + '" now? This cannot be undone.',
-            confirmLabel: 'Send',
-          });
-          if (!confirmed) return;
-          var result = await api.post('/campaigns/' + button.dataset.sendCampaign + '/send', {});
-          toast('Sent to ' + result.sent_count + ' buyers' + (result.failed_count ? ', ' + result.failed_count + ' failed' : '') + '.', 'ok');
-          R.reload();
+      // AUDIT FIX (FE2) — R.onClick disables the button (and shows
+      // is-working) for the whole duration of the handler, re-enabling only
+      // in a finally — the raw addEventListener this replaced had no such
+      // guard, so an impatient double-click (or a retry after a slow
+      // network — this product is built around unreliable Nigerian
+      // connections) could fire the send request twice before the first
+      // one's response ever came back.
+      R.onClick(view, '[data-send-campaign]', async function (node) {
+        var confirmed = await R.confirm({
+          title: 'Send campaign',
+          message: 'Send "' + node.dataset.name + '" now? This cannot be undone.',
+          confirmLabel: 'Send',
         });
+        if (!confirmed) return;
+        var result = await api.post('/campaigns/' + node.dataset.sendCampaign + '/send', {});
+        toast('Sent to ' + result.sent_count + ' buyers' + (result.failed_count ? ', ' + result.failed_count + ' failed' : '') + '.', 'ok');
+        R.reload();
       });
 
       R.qsa('#btn-new-campaign, #btn-empty-campaign', view).forEach(function (b) {
@@ -6041,6 +6127,10 @@
       var canHeatmap = R.can('reports.heatmap');
       // SECTION 18 — same DIRECTORS tier as the three above.
       var canSatisfaction = R.can('reports.satisfaction');
+      // FEATURE — VAT compliance. Same DIRECTORS tier as every other report
+      // on this screen — the return this workspace's own accountant needs,
+      // not the owner-only strategic view reports.investor is.
+      var canVat = R.can('reports.vat');
       var leaderboardPeriod = LEADERBOARD_PERIODS.indexOf(query.period) >= 0 ? query.period : 'all_time';
 
       var results = await Promise.all([
@@ -6055,10 +6145,12 @@
         canLeaderboard ? api('/reports/leaderboard?period=' + leaderboardPeriod) : Promise.resolve(null),
         canHeatmap ? api('/reports/payment-heatmap') : Promise.resolve(null),
         canSatisfaction ? api('/reports/satisfaction') : Promise.resolve(null),
+        canVat ? api('/reports/vat') : Promise.resolve(null),
       ]);
       var report = results[0], collections = results[1], rental = results[2], referralStats = results[3], forecast = results[4];
       var legalSummary = results[5], legalCases = results[6], financingRequests = results[7];
       var leaderboard = results[8], heatmap = results[9], satisfaction = results[10];
+      var vatReport = results[11];
       var t = report && report.totals;
       // Only a developer who actually runs a rental portfolio sees this
       // section — nothing to report on is nothing to show.
@@ -6212,6 +6304,35 @@
                 }) +
                 stat('Credits given', nairaShort(referralStats.total_credits_given), { tone: 'gold' }) +
               '</div>', { flush: false })
+          : '') +
+
+        // FEATURE — VAT compliance. The one deliverable this feature exists
+        // for: the return this workspace's own accountant files, built from
+        // the same per-payment vat_amount snapshot the receipt shows, so the
+        // two can never disagree (routes/reports.js's own comment).
+        (canVat && vatReport
+          ? card('VAT',
+              '<div class="grid cols-3 mb-2">' +
+                stat('VATable sales', nairaShort(vatReport.total_vatable_sales)) +
+                stat('VAT collected', nairaShort(vatReport.total_vat_collected), { tone: 'gold' }) +
+                stat('Payments', String(vatReport.payment_count)) +
+              '</div>' +
+              (vatReport.period_breakdown.length
+                ? table(
+                    [{ label: 'Month' }, { label: 'VATable sales', num: true }, { label: 'VAT collected', num: true }, { label: 'Payments', num: true }],
+                    vatReport.period_breakdown,
+                    function (m) {
+                      return '<tr>' +
+                        '<td>' + esc(MONTH_ABBR[m.month.slice(5, 7)] + ' ' + m.month.slice(0, 4)) + '</td>' +
+                        '<td class="num">' + esc(nairaShort(m.vatable_sales)) + '</td>' +
+                        '<td class="num gold">' + esc(nairaShort(m.vat_collected)) + '</td>' +
+                        '<td class="num">' + m.payment_count + '</td>' +
+                      '</tr>';
+                    },
+                    { emptyTitle: 'No VAT-inclusive payments yet' }
+                  )
+                : '<p class="page-sub mt-1">VAT is not enabled, or no payment has recorded a VAT amount yet.</p>'),
+              { flush: true })
           : '') +
 
         // SECTION 11 — sales rep leaderboard. Period is a URL query param
@@ -6668,6 +6789,10 @@
                     '<input class="input" id="s-wa-token" name="whatsapp_token" type="password" autocomplete="off" placeholder="' +
                       (settings.whatsapp_configured ? 'Configured, ending in ' + esc(settings.whatsapp_token_last4) + ' — leave blank to keep' : 'EAAG…') + '">' +
                     '<p class="field-hint">Never shown again once saved. Leave blank to keep the current token.</p></div>' +
+                  '<div class="field"><label for="s-wa-app-secret">App secret</label>' +
+                    '<input class="input" id="s-wa-app-secret" name="whatsapp_app_secret" type="password" autocomplete="off" placeholder="' +
+                      (settings.whatsapp_app_secret_configured ? 'Configured, ending in ' + esc(settings.whatsapp_app_secret_last4) + ' — leave blank to keep' : 'From the Meta App dashboard') + '">' +
+                    '<p class="field-hint">From App settings → Basic on the Meta App dashboard — lets us verify an incoming message really came from Meta before acting on it. Optional, but strongly recommended: without it, anyone who knows your Phone number ID above could forge a message. Never shown again once saved.</p></div>' +
                   '<button class="btn primary mt-1" type="submit">Save</button>' +
                 '</form>'
               : '<p class="muted">' +
@@ -6760,6 +6885,7 @@
           whatsapp_business_account_id: v.whatsapp_business_account_id || null,
         };
         if (v.whatsapp_token) payload.whatsapp_token = v.whatsapp_token;
+        if (v.whatsapp_app_secret) payload.whatsapp_app_secret = v.whatsapp_app_secret;
         await api.put('/settings/whatsapp', payload);
         toast('WhatsApp settings saved.', 'ok');
         R.reload();

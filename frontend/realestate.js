@@ -2360,8 +2360,28 @@
   try {
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('./service-worker.js').catch(function (err) {
+        navigator.serviceWorker.register('./service-worker.js').then(function (registration) {
+          // Force an immediate check for a new service-worker script rather than
+          // waiting for the browser's own infrequent background check — this is
+          // what actually notices SHELL_CACHE was bumped and starts the update
+          // cycle within this same session instead of the next cold visit.
+          registration.update().catch(function () { /* offline, or nothing new — harmless */ });
+        }).catch(function (err) {
           console.warn('[archta] service worker registration failed:', err.message);
+        });
+
+        // Fires once a newly-installed worker actually takes control
+        // (service-worker.js's own activate handler calls self.clients.claim()
+        // unconditionally). A single reload here is what lets a tab left open
+        // across a deploy pick up a fixed app shell within the same session,
+        // rather than a stale cached bundle replaying an already-fixed bug
+        // (see migrations/054's own history of exactly that) until the tab is
+        // manually closed and reopened. Guarded so it only ever fires once.
+        var reloadedForNewWorker = false;
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+          if (reloadedForNewWorker) return;
+          reloadedForNewWorker = true;
+          window.location.reload();
         });
       });
     }

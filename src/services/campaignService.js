@@ -188,57 +188,140 @@ async function sendToOne(orgId, campaign, customer) {
     : notify.sendSms({ orgId, to: customer.phone, body: campaign.message_body, template: 'campaign', relatedType: 're_campaigns', relatedId: campaign.id });
 }
 
-async function send(req, campaignId) {
-  const campaign = await get(req.orgId, campaignId);
+// Takes orgId directly, not req — AUDIT FIX (D5) needs to call this from
+// the daily cron sweep for due scheduled campaigns, which has no request
+// object; this was the only thing standing in the way, since every other
+// use here was already req.orgId.
+async function send(orgId, campaignId) {
+  const campaign = await get(orgId, campaignId);
   if (!campaign) return { notFound: true };
   if (campaign.status === 'sent') throw badRequest('This campaign has already been sent.');
 
-  const customers = await resolveAudience(req.orgId, campaign.target_filter || {});
+  // AUDIT FIX (F10) — an atomic claim, not just the read-then-check above:
+  // two concurrent sends (a double-click, a client retry) could both pass
+  // the check while campaign.status was still 'draft'/'scheduled' and both
+  // proceed to message the entire audience. Whichever request's UPDATE
+  // actually matches a row wins the right to send; the other gets 0 rows
+  // back and is rejected before touching the audience at all — the same
+  // conditional-UPDATE claim routes/reservations.js's own unit-claim
+  // comment describes for the identical double-allocation shape.
+  const { data: claimed, error: claimErr } = await supabaseAdmin
+    .from('re_campaigns')
+    .update({ status: 'sending' })
+    .eq('id', campaign.id)
+    .eq('organization_id', orgId)
+    .in('status', ['draft', 'scheduled'])
+    .select()
+    .maybeSingle();
+  if (claimErr) throw claimErr;
+  if (!claimed) throw badRequest('This campaign is already sending or has already been sent.');
+
+  const customers = await resolveAudience(orgId, campaign.target_filter || {});
 
   let sent = 0;
   let failed = 0;
+  let skipped = 0;
 
   await mapWithConcurrency(customers, SEND_CONCURRENCY, async (customer) => {
-    const result = await sendToOne(req.orgId, campaign, customer);
-    const wasSent = result.status === 'sent';
-    if (wasSent) sent += 1; else failed += 1;
+    // AUDIT FIX (F11) — each recipient's own outcome is now fully isolated:
+    // a transient failure writing ONE delivery row (a dropped connection, a
+    // request-timeout abort) used to reject mapWithConcurrency's whole
+    // Promise.all, aborting every other lane mid-batch. Many buyers could
+    // already have been genuinely messaged by the provider by that point;
+    // the campaign was then left stuck at status:'sending' with no per-
+    // recipient record of who had already been reached, so a retry
+    // re-messaged everyone, including buyers already contacted once.
+    try {
+      const result = await sendToOne(orgId, campaign, customer);
+      const wasSent = result.status === 'sent';
+      // AUDIT FIX (D2) — a 'skipped' result (no email/phone on file, opted
+      // out, provider not configured) is not a failure: nothing went
+      // wrong, there was just nowhere to send it. Bucketing it with real
+      // failures made "X% failed" read as a delivery problem on a buyer
+      // list that, say, simply has no email on file for 30% of buyers.
+      const wasSkipped = !wasSent && result.status === 'skipped';
+      if (wasSent) sent += 1; else if (wasSkipped) skipped += 1; else failed += 1;
 
-    await supabaseAdmin
-      .from('re_campaign_deliveries')
-      .upsert({
-        campaign_id: campaign.id,
-        customer_id: customer.id,
-        status: wasSent ? 'delivered' : 'failed',
-        sent_at: wasSent ? new Date().toISOString() : null,
-        delivered_at: wasSent ? new Date().toISOString() : null,
-        error_message: wasSent ? null : String(result.reason || 'send failed').slice(0, 500),
-      }, { onConflict: 'campaign_id,customer_id' });
+      await supabaseAdmin
+        .from('re_campaign_deliveries')
+        .upsert({
+          campaign_id: campaign.id,
+          customer_id: customer.id,
+          status: wasSent ? 'delivered' : wasSkipped ? 'skipped' : 'failed',
+          sent_at: wasSent ? new Date().toISOString() : null,
+          delivered_at: wasSent ? new Date().toISOString() : null,
+          error_message: wasSent ? null : String(result.reason || 'send failed').slice(0, 500),
+        }, { onConflict: 'campaign_id,customer_id' });
+    } catch (err) {
+      failed += 1;
+      console.warn('[campaigns] one recipient failed and was skipped, batch continues:', customer.id, err.message);
+    }
   });
 
   const { data: updated, error } = await supabaseAdmin
     .from('re_campaigns')
     .update({
       status: 'sent', sent_at: new Date().toISOString(),
-      sent_count: sent, delivered_count: sent, failed_count: failed,
+      sent_count: sent, delivered_count: sent, failed_count: failed, skipped_count: skipped,
     })
-    .eq('id', campaign.id).eq('organization_id', req.orgId)
+    .eq('id', campaign.id).eq('organization_id', orgId)
     .select().single();
   if (error) throw error;
   return updated;
 }
 
-async function deliveries(orgId, campaignId) {
+// AUDIT FIX (D5) — the schema and update() have always modeled a
+// 'scheduled'/scheduled_for status, but nothing ever swept it: a campaign
+// left scheduled sat there forever, silently never sent, with no error
+// anywhere. Same shape as scheduledMessageService.checkScheduledMessages —
+// one platform-wide query, no per-org loop, run from the same hourly sweep
+// in jobs/daily.js. One campaign's failure must not stop the others in the
+// same sweep from sending.
+async function sendDueScheduledCampaigns() {
+  const nowIso = new Date().toISOString();
+  const { data, error } = await supabaseAdmin
+    .from('re_campaigns')
+    .select('id, organization_id')
+    .eq('status', 'scheduled')
+    .is('deleted_at', null)
+    .lte('scheduled_for', nowIso);
+  if (error) throw error;
+
+  let sent = 0;
+  let failed = 0;
+  for (const row of data || []) {
+    try {
+      await send(row.organization_id, row.id);
+      sent += 1;
+    } catch (err) {
+      failed += 1;
+      console.warn('[campaigns] scheduled send failed for campaign', row.id, ':', err.message);
+    }
+  }
+  return { evaluated: (data || []).length, sent, failed };
+}
+
+// AUDIT FIX (P5) — a campaign sent to "all buyers" on an established
+// workspace could return thousands of rows in one unbounded response;
+// capped and offsettable like every other list endpoint in this product.
+const DELIVERIES_PAGE_SIZE = 200;
+
+async function deliveries(orgId, campaignId, { limit = DELIVERIES_PAGE_SIZE, offset = 0 } = {}) {
   const campaign = await get(orgId, campaignId);
   if (!campaign) return null;
-  const { data, error } = await supabaseAdmin
+  const boundedLimit = Math.min(Number(limit) || DELIVERIES_PAGE_SIZE, DELIVERIES_PAGE_SIZE);
+  const boundedOffset = Math.max(Number(offset) || 0, 0);
+  const { data, error, count } = await supabaseAdmin
     .from('re_campaign_deliveries')
-    .select('*, re_customers(full_name)')
+    .select('*, re_customers(full_name)', { count: 'exact' })
     .eq('campaign_id', campaignId)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .range(boundedOffset, boundedOffset + boundedLimit - 1);
   if (error) throw error;
-  return { campaign, deliveries: data || [] };
+  return { campaign, deliveries: data || [], total: count || 0, limit: boundedLimit, offset: boundedOffset };
 }
 
 module.exports = {
   TYPES, AUDIENCES, list, get, create, update, previewAudience, resolveAudience, send, deliveries,
+  sendDueScheduledCampaigns,
 };

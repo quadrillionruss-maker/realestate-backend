@@ -12,6 +12,9 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { isPastDue } = require('./overdueService');
 const { decrypt } = require('../utils/credentials');
 const { applyVatToPayment } = require('./vatService');
+const creditScoreService = require('./creditScoreService');
+const defaultRiskService = require('./defaultRiskService');
+const contactTimingService = require('./contactTimingService');
 
 const PAYSTACK_BASE = 'https://api.paystack.co';
 const REFERENCE_PREFIX = 'REINST-';
@@ -629,7 +632,61 @@ async function voidPayment(orgId, paymentId, reason) {
 
   const result = await applyPaymentsToSchedule(payment.schedule_id);
 
+  // AUDIT FIXES (F2 — supersede the receipt; F3 — recompute the scores this
+  // payment fed into). Both used to live only in routes/payments.js's void
+  // route, which meant undoService.undoPaymentRecorded — which also calls
+  // this function, per this file's own "the ALREADY-CORRECT mechanism"
+  // convention — silently skipped both. Centralised here so every caller of
+  // voidPayment gets the full, correct reversal for free, not just the one
+  // that happened to duplicate the extra steps by hand.
+  await voidDownstreamEffects(orgId, paymentId, payment.schedule_id);
+
   return { ...voided, installment_still_paid: result.fullyPaid, total_paid: result.totalPaid };
+}
+
+// Never throws — the payment itself is already voided in the database by
+// the time this runs; a failure superseding a receipt or recomputing a
+// score must not turn a correction into a 500 or undo the void itself.
+async function voidDownstreamEffects(orgId, paymentId, scheduleId) {
+  const { error: commissionErr } = await supabaseAdmin
+    .from('re_commissions')
+    .update({ status: 'void' })
+    .eq('payment_id', paymentId)
+    .eq('organization_id', orgId)
+    .neq('status', 'void');
+  if (commissionErr) console.warn('[re-paystack] failed to void the commission for voided payment', paymentId, ':', commissionErr.message);
+
+  // Same reasoning as the void route this replaces: re_documents.status has
+  // no 'voided'/'superseded' value in its check constraint, so this reuses
+  // 'pending' (a not-yet-generated document's own value) and clears
+  // storage_path — portalService.js only shows a buyer documents where
+  // status='generated', and documentService.getDownloadUrl gates a download
+  // on storage_path being set, so both are covered with no schema change.
+  const { error: receiptErr } = await supabaseAdmin
+    .from('re_documents')
+    .update({ status: 'pending', storage_path: null, generated_at: null })
+    .eq('organization_id', orgId)
+    .eq('payment_id', paymentId)
+    .eq('doc_type', 'receipt')
+    .eq('status', 'generated');
+  if (receiptErr) console.warn('[re-paystack] failed to supersede the receipt for voided payment', paymentId, ':', receiptErr.message);
+
+  try {
+    const { data: schedule } = await supabaseAdmin
+      .from('re_installment_schedule')
+      .select('re_installment_plans(re_reservations(id, re_customers(id)))')
+      .eq('id', scheduleId)
+      .maybeSingle();
+    const reservation = schedule?.re_installment_plans?.re_reservations;
+    const customerId = reservation?.re_customers?.id;
+    if (customerId) {
+      await creditScoreService.recompute(orgId, customerId);
+      await contactTimingService.recompute(orgId, customerId);
+    }
+    if (reservation?.id) await defaultRiskService.recompute(orgId, reservation.id);
+  } catch (err) {
+    console.warn('[re-paystack] failed to recompute scores after voiding payment', paymentId, ':', err.message);
+  }
 }
 
 module.exports = {

@@ -90,6 +90,23 @@ async function run(orgId) {
       // clearance re-check that nothing else in the scheduled-message
       // system has either.
       try {
+        // AUDIT FIX (NF7) — a buyer overdue across several consecutive days
+        // (the normal collections case) used to accumulate a brand-new
+        // scheduled reminder every single morning, none deduplicated or
+        // cancelled — several near-identical WhatsApp nudges landing within
+        // the same hour/day. At most one pending scheduled message per
+        // customer from here on: today's fresh draft replaces yesterday's
+        // rather than stacking beside it.
+        const { data: pending } = await supabaseAdmin
+          .from('re_scheduled_messages')
+          .select('id')
+          .eq('organization_id', orgId)
+          .eq('customer_id', customer.id)
+          .eq('status', 'pending');
+        for (const row of pending || []) {
+          await scheduledMessages.cancel(orgId, row.id).catch(() => {});
+        }
+
         await scheduledMessages.schedule(orgId, {
           customerId: customer.id,
           message: followUp.whatsapp_draft,

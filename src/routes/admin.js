@@ -53,7 +53,14 @@ function timingSafeStringEqual(a, b) {
   const len = Math.max(bufA.length, bufB.length, 1);
   const padA = Buffer.alloc(len); bufA.copy(padA);
   const padB = Buffer.alloc(len); bufB.copy(padB);
-  return bufA.length === bufB.length && crypto.timingSafeEqual(padA, padB);
+  // AUDIT FIX (Security #3) — computed into a variable and returned via a
+  // plain `&&`, not `crypto.timingSafeEqual(...) && bufA.length === ...`:
+  // that ordering would short-circuit on a length mismatch WITHOUT ever
+  // calling timingSafeEqual, which is exactly the length-dependent timing
+  // difference the padding above exists to hide. Both branches now do the
+  // same work regardless of which input arrived.
+  const contentMatches = crypto.timingSafeEqual(padA, padB);
+  return bufA.length === bufB.length && contentMatches;
 }
 
 // TASK 3 AUDIT FIX (Important #10) — a weak-but-present secret used to be

@@ -303,17 +303,18 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
   return outcome;
 }
 
-// Idempotent on reservation.status: a webhook retry or a second call finding
-// the reservation already 'completed' does nothing further, same reasoning
-// as every other step in this file being safe to run more than once.
+// AUDIT FIX (F7) — gated on whether the allocation letter already exists,
+// not solely on reservation.status: PATCH /:id/status lets any SELLERS-tier
+// user mark ANY reservation 'completed' at any time, with no paid-in-full
+// check of its own and no document generation. The old status-only guard
+// meant that if staff did that before the real payment landed, the eventual
+// payment would see 'completed' already and skip the letter forever — a
+// sale fully paid with no allocation letter and no trail explaining why.
+//
+// One allocation letter per reservation is still a database-enforced rule
+// (migrations/005's partial unique index) — this existence check is what
+// keeps a webhook retry from trying to insert a second live one.
 async function completeOutrightSale({ orgId, reservation, unit, source, actor }) {
-  if (reservation.status === 'completed') return;
-
-  // One allocation letter per reservation is a database-enforced rule
-  // (migrations/005's partial unique index) — checked here first, the same
-  // way routes/documents.js's bulk-generate checks superseded_at is null,
-  // so a payment retried after a successful first run never tries to
-  // insert a second live letter for the same reservation.
   const { data: existingDoc } = await supabaseAdmin
     .from('re_documents')
     .select('id')
@@ -322,6 +323,8 @@ async function completeOutrightSale({ orgId, reservation, unit, source, actor })
     .eq('doc_type', 'allocation_letter')
     .is('superseded_at', null)
     .maybeSingle();
+
+  if (existingDoc && reservation.status === 'completed') return;
 
   if (!existingDoc) {
     try {

@@ -1359,16 +1359,29 @@ table.data td.num, table.data th.num {
 /* Informational / in-progress states — a document moving through its own
    workflow, or a post pinned for visibility. Indigo, the same accent as
    every link and primary action, never gold. */
-.badge.generated, .badge.sent, .badge.signed, .badge.pinned, .badge.joint-sale {
+/* AUDIT FIX (FE3) — .scheduled (a campaign not yet due) and the five log
+   entry types (migrations/055) previously matched none of these groups and
+   rendered as a plain, colorless label with no visual distinction at all. */
+.badge.generated, .badge.sent, .badge.signed, .badge.pinned, .badge.joint-sale,
+.badge.scheduled, .badge.incident, .badge.update, .badge.communication,
+.badge.decision, .badge.visitor {
   background: var(--accent-soft); color: var(--accent); border-color: rgba(30, 79, 99, 0.24);
 }
 
 /* Neutral / inert states — nothing due yet, nothing decided, a record no
    longer live. */
 .badge.none, .badge.pending, .badge.planning, .badge.dismissed, .badge.archived,
-.badge.void, .badge.sold_out, .badge.waived, .badge.skipped, .badge.superseded {
+.badge.void, .badge.sold_out, .badge.waived, .badge.skipped, .badge.superseded,
+.badge.draft {
   background: var(--panel-3); color: var(--text-faint); border-color: var(--line-strong);
 }
+/* AUDIT FIX (FE1) — .badge.draft above beats the unrelated, unscoped
+   .draft class further down this file (the dashboard's AI-drafted-followup
+   block) on specificity alone (two classes vs. one) — before this rule
+   existed, a campaign's "Draft" status span had nothing scoped to
+   .badge.draft at all, so plain .draft's 14px/16px padding and bottom
+   border won by default, rendering an oversized, bordered block instead of
+   the small status tag every other badge gets. */
 .badge.waived { opacity: 0.7; }
 
 /* ── Risk severity, shared by risk-chip and any future severity badge ──── */

@@ -30,7 +30,15 @@ router.get('/', requirePermission('attendance.read'), async (req, res, next) => 
       if (!/^\d{4}-\d{2}$/.test(req.query.month)) {
         return res.status(400).json({ error: 'month must be YYYY-MM' });
       }
-      query = query.gte('date', `${req.query.month}-01`).lte('date', `${req.query.month}-31`);
+      // An exclusive bound against the first day of the NEXT month, not a
+      // literal "-31" — Postgres rejects an out-of-range calendar date like
+      // 2026-02-31 outright, which meant this 500'd for every February,
+      // April, June, September and November. Date.UTC's own month-index
+      // rollover (12 -> January of the following year) handles December for
+      // free.
+      const [y, m] = req.query.month.split('-').map(Number);
+      const nextMonthStart = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+      query = query.gte('date', `${req.query.month}-01`).lt('date', nextMonthStart);
     }
 
     const { data, error } = await query;
@@ -49,9 +57,28 @@ router.post('/', requirePermission('attendance.manage'), async (req, res, next) 
       return res.status(400).json({ error: `status must be one of: ${STATUSES.join(', ')}` });
     }
 
+    // AUDIT FIX (Security #4) — this used to look `user_id` up against the
+    // global, platform-wide `users` table with no check that they actually
+    // belong to the caller's own workspace, which let an owner/sales
+    // director link a completely unrelated org's user to their own
+    // attendance records, and functioned as a blind user-existence oracle
+    // across the whole platform. `user_id === req.orgId` covers a solo
+    // account marking their own attendance, which has no team_members row
+    // at all (CLAUDE.md's org-scoping section).
     const { data: member } = await supabaseAdmin
       .from('users').select('id, full_name, email').eq('id', user_id).maybeSingle();
     if (!member) return res.status(404).json({ error: 'User not found' });
+
+    if (user_id !== req.orgId) {
+      const { data: membership } = await supabaseAdmin
+        .from('team_members')
+        .select('user_id')
+        .eq('team_id', req.orgId)
+        .eq('user_id', user_id)
+        .eq('status', 'active')
+        .maybeSingle();
+      if (!membership) return res.status(404).json({ error: 'User not found' });
+    }
 
     const { data, error } = await supabaseAdmin
       .from('re_attendance')

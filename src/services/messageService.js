@@ -115,7 +115,13 @@ async function sendFromBuyer(customer, message) {
   // FEATURE — buyer sentiment analysis. Never throws (see
   // sentimentService.updateCustomerSentiment's own rule) — a classification
   // failure must not stop the buyer's message from having been sent.
-  await sentiment.updateCustomerSentiment(customer.organization_id, customer.id, trimmed);
+  //
+  // AUDIT FIX (NF11) — fire-and-forget, not awaited: classifySentiment's
+  // OpenAI call has a 12-second timeout, and this function's own caller is
+  // the portal's "send a message" request — a buyer should not wait up to
+  // 12 extra seconds for a "message sent" confirmation because of a
+  // secondary analytics feature that never needs its result back here.
+  sentiment.updateCustomerSentiment(customer.organization_id, customer.id, trimmed).catch(() => {});
 
   return data;
 }

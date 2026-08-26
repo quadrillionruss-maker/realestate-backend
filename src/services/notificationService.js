@@ -19,6 +19,7 @@
 // 3. No provider is contacted without a configured key. Absent key → 'skipped',
 //    which is a different thing from 'failed' and reads differently in the log.
 
+const crypto = require('crypto');
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { escapeHtml } = require('../utils/escapeHtml');
@@ -120,6 +121,65 @@ async function resolveWhatsAppCredentials(orgId) {
     phoneNumberId: env.whatsapp.phoneNumberId || null,
     error: null,
   };
+}
+
+// AUDIT FIX (Security #1) — every App Secret this deployment knows about:
+// the platform's own (env.whatsapp.appSecret), plus every workspace's own
+// (migrations/063). Same "try every known key" shape as
+// paystackService.allConfiguredSecretKeys, for the same reason: one shared
+// webhook URL, verified against whichever App actually signed the delivery,
+// not a single key assumed in advance.
+async function allConfiguredWhatsAppAppSecrets() {
+  const entries = [];
+  if (env.whatsapp.appSecret) entries.push({ secret: env.whatsapp.appSecret, orgId: null });
+
+  const { data } = await supabaseAdmin
+    .from('re_org_settings')
+    .select('organization_id, whatsapp_app_secret_encrypted')
+    .not('whatsapp_app_secret_encrypted', 'is', null);
+
+  for (const row of data || []) {
+    try {
+      const secret = decrypt(row.whatsapp_app_secret_encrypted);
+      if (secret) entries.push({ secret, orgId: row.organization_id });
+    } catch (err) {
+      // One workspace's corrupted secret must not take down webhook
+      // processing for every other workspace — skip it, log it, move on.
+      console.warn('[notify] skipping an org WhatsApp app secret that failed to decrypt:', err.message);
+    }
+  }
+  return entries;
+}
+
+// Meta signs the raw body as HMAC-SHA256, sent as X-Hub-Signature-256 in the
+// literal form "sha256=<hex>" — unlike Paystack's bare hex, the prefix has
+// to be stripped before the timing-safe comparison, not treated as part of
+// the digest.
+//
+// Returns { verified, hasAnySecretConfigured } rather than a bare boolean:
+// a deployment (or a single workspace) that has not yet entered an App
+// Secret has nothing to verify against, and rejecting every inbound message
+// the moment this code ships — before anyone has had a chance to configure
+// the new credential — would silently break the whole WhatsApp bot for
+// every existing integration. The caller reads hasAnySecretConfigured to
+// tell "nothing to check against yet" apart from "checked, and it failed."
+async function verifyWhatsAppWebhookSignature(rawBody, signatureHeader) {
+  const secrets = await allConfiguredWhatsAppAppSecrets();
+  if (!secrets.length) return { verified: false, hasAnySecretConfigured: false };
+  if (!signatureHeader || !signatureHeader.startsWith('sha256=')) {
+    return { verified: false, hasAnySecretConfigured: true };
+  }
+
+  const provided = Buffer.from(signatureHeader.slice('sha256='.length), 'utf8');
+  for (const { secret } of secrets) {
+    const expected = Buffer.from(
+      crypto.createHmac('sha256', secret).update(rawBody).digest('hex'), 'utf8'
+    );
+    if (expected.length === provided.length && crypto.timingSafeEqual(expected, provided)) {
+      return { verified: true, hasAnySecretConfigured: true };
+    }
+  }
+  return { verified: false, hasAnySecretConfigured: true };
 }
 
 // ── Phone numbers ──────────────────────────────────────────────────────────
@@ -644,6 +704,7 @@ module.exports = {
   resolveResendCredentials,
   resolveTermiiCredentials,
   resolveWhatsAppCredentials,
+  verifyWhatsAppWebhookSignature,
   emailShell,
   normalizeNigerianPhone,
   naira,

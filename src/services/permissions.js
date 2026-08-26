@@ -327,6 +327,13 @@ const PERMISSIONS = {
   // decision, not something a rep or collections officer triggers on their
   // own initiative.
   'customers.bulkPortalLink': DIRECTORS,
+  // AUDIT FIX (NF2) — a buyer's WhatsApp opt-out/opt-in used to be settable
+  // ONLY by the buyer themselves texting STOP/START; there was no product
+  // path to honour the same request made by phone or email. A consent
+  // setting affecting every automated send (reminders, receipts, campaigns)
+  // is a director-level decision, the same tier as a bulk portal-link send
+  // just above, not something a rep toggles on their own initiative.
+  'customers.whatsappOptOut': DIRECTORS,
   // The at-risk list is the collections officer's whole morning. A sales rep
   // sees their own buyers' status on the buyer screen instead.
   'atRisk.read': MONEY_IN,

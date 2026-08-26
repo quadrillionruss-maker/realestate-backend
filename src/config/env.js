@@ -94,6 +94,11 @@ const env = {
     // WHICH workspace an inbound message belongs to is resolved from the
     // message's own phone_number_id against re_org_settings, not from this.
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || '',
+    // AUDIT FIX (Security #1) — signs the platform's own App, the same way
+    // env.paystack.secretKey signs the platform's own Paystack account;
+    // migrations/063's whatsapp_app_secret_encrypted is the per-workspace
+    // equivalent, resolved by notificationService.allConfiguredWhatsAppAppSecrets.
+    appSecret: process.env.WHATSAPP_APP_SECRET || '',
   },
 
   cors: {

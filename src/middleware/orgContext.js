@@ -65,6 +65,15 @@ const SOFT_DELETABLE = new Set([
   're_projects', 're_units', 're_customers', 're_sales_reps', 're_reservations',
   're_installment_plans', 're_installment_schedule', 're_payments', 're_documents',
   're_tasks', 're_commissions', 're_payment_promises', 're_ai_briefs',
+  // AUDIT FIX (D1) — re_campaigns has carried a deleted_at column since
+  // migrations/060 with nothing here to auto-filter it; campaignService.js
+  // happened to add `.is('deleted_at', null)` by hand at its two current
+  // read sites, which is exactly the "the hundred-and-fiftieth site is the
+  // one somebody forgets" risk this set exists to remove. Deliberately NOT
+  // added to softDelete.js's DELETABLE/routes/recycle.js's RESOURCES —
+  // there is no delete-a-campaign route or UI to reach it through, and
+  // building one is a separate feature, not a defensive-consistency fix.
+  're_campaigns',
 ]);
 
 const supabaseAdmin = Object.create(supabaseRaw);

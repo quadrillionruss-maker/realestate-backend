@@ -15,6 +15,17 @@
 -- reservation with no payment history yet), distinct from 0 ("computed,
 -- and currently no risk signal at all").
 --
+-- AUDIT FIX (NF14) — a disclosed precision limit, not a bug: the "response
+-- rate" signal (15 of 100 points, defaultRiskService.js) reads re_activities
+-- by customer_id, because that table has no reservation-scoping column at
+-- all. For a buyer with two reservations, this one dimension of the score
+-- is identical across both regardless of which specific deal the
+-- unresponsiveness actually relates to — partially working against this
+-- migration's own stated reason for living on the reservation rather than
+-- the customer. If re_activities ever gains a nullable reservation_id,
+-- defaultRiskService should prefer activities tied to that reservation and
+-- fall back to buyer-wide activity only when none exist.
+--
 -- Safe to re-run.
 -- ============================================================
 

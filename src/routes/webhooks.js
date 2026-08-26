@@ -34,6 +34,7 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { onPaymentRecorded } = require('../services/paymentEvents');
 const { auditSystem } = require('../services/auditService');
 const { handleInboundMessage } = require('../services/whatsappBotService');
+const { verifyWhatsAppWebhookSignature } = require('../services/notificationService');
 
 const router = express.Router();
 
@@ -259,16 +260,30 @@ router.get('/whatsapp', (req, res) => {
 // the same inbound message.
 //
 // UNAUTHENTICATED, same reasoning as /paystack: Meta does not hold a bearer
-// token. Unlike Paystack there is no HMAC signature verified here yet — this
-// mirrors the shipped default (Meta's X-Hub-Signature-256 is opt-in per App
-// and requires the App Secret, a fourth credential this product does not
-// yet collect); resolveOrgByPhoneNumberId still means an attacker can only
-// ever address ONE workspace's phone_number_id per forged request, not
-// reach arbitrary org data.
+// token. AUDIT FIX (Security #1) — this now verifies Meta's
+// X-Hub-Signature-256 against every known App Secret (the platform's plus
+// every workspace's own — notificationService.verifyWhatsAppWebhookSignature),
+// the same "try every known key" shape /paystack above already uses. A
+// deployment or workspace that has not yet entered an App Secret has
+// nothing to verify against (hasAnySecretConfigured is false) and is let
+// through exactly as before, so this ships without locking out an existing
+// integration on day one — but once a secret IS configured anywhere, a
+// request that fails to verify is rejected outright rather than silently
+// trusted, closing the forgery gap the audit flagged (a forged inbound
+// message naming a real buyer's phone number could opt them out or trigger
+// a real Paystack payment link in their name).
 router.post('/whatsapp', async (req, res) => {
+  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body || {}));
+
+  const verification = await verifyWhatsAppWebhookSignature(rawBody, req.headers['x-hub-signature-256']);
+  if (verification.hasAnySecretConfigured && !verification.verified) {
+    console.warn('[webhook] rejected an unsigned or mis-signed WhatsApp request');
+    return res.status(401).json({ error: 'Invalid signature.' });
+  }
+
   let body;
   try {
-    body = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString('utf8') : JSON.stringify(req.body || {}));
+    body = JSON.parse(rawBody.toString('utf8'));
   } catch {
     return res.status(400).json({ error: 'Body is not valid JSON.' });
   }
@@ -286,6 +301,25 @@ router.post('/whatsapp', async (req, res) => {
           // there; message.text is absent for every other message type.
           const text = message.text?.body;
           if (!phoneNumberId || !message.from || !text) continue;
+
+          // AUDIT FIX (NF12) — a redelivery of the same webhook payload
+          // (a Meta retry, a multi-subscription edge case) would otherwise
+          // be processed a second time — a second real Paystack transaction
+          // and a second WhatsApp send for one "PAY". The insert's own
+          // primary-key conflict is the dedup: if this exact message.id has
+          // been seen before, skip it; a message with no id at all (should
+          // not happen per Meta's spec, but this must not crash if it does)
+          // is processed rather than silently dropped.
+          if (message.id) {
+            const { error: dedupErr } = await supabaseAdmin
+              .from('re_processed_whatsapp_messages')
+              .insert({ message_id: message.id });
+            if (dedupErr) {
+              if (dedupErr.code === '23505') continue; // already processed
+              console.warn('[webhook] could not record WhatsApp message id, processing anyway:', dedupErr.message);
+            }
+          }
+
           await handleInboundMessage({ phoneNumberId, from: message.from, text });
         }
       }

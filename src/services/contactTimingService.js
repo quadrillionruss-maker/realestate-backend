@@ -94,6 +94,11 @@ async function loadContactHistory(orgId, customerId) {
       .eq('organization_id', orgId)
       .eq('re_installment_schedule.re_installment_plans.re_reservations.customer_id', customerId)
       .is('voided_at', null)
+      // AUDIT FIX (F5) — a reallocation's paid_at is when staff processed
+      // the reallocation, not when the buyer actually paid; counting it
+      // here skews "when does this buyer respond" toward back-office
+      // paperwork timing instead of the buyer's own behavior.
+      .is('reallocated_from_payment_id', null)
       .order('paid_at', { ascending: true }),
     supabaseAdmin
       .from('re_activities')

@@ -1,6 +1,6 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
-const { requirePermission, isOwnRecordsOnly } = require('../middleware/rbac');
+const { requirePermission, isOwnRecordsOnly, assertPermission } = require('../middleware/rbac');
 const { canAccess } = require('../services/permissions');
 const { issuePortalToken, portalUrl } = require('../services/portalService');
 const notify = require('../services/notificationService');
@@ -282,12 +282,20 @@ router.post('/', requirePermission('customers.create'), async (req, res, next) =
 
 router.patch('/:id', requirePermission('customers.update'), async (req, res, next) => {
   try {
-    const { full_name, email, phone, source } = req.body || {};
+    const { full_name, email, phone, source, whatsapp_opt_out } = req.body || {};
     const updates = {};
     if (full_name !== undefined) updates.full_name = full_name;
     if (email !== undefined) updates.email = email;
     if (phone !== undefined) updates.phone = phone;
     if (source !== undefined) updates.source = source;
+    // AUDIT FIX (NF2) — narrower than customers.update (SELLERS, includes a
+    // sales_rep): a consent setting affecting every automated send is a
+    // director-level decision, checked inline rather than route-gated since
+    // it depends on which field is actually present in this same PATCH.
+    if (whatsapp_opt_out !== undefined) {
+      if (!assertPermission(req, res, 'customers.whatsappOptOut')) return;
+      updates.whatsapp_opt_out = Boolean(whatsapp_opt_out);
+    }
     if (!Object.keys(updates).length) {
       return res.status(400).json({ error: 'No updatable fields provided' });
     }
@@ -324,6 +332,19 @@ router.post('/:id/blacklist', requirePermission('customers.blacklist'), async (r
     const reason = String(req.body?.reason || '').trim();
     if (!reason) return res.status(400).json({ error: 'A reason is required to blacklist a buyer.' });
 
+    // AUDIT FIX (F13) — read before the write so a repeat call (two owners,
+    // a retry) can tell "this call actually changed something" from "this
+    // buyer was already blacklisted" — the update below stays a no-op 200
+    // either way, but only a REAL transition gets a new reversible audit
+    // entry. Without this, two calls produced two reversible entries for
+    // one underlying state; undoing the first correctly un-blacklists the
+    // buyer, and undoing the second then matches zero rows but still gets
+    // marked "reversed" — a misleading double "Undone" trail for a buyer
+    // who was only ever blacklisted once.
+    const { data: existing } = await supabaseAdmin
+      .from('re_customers').select('blacklisted')
+      .eq('id', req.params.id).eq('organization_id', req.orgId).maybeSingle();
+
     const { data, error } = await supabaseAdmin
       .from('re_customers')
       .update({
@@ -346,7 +367,7 @@ router.post('/:id/blacklist', requirePermission('customers.blacklist'), async (r
       summary: `${data.full_name || 'Buyer'} blacklisted — ${reason}`,
       metadata: { reason },
       // FEATURE — system log with undo.
-      reversible: true,
+      reversible: !existing?.blacklisted,
     });
 
     res.json(data);
@@ -533,6 +554,12 @@ router.delete('/:id/activities/:activityId', requirePermission('activities.write
       summary: 'Activity note deleted',
       metadata: { customer_id: customer.id },
     });
+
+    // AUDIT FIX (NF13) — the sibling create route above recomputes this;
+    // deleting a wrongly-logged activity that fed the optimal_contact_hour
+    // mode calculation left the buyer's contact-timing hint stale on the
+    // now-deleted entry until the next unrelated payment/activity trigger.
+    await contactTiming.recompute(req.orgId, customer.id);
 
     res.json({ deleted: true });
   } catch (e) { next(e); }

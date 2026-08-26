@@ -449,8 +449,14 @@ router.patch('/:scheduleId/waive', requirePermission('payments.waive'), async (r
       entityId: req.params.scheduleId,
       summary: `Installment ${schedule.installment_number} (₦${Number(schedule.amount_due).toLocaleString('en-NG')}) waived — ${reason}`,
       metadata: { reason, amount_due: schedule.amount_due, was_status: schedule.status },
-      // FEATURE — system log with undo.
-      reversible: true,
+      // FEATURE — system log with undo. AUDIT FIX (F13) — re-waiving an
+      // already-waived installment (two owners, a retry) is a no-op write,
+      // not a new reversal-worthy event; without this guard it produced a
+      // second reversible entry for one underlying state, and undoing that
+      // second entry would match zero rows but still get marked "reversed"
+      // — a misleading double "Undone" trail for debt that was only ever
+      // waived once.
+      reversible: schedule.status !== 'waived',
       reversalData: { previous_status: schedule.status },
     });
 
