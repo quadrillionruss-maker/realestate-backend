@@ -217,6 +217,23 @@
     document.body.removeChild(a);
   }
 
+  // Item 1 — a generated document's download_url is a Supabase Storage
+  // signed URL: a real address with a long access token in the query
+  // string. Handing that straight to openFile() navigates the new tab
+  // directly to it, so hovering that tab (Firefox/Edge show the live URL in
+  // their tab-preview card, not just the title) reads out the whole signed
+  // URL. Fetching the bytes first and opening a blob: URL instead — same
+  // blob-then-open shape as downloadCsv() above — keeps the new tab's
+  // address short and unremarkable, same as any file this app serves itself.
+  async function openRemoteFile(url, filename) {
+    var res = await fetch(url);
+    if (!res.ok) throw new Error('Could not open the file (' + res.status + ').');
+    var blob = await res.blob();
+    var blobUrl = URL.createObjectURL(blob);
+    openFile(blobUrl, filename);
+    setTimeout(function () { URL.revokeObjectURL(blobUrl); }, 30000);
+  }
+
   function todayISO() { return new Date().toISOString().slice(0, 10); }
 
   function el(id) { return document.getElementById(id); }
@@ -2069,6 +2086,7 @@
     waNumber: waNumber,
     waLink: waLink,
     openFile: openFile,
+    openRemoteFile: openRemoteFile,
     downloadCsv: downloadCsv,
 
     el: el,

@@ -741,6 +741,45 @@ router.put('/whatsapp', requirePermission('settings.write'), async (req, res, ne
 
 // ── Team ───────────────────────────────────────────────────────────────────
 
+// Item 10 — "Active" in the Status column is team-MEMBERSHIP status (an
+// accepted invite, as opposed to 'invited'/pending) — it says nothing about
+// whether that person has the app open right now, but sitting next to a
+// "Last active" column that only ever shows last_login_at (the last time
+// someone typed a password, not the last time they used the app on an
+// already-issued token) it reads as a presence indicator. re_sessions.
+// last_used_at (migrations/047) is refreshed on every authenticated
+// request regardless of how long ago login happened, so it is the real
+// answer to "is this person in the app right now" — bucketed to a 5-minute
+// window the same way any other "online now" indicator is, not compared
+// live down to the second.
+const ONLINE_THRESHOLD_MS = 5 * 60 * 1000;
+
+async function presenceByUserId(organizationId, userIds) {
+  const map = {};
+  if (!userIds.length) return map;
+  const { data: sessions, error } = await supabaseAdmin
+    .from('re_sessions')
+    .select('user_id, last_used_at')
+    .eq('organization_id', organizationId)
+    .in('user_id', userIds)
+    .is('revoked_at', null)
+    .order('last_used_at', { ascending: false });
+  // 42703/42P01 = migration 047 not yet applied — degrades to "no presence
+  // data" rather than failing the whole team screen over it.
+  if (error) return map;
+  (sessions || []).forEach((s) => {
+    if (!(s.user_id in map)) map[s.user_id] = s.last_used_at;
+  });
+  return map;
+}
+
+function presenceFields(lastActiveAt) {
+  return {
+    last_active_at: lastActiveAt || null,
+    online: Boolean(lastActiveAt) && (Date.now() - new Date(lastActiveAt).getTime()) < ONLINE_THRESHOLD_MS,
+  };
+}
+
 router.get('/team', requirePermission('team.read'), async (req, res, next) => {
   try {
     // A solo workspace has organization_id === the user's own id and no team
@@ -748,6 +787,7 @@ router.get('/team', requirePermission('team.read'), async (req, res, next) => {
     if (!req.user.team_id) {
       const { data: me } = await supabaseAdmin
         .from('users').select('id, email, full_name, last_login_at').eq('id', req.userId).maybeSingle();
+      const presence = me ? await presenceByUserId(req.orgId, [me.id]) : {};
       return res.json({
         is_team: false,
         team: null,
@@ -755,6 +795,7 @@ router.get('/team', requirePermission('team.read'), async (req, res, next) => {
         members: me ? [{
           user_id: me.id, email: me.email, full_name: me.full_name,
           role: 'owner', status: 'active', last_login_at: me.last_login_at,
+          ...presenceFields(presence[me.id]),
         }] : [],
       });
     }
@@ -770,6 +811,8 @@ router.get('/team', requirePermission('team.read'), async (req, res, next) => {
     ]);
     if (team.error) throw team.error;
     if (members.error) throw members.error;
+
+    const presence = await presenceByUserId(req.orgId, (members.data || []).map((m) => m.users?.id).filter(Boolean));
 
     res.json({
       is_team: true,
@@ -795,6 +838,7 @@ router.get('/team', requirePermission('team.read'), async (req, res, next) => {
         status: m.status,
         joined_at: m.joined_at,
         last_login_at: m.users?.last_login_at || null,
+        ...presenceFields(m.users?.id ? presence[m.users.id] : null),
       })),
     });
   } catch (e) { next(e); }

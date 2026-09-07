@@ -103,9 +103,15 @@
     if (!previous.length) return mainRow;
 
     var label = 'Show ' + R.plural(previous.length, 'previous version');
+    // Item 7 — this appears any time generate/regenerate/resend creates a
+    // new version, which is every time: the old row is kept, not
+    // overwritten, so a document signed before a resend still shows that
+    // signature on its own row. The title spells that out once, in place,
+    // rather than leaving it looking like a leftover technical artifact.
     return mainRow +
       '<tr><td colspan="6" class="sched-detail-cell">' +
-        '<button class="btn-quiet" data-toggle-versions="' + esc(d.id) + '" data-versions-label="' + esc(label) + '">' + esc(label) + '</button>' +
+        '<button class="btn-quiet" data-toggle-versions="' + esc(d.id) + '" data-versions-label="' + esc(label) +
+          '" title="Regenerating or resending never overwrites a document — the earlier copy is kept here as a permanent record.">' + esc(label) + '</button>' +
         '<div class="hidden mt-1" data-versions-detail="' + esc(d.id) + '">' +
           previous.map(previousVersionRow).join('') +
         '</div>' +
@@ -141,7 +147,7 @@
   var tasksSectionOpen = false;
 
   R.resetScreenState = function () {
-    projectFilter = null; expandedScheduleBuyerId = null; showAllDrafts = false;
+    projectFilter = null; showAllDrafts = false;
     draftsSectionOpen = false; tasksSectionOpen = false;
     leaderboardSort = 'total_collected';
   };
@@ -1099,7 +1105,10 @@
     }
 
     return '<div class="record">' +
-      '<div class="record-top">' +
+      // Clicking anywhere in the top row (name, meta, or amount) opens the
+      // buyer — no separate "Open" button competing with Call/WhatsApp/Log a
+      // promise for space in record-actions below.
+      '<div class="record-top is-clickable" data-buyer="' + esc(c.customer.id) + '">' +
         '<div><div class="record-name">' + esc(c.customer.full_name) + '</div>' +
         '<div class="record-meta">' + meta + '</div></div>' +
         '<div class="record-amount">' + naira(c.overdue_amount) + '</div>' +
@@ -1123,7 +1132,6 @@
           ? '<button class="action-link" data-open-legal-case="' + esc(c.reservation_id) + '" data-customer-id="' + esc(c.customer.id) +
             '" data-name="' + esc(c.customer.full_name) + '">Open legal case</button>'
           : '') +
-        '<button class="action-link" data-buyer="' + esc(c.customer.id) + '">Open</button>' +
       '</div>' +
     '</div>';
   }
@@ -1150,8 +1158,8 @@
         } catch (err) { toast(err.message, 'err'); }
       });
     });
-    R.qsa('[data-buyer]', root).forEach(function (button) {
-      button.addEventListener('click', function () { openCustomer(button.dataset.buyer); });
+    R.qsa('[data-buyer]', root).forEach(function (node) {
+      node.addEventListener('click', function () { openCustomer(node.dataset.buyer); });
     });
     R.onClick(root, '[data-open-legal-case]', async function (button) {
       await openLegalCaseModal(button.dataset.openLegalCase, button.dataset.customerId, button.dataset.name);
@@ -3710,9 +3718,13 @@
             var unit = r.re_units || {};
             var plan = asArray(r.re_installment_plans)[0];
             var rental = r.property_type === 'rental';
+            var customer = r.re_customers;
             return '<tr>' +
-              '<td class="cell-primary">' + esc((r.re_customers && r.re_customers.full_name) || '—') +
-                '<div class="cell-meta">' + esc((r.re_customers && r.re_customers.phone) || '') + '</div></td>' +
+              '<td class="cell-primary">' +
+                (customer
+                  ? '<span class="name-link" data-open-buyer="' + esc(customer.id) + '">' + esc(customer.full_name) + '</span>'
+                  : '—') +
+                '<div class="cell-meta">' + esc((customer && customer.phone) || '') + '</div></td>' +
               '<td>' + esc(unit.unit_number || '—') +
                 '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +
               '<td class="muted hide-mobile">' +
@@ -3758,6 +3770,10 @@
                 emptyAction: '<button class="btn primary" id="btn-empty-res">New reservation</button>',
               }
         ), { flush: true });
+
+      R.qsa('[data-open-buyer]', view).forEach(function (node) {
+        node.addEventListener('click', function () { openCustomer(node.dataset.openBuyer); });
+      });
 
       R.onClick(view, '#btn-new-res, #btn-empty-res', async function () { await reservationModal({}); });
 
@@ -4651,12 +4667,26 @@
     setPrice();
   }
 
+  // Item 5 — what each status actually means, spelled out once here rather
+  // than assumed. Rental reads "ends the tenancy" where a sale reads "takes
+  // it off the market" for the same 'completed' value, same distinction the
+  // dynamic warning below already draws.
+  function reservationStatusMeanings(isRental) {
+    return [
+      ['Reserved', 'The unit is held for this buyer. Nothing has been confirmed yet — no signed agreement, no plan finalised.'],
+      ['Confirmed', 'The buyer has committed — agreement signed and/or first payment made. The unit stays off the market for them.'],
+      ['Completed', isRental
+        ? 'The tenancy has ended. The unit returns to available and can be let again.'
+        : 'The sale is fully closed. The unit is marked sold and taken off the market for good.'],
+      ['Cancelled', 'The reservation is withdrawn. The unit returns to available for anyone else to reserve.'],
+    ];
+  }
+
   function reservationStatusModal(id, current, buyerName, isRental) {
     var panel = R.modal({
       title: 'Change reservation status',
       body:
-        '<p class="muted mb-2">Currently <b>' + esc(current) + '</b>. The unit follows: cancelling puts it back on the market' +
-          (isRental ? ', completing ends the tenancy and the unit is available to let again.</p>' : ', completing takes it off for good.</p>') +
+        '<p class="muted mb-2">Currently <b>' + esc(current) + '</b>.</p>' +
         '<div class="field"><label for="rs-status">New status</label>' +
           '<select class="select" id="rs-status" name="status">' +
             ['reserved', 'confirmed', 'completed', 'cancelled'].map(function (s) {
@@ -4664,7 +4694,12 @@
                 s.charAt(0).toUpperCase() + s.slice(1) + '</option>';
             }).join('') +
           '</select></div>' +
-        '<div id="rs-warn"></div>',
+        '<div id="rs-warn"></div>' +
+        '<dl class="status-legend mt-2">' +
+          reservationStatusMeanings(isRental).map(function (pair) {
+            return '<dt>' + esc(pair[0]) + '</dt><dd>' + esc(pair[1]) + '</dd>';
+          }).join('') +
+        '</dl>',
       submitLabel: 'Update',
       onSubmit: async function (form, close) {
         var next = R.values(form).status;
@@ -4755,13 +4790,6 @@
   var PAYMENTS_HISTORY_PER_PAGE = 50;
   var PAYMENTS_SCHEDULE_PER_PAGE = 50; // buyers per page, not installment rows
 
-  // Which buyer's row is expanded on the Schedule tab. Module-level, not a
-  // closure var inside render(), so it survives R.reload() — recording a
-  // payment from inside the expanded row reloads the whole route, and the
-  // rep should still be looking at the buyer they were just working on, not
-  // back at a fully collapsed list.
-  var expandedScheduleBuyerId = null;
-
   // This screen was already permission-agnostic before Sales Rep got read
   // access here: it fetches /payments and /payments/schedule directly and
   // trusts the server's row-level filter (permissions.js's payments.read /
@@ -4831,7 +4859,7 @@
 
           R.onClick(view, '[data-receipt]', async function (button) {
             var result = await api.post('/payments/' + button.dataset.receipt + '/receipt');
-            R.openFile(result.download_url);
+            await R.openRemoteFile(result.download_url);
             toast('Receipt ' + result.receipt_number + ' ready.', 'ok');
           });
 
@@ -4909,17 +4937,12 @@
           ), { flush: true }) + '</div>' +
           paginationControls(p);
 
-        wireScheduleRowActions(view);
-
-        // Only one buyer open at a time — expanding another collapses
-        // whichever was open, same as it would in a plain accordion.
-        R.qsa('[data-expand]', view).forEach(function (row) {
-          row.addEventListener('click', function (event) {
-            if (event.target.closest('[data-stop]')) return;
-            var id = row.dataset.expand;
-            expandedScheduleBuyerId = expandedScheduleBuyerId === id ? null : id;
-            renderSchedule();
-          });
+        // Item 6 — a buyer's name opens their full installment list in a
+        // drawer rather than expanding a row inline: a buyer 18 months into
+        // a plan used to unfold eighteen rows right into the middle of the
+        // table, pushing every buyer below them off screen.
+        R.qsa('[data-open-schedule]', view).forEach(function (node) {
+          node.addEventListener('click', function () { openPaymentSchedule(node.dataset.openSchedule); });
         });
 
         var prev = R.qs('[data-page-prev]', view);
@@ -4995,33 +5018,61 @@
     return buyers.filter(function (b) { return b.remaining > 0; });
   }
 
-  // The collapsed summary row plus its detail row, always rendered as a pair
-  // — table()'s rowFn just needs to return a string, and a <tbody> does not
-  // care whether that string is one <tr> or two.
+  // One row per buyer. The name opens their installment list in a drawer
+  // (openPaymentSchedule, below) rather than expanding inline.
   function buyerRow(b) {
-    var isOpen = expandedScheduleBuyerId === b.reservationId;
-    return (
-      '<tr class="is-clickable buyer-summary-row' + (isOpen ? ' is-open' : '') + '" data-expand="' + esc(b.reservationId) + '">' +
-        '<td class="cell-primary">' +
-          '<span class="expand-caret">▸</span>' + esc(b.customer.full_name || '—') +
-          (b.hasOverdue ? ' ' + badge('overdue') : '') +
-        '</td>' +
-        '<td class="muted">' + esc(b.unit.unit_number || '—') +
-          '<div class="cell-meta">' + esc(b.project.name || '') + '</div></td>' +
-        '<td class="muted hide-mobile">' + b.paidCount + ' of ' + b.numberOfInstallments + ' paid</td>' +
-        '<td class="num">' + naira(b.remaining) + '</td>' +
-      '</tr>' +
-      '<tr class="' + (isOpen ? '' : 'hidden') + '" data-buyer-detail="' + esc(b.reservationId) + '">' +
-        '<td class="sched-detail-cell" colspan="4">' +
-          b.rows.map(function (s) { return scheduleActionRow(s, b.customer); }).join('') +
-        '</td>' +
-      '</tr>'
-    );
+    return '<tr class="buyer-summary-row">' +
+      '<td class="cell-primary">' +
+        '<span class="name-link" data-open-schedule="' + esc(b.reservationId) + '">' + esc(b.customer.full_name || '—') + '</span>' +
+        (b.hasOverdue ? ' ' + badge('overdue') : '') +
+      '</td>' +
+      '<td class="muted">' + esc(b.unit.unit_number || '—') +
+        '<div class="cell-meta">' + esc(b.project.name || '') + '</div></td>' +
+      '<td class="muted hide-mobile">' + b.paidCount + ' of ' + b.numberOfInstallments + ' paid</td>' +
+      '<td class="num">' + naira(b.remaining) + '</td>' +
+    '</tr>';
   }
 
-  // One installment line inside an expanded buyer row — same badge/layout
-  // idiom as scheduleRow() (the buyer-drawer's own schedule), just with the
-  // Record/Link actions this screen has always offered instead of Waive.
+  // Item 6 — a buyer's installment list used to unfold inline in the table
+  // (a buyer 18 months into a plan meant 18 rows shoving everyone below them
+  // off screen). This is the same "name opens a focused drawer" pattern as
+  // the Buyers screen's openCustomer, but scoped to payments only — no Call,
+  // WhatsApp, blacklist or messaging here, none of it is what this screen is
+  // for. Re-fetches by reservation_id (routes/payments.js's /schedule
+  // already supports it) rather than reusing the row already on screen, so
+  // a Record made from inside the drawer shows up here immediately too.
+  async function openPaymentSchedule(reservationId) {
+    var panel = R.drawer({ eyebrow: 'Payments', title: 'Loading…' });
+
+    async function load() {
+      var schedule = await api('/payments/schedule?limit=1000&reservation_id=' + encodeURIComponent(reservationId));
+      var b = groupScheduleByBuyer(schedule)[0];
+      if (!b) { panel.close(); return; }
+
+      panel.root.querySelector('.page-title').textContent = b.customer.full_name || 'Buyer';
+      panel.root.querySelector('.drawer-head .eyebrow').textContent =
+        [b.unit.unit_number ? 'Unit ' + b.unit.unit_number : '', b.project.name].filter(Boolean).join(' · ') || 'Payments';
+
+      panel.body.innerHTML =
+        (b.customer.phone || b.customer.email
+          ? '<p class="page-sub mb-2">' + esc([b.customer.phone, b.customer.email].filter(Boolean).join(' · ')) + '</p>'
+          : '') +
+        '<div class="grid cols-2 mb-2">' +
+          stat('Paid', b.paidCount + ' of ' + b.numberOfInstallments) +
+          stat('Remaining', naira(b.remaining), { tone: b.remaining ? 'clay' : 'moss' }) +
+        '</div>' +
+        b.rows.map(function (s) { return scheduleActionRow(s, b.customer); }).join('');
+
+      wireScheduleRowActions(panel.body, load);
+    }
+
+    load();
+  }
+
+  // One installment line inside the payment schedule drawer — same
+  // badge/layout idiom as scheduleRow() (the buyer-drawer's own schedule),
+  // just with the Record/Link actions this screen has always offered
+  // instead of Waive.
   function scheduleActionRow(s, customer) {
     var recordable = (s.status === 'pending' || s.status === 'overdue') && R.can('payments.record');
     return '<div class="sched ' + esc(s.status) + '">' +
@@ -5050,14 +5101,14 @@
     '</div>';
   }
 
-  // Record and Link both live inside collapsed-by-default detail rows, so
-  // this runs after every render (initial, page change, or expand/collapse)
-  // rather than once — a row that was hidden a moment ago may hold buttons
-  // that have never been wired.
-  function wireScheduleRowActions(root) {
+  // Shared by the Payments schedule drawer and openCustomer's own payment
+  // buttons. onRecorded is optional — the drawer passes its own load() so a
+  // Record made from inside it refreshes that same drawer in place, on top
+  // of the whole-screen R.reload() recordPaymentModal always does.
+  function wireScheduleRowActions(root, onRecorded) {
     R.qsa('[data-record]', root).forEach(function (button) {
       button.addEventListener('click', function () {
-        recordPaymentModal(button.dataset.record, button.dataset.outstanding, button.dataset.name, button.dataset.customer);
+        recordPaymentModal(button.dataset.record, button.dataset.outstanding, button.dataset.name, button.dataset.customer, onRecorded);
       });
     });
 
@@ -5086,7 +5137,7 @@
     });
   }
 
-  function recordPaymentModal(scheduleId, outstanding, customerName, customerId) {
+  function recordPaymentModal(scheduleId, outstanding, customerName, customerId, onRecorded) {
     var due = Number(outstanding || 0);
 
     var panel = R.modal({
@@ -5163,6 +5214,7 @@
 
         R.refreshCounts();
         R.reload();
+        if (onRecorded) onRecorded();
       },
     });
 
@@ -5431,19 +5483,19 @@
 
       R.onClick(view, '[data-generate]', async function (button) {
         var result = await api.post('/documents/' + button.dataset.generate + '/generate');
-        R.openFile(result.download_url);
+        await R.openRemoteFile(result.download_url);
         toast(result.signing_url ? 'Signing link sent to the buyer.' : 'Document generated.', 'ok');
         R.reload();
       });
 
       R.onClick(view, '[data-download]', async function (button) {
         var result = await api('/documents/' + button.dataset.download + '/download');
-        R.openFile(result.download_url);
+        await R.openRemoteFile(result.download_url);
       });
 
-      // SECTION 10 — same collapsed-summary/detail-row pair as buyerRow()
-      // on the Payments screen: table()'s rowFn returns a string, and a
-      // <tbody> does not care whether that is one <tr> or several.
+      // SECTION 10 — a collapsed-summary/detail-row pair: table()'s rowFn
+      // returns a string, and a <tbody> does not care whether that is one
+      // <tr> or several.
       R.qsa('[data-toggle-versions]', view).forEach(function (button) {
         button.addEventListener('click', function () {
           var row = R.qs('[data-versions-detail="' + button.dataset.toggleVersions + '"]', view);
@@ -5551,7 +5603,7 @@
             toast('Generating…');
             try {
               var result = await api.post('/documents/' + created.id + '/generate');
-              R.openFile(result.download_url);
+              await R.openRemoteFile(result.download_url);
               toast(
                 result.signing_url
                   ? 'Document ready — a signing link has been sent to the buyer.'
@@ -5974,7 +6026,7 @@
 
     R.onClick(R.el('overlay'), '[data-download-doc]', async function (button) {
       var result = await api('/documents/' + button.dataset.downloadDoc + '/download');
-      R.openFile(result.download_url);
+      await R.openRemoteFile(result.download_url);
     });
   }
 
@@ -6195,28 +6247,37 @@
                 stat('Month 2', nairaShort(forecast.payload.projected_collections_3mo.month_2)) +
                 stat('Month 3', nairaShort(forecast.payload.projected_collections_3mo.month_3)) +
               '</div>' +
-              '<p class="page-sub mb-2">' + esc(forecast.payload.projected_collections_3mo.reasoning) + '</p>' +
+
+              '<div class="card-section">' +
+                '<p class="page-sub mb-0">' + esc(forecast.payload.projected_collections_3mo.reasoning) + '</p>' +
+              '</div>' +
 
               (forecast.payload.project_completions.length
-                ? '<div class="page-sub label-caps mb-1">Projected completion, at current collection rate</div>' +
-                  forecast.payload.project_completions.map(function (p) {
-                    return '<div class="flex-row justify-between gap-10 mb-1">' +
-                      '<span>' + esc(p.project_name) + '</span>' +
-                      '<span class="mono">' + (p.projected_completion_date ? esc(fmtDate(p.projected_completion_date)) : 'Not enough data') + '</span>' +
-                    '</div>';
-                  }).join('')
+                ? '<div class="card-section">' +
+                    '<div class="page-sub label-caps mb-1">Projected completion, at current collection rate</div>' +
+                    forecast.payload.project_completions.map(function (p) {
+                      return '<div class="flex-row justify-between gap-10 mb-1">' +
+                        '<span>' + esc(p.project_name) + '</span>' +
+                        '<span class="mono">' + (p.projected_completion_date ? esc(fmtDate(p.projected_completion_date)) : 'Not enough data') + '</span>' +
+                      '</div>';
+                    }).join('') +
+                  '</div>'
                 : '') +
 
-              (forecast.payload.default_risks.length
-                ? '<div class="page-sub label-caps mt-2 mb-1">Buyers most likely to default within 60 days</div>' +
-                  forecast.payload.default_risks.map(function (r) {
-                    return '<div class="mb-1"><b>' + esc(r.customer_name) + '</b><div class="page-sub">' + esc(r.risk_reason) + '</div></div>';
-                  }).join('')
-                : '<p class="page-sub mt-2">No buyers currently flagged as at risk.</p>') +
+              '<div class="card-section">' +
+                '<div class="page-sub label-caps mb-1">Buyers most likely to default within 60 days</div>' +
+                (forecast.payload.default_risks.length
+                  ? forecast.payload.default_risks.map(function (r) {
+                      return '<div class="mb-1"><b>' + esc(r.customer_name) + '</b><div class="page-sub">' + esc(r.risk_reason) + '</div></div>';
+                    }).join('')
+                  : '<p class="page-sub mb-0">No buyers currently flagged as at risk.</p>') +
+              '</div>' +
 
               (forecast.payload.recommended_actions.length
-                ? '<div class="page-sub label-caps mt-2 mb-1">Recommended actions</div>' +
-                  '<ul class="mb-0">' + forecast.payload.recommended_actions.map(function (a) { return '<li>' + esc(a) + '</li>'; }).join('') + '</ul>'
+                ? '<div class="card-section">' +
+                    '<div class="page-sub label-caps mb-1">Recommended actions</div>' +
+                    '<ul class="mb-0">' + forecast.payload.recommended_actions.map(function (a) { return '<li>' + esc(a) + '</li>'; }).join('') + '</ul>' +
+                  '</div>'
                 : ''),
               { flush: false })
           : '') +
@@ -6582,6 +6643,22 @@
     },
   };
 
+  // Item 13 — every placeholder documentService actually substitutes into a
+  // document template, spelled out once in plain language rather than a
+  // bare list of tag names.
+  var TEMPLATE_PLACEHOLDERS = [
+    ['buyer_name', "the buyer's full name"],
+    ['unit_number', 'the unit number, e.g. A101'],
+    ['unit_type', 'e.g. 3-bedroom flat'],
+    ['project_name', 'the project/estate name'],
+    ['project_location', "the project's address"],
+    ['total_amount', 'the contract or plan value'],
+    ['date', "today's date"],
+    ['company_name', 'your company name'],
+    ['reference_number', "this document's own reference number"],
+    ['signature_block', "the buyer's actual signature"],
+  ];
+
   // SECTION 8 — document template editor. Owner-only content behind a tab
   // anyone who can open Settings can click through to (same as every other
   // owner-gated card on the Workspace tab) — the API itself (settings.write)
@@ -6593,14 +6670,25 @@
         ? '<div class="card"><div class="card-body">' +
             '<div class="field"><label for="tpl-select">Document type</label>' +
               '<select class="select" id="tpl-select"></select></div>' +
-            '<div class="field"><label for="tpl-html">Template HTML</label>' +
-              '<textarea class="textarea mono-input" id="tpl-html" rows="18"></textarea>' +
-              '<p class="field-hint">Placeholders: <code>{{buyer_name}}</code>, <code>{{unit_number}}</code>, ' +
-                '<code>{{unit_type}}</code>, <code>{{project_name}}</code>, <code>{{project_location}}</code>, ' +
-                '<code>{{total_amount}}</code>, <code>{{date}}</code>, <code>{{company_name}}</code>, ' +
-                '<code>{{reference_number}}</code>, and <code>{{signature_block}}</code> — the buyer\'s actual ' +
-                'signature, which must appear somewhere in the template or saving is refused.</p>' +
+            // Item 13 — the placeholder legend used to trail the textarea as
+            // a dense one-line footnote, after a big block of HTML most
+            // owners are not comfortable editing. Leading with it as a
+            // proper list, plus a live preview below the textarea (the
+            // receipt template card already does this), lets someone check
+            // their change actually worked without having to read the
+            // markup itself.
+            '<div class="template-placeholder-legend mb-2">' +
+              '<div class="page-sub label-caps mb-1">Placeholders — insert any of these anywhere in the template</div>' +
+              '<div class="template-placeholder-list">' +
+                TEMPLATE_PLACEHOLDERS.map(function (p) { return '<code>{{' + p[0] + '}}</code> <span class="page-sub">' + p[1] + '</span>'; }).join('') +
+              '</div>' +
+              '<p class="field-hint mt-1"><code>{{signature_block}}</code> — the buyer\'s actual signature — must appear ' +
+                'somewhere in the template, or saving is refused.</p>' +
             '</div>' +
+            '<div class="field"><label for="tpl-html">Template HTML <span class="muted">(this uses HTML formatting — if you\'re not comfortable editing markup, it\'s safe to leave as the default, or ask a developer)</span></label>' +
+              '<textarea class="textarea mono-input" id="tpl-html" rows="14"></textarea>' +
+            '</div>' +
+            '<div class="field"><label>Preview</label><div class="receipt-preview" id="tpl-preview"></div></div>' +
             '<div class="btn-row"><button class="btn primary" id="tpl-save">Save</button>' +
               '<button class="btn" id="tpl-reset">Reset to default</button></div>' +
             '<p class="page-sub mt-1" id="tpl-status"></p>' +
@@ -6613,7 +6701,9 @@
           '<div class="card"><div class="card-head"><div class="card-title">Receipt template</div></div>' +
             '<div class="card-body">' +
               '<p class="field-hint mb-2">Customize the letterhead and footer of your payment receipts. ' +
-                'The amount, receipt number and installment details are never editable.</p>' +
+                'The amount, receipt number and installment details are never editable — there is nothing financial ' +
+                'to get wrong here. Both fields are optional and use HTML formatting; leave them blank to use the ' +
+                'plain default letterhead if you\'re not comfortable editing markup.</p>' +
               '<label class="check mb-1"><input type="checkbox" id="rtpl-logo" checked> Show company logo in the default header</label>' +
               '<label class="check mb-2"><input type="checkbox" id="rtpl-address" checked> Show company address/phone in the default footer</label>' +
               '<div class="grid cols-2">' +
@@ -6672,15 +6762,28 @@
         formatDocType(t.doc_type) + (t.is_custom ? ' (customized)' : ' (default)') + '</option>';
     }).join('');
 
+    // Same trust boundary as refreshReceiptPreview above — owner-authored
+    // HTML, previewed in their own browser. The placeholders stay literal
+    // ({{buyer_name}} etc.) rather than substituted — real buyer data only
+    // ever fills them in at generation time — but seeing the structure
+    // render is still the whole point: someone unsure about their markup
+    // can tell at a glance whether a tag was left unclosed, not by reading
+    // the HTML itself.
+    function refreshTemplatePreview() {
+      R.el('tpl-preview').innerHTML = R.el('tpl-html').value || '<span class="muted">Nothing to preview yet.</span>';
+    }
+
     function renderCurrent() {
       var t = templates.filter(function (x) { return x.doc_type === select.value; })[0];
       R.el('tpl-html').value = t.template_html;
       R.el('tpl-status').textContent = t.is_custom
         ? 'This workspace has customized this template.'
         : 'Using the shipped default template.';
+      refreshTemplatePreview();
     }
     renderCurrent();
     select.addEventListener('change', renderCurrent);
+    R.el('tpl-html').addEventListener('input', refreshTemplatePreview);
 
     R.onClick(view, '#tpl-save', async function () {
       var updated = await api.put('/documents/templates/' + select.value, { template_html: R.el('tpl-html').value });
@@ -6779,7 +6882,19 @@
           card('WhatsApp',
             (R.can('settings.write')
               ? '<p class="field-hint mb-2">From a Meta Business app with WhatsApp Cloud API enabled. Powers referral notifications and the WhatsApp mini app — a buyer messaging this number can check their balance, see their next payment, pay online or get their receipt automatically.</p>' +
-                '<p class="field-hint mb-2">Webhook URL for the Meta App dashboard: <code>' + esc((window.__API_BASE__ || '') + '/webhooks/whatsapp') + '</code></p>' +
+                // Item 9 — this is not a secret, it is an address Meta needs
+                // to be told about: without it pasted into the Meta App
+                // dashboard, incoming WhatsApp messages and delivery
+                // statuses have nowhere to arrive. It only ever accepts a
+                // request signed with the App secret below, so publishing
+                // it here (and to Meta) is safe.
+                '<div class="field"><label for="s-wa-webhook-url">Webhook URL</label>' +
+                  '<div class="flex-row gap-10">' +
+                    '<input class="input mono" id="s-wa-webhook-url" value="' + esc((window.__API_BASE__ || '') + '/webhooks/whatsapp') + '" readonly>' +
+                    '<button class="btn-quiet" type="button" id="btn-copy-wa-webhook">Copy</button>' +
+                  '</div>' +
+                  '<p class="field-hint">Paste this into the Meta App dashboard, under WhatsApp → Configuration → Callback URL.</p>' +
+                '</div>' +
                 '<form id="form-whatsapp">' +
                   '<div class="field"><label for="s-wa-phone">Phone number ID</label>' +
                     '<input class="input" id="s-wa-phone" name="whatsapp_phone_number_id" value="' + esc(settings.whatsapp_phone_number_id || '') + '"></div>' +
@@ -6875,6 +6990,12 @@
         R.reload();
       });
     }
+
+    R.onClick(view, '#btn-copy-wa-webhook', async function (button) {
+      await R.copyText(R.qs('#s-wa-webhook-url', view).value);
+      button.textContent = 'Copied ✓';
+      setTimeout(function () { button.textContent = 'Copy'; }, 1700);
+    });
 
     var whatsappForm = R.qs('#form-whatsapp', view);
     if (whatsappForm) {
@@ -6981,6 +7102,15 @@
               '<p class="field-hint">Percent. Applied to a new sales rep unless you set theirs individually.</p></div>' +
             '<button class="btn primary mt-1" type="submit">Save preferences</button>' +
           '</form>') +
+
+          // Item 12 — moved under Notifications (was stacked under SMS in
+          // the right column) so the two "what gets said" cards — general
+          // preferences and the templates that back them — sit together,
+          // rather than the templates trailing the two unrelated provider
+          // credential cards on the other side.
+          (canManageTemplates
+            ? card('Email templates', emailTemplates.map(emailTemplateRow).join(''))
+            : '') +
         '</div>' +
 
         '<div>' +
@@ -7030,10 +7160,6 @@
                   ? 'Configured, sender ID ' + esc(settings.termii_sender_id || '—') + '.'
                   : 'Not configured — texts send from Archta\'s default sender ID.') +
                 ' Only the workspace owner can change this.</p>')) +
-
-          (canManageTemplates
-            ? card('Email templates', emailTemplates.map(emailTemplateRow).join(''), { flush: true })
-            : '') +
         '</div>' +
       '</div>';
 
@@ -7202,17 +7328,27 @@
 
       card('People', table(
         [{ label: 'Name' }, { label: 'Email', hideMobile: true }, { label: 'Role' },
-          { label: 'Last active', hideMobile: true }, { label: 'Status' }, { label: '' }],
+          { label: 'Last active', hideMobile: true }, { label: 'Membership' }, { label: '' }],
         team.members,
         function (m) {
           var canManage = m.role !== 'owner' && m.id && R.can('team.manageMembers');
+          // Item 10 — "online" is real presence (re_sessions.last_used_at
+          // within the last 5 minutes, computed server-side), not the
+          // Membership badge beside it, which only ever says whether this
+          // person has accepted their invite. Someone who signed in weeks
+          // ago but is using the app right now on that same still-valid
+          // token now correctly shows "Online now" here, not a stale
+          // last-login date next to a badge that looks like it agrees.
+          var lastActive = m.online
+            ? '<span class="presence-online">● Online now</span>'
+            : esc((m.last_active_at || m.last_login_at) ? R.fmtRelative(m.last_active_at || m.last_login_at) : 'never signed in');
           return '<tr>' +
             '<td class="cell-primary">' + esc(m.full_name || '—') + '</td>' +
             '<td class="muted hide-mobile">' + esc(m.email || '') + '</td>' +
             '<td class="muted">' + esc(m.role_label || m.role) +
               (m.status === 'invited' && m.invited_role && m.invited_role !== m.role
                 ? '<div class="cell-meta">invited as ' + esc(m.invited_role) + '</div>' : '') + '</td>' +
-            '<td class="muted hide-mobile">' + esc(m.last_login_at ? R.fmtRelative(m.last_login_at) : 'never signed in') + '</td>' +
+            '<td class="muted hide-mobile">' + lastActive + '</td>' +
             '<td>' + badge(m.status) + '</td>' +
             // The owner cannot be removed or re-roled — the API refuses it,
             // and offering the buttons anyway is just a dead end with a
@@ -7836,23 +7972,35 @@
     // several of the actions this can reverse).
     var canUndo = R.can('audit.undo');
 
-    view.innerHTML = head('Activity log', 'Who did what, when. Append-only — nothing in this product can edit or delete it.',
-      canExportAudit ? '<button class="btn" id="btn-export-audit">Export audit log</button>' : '') + tabs +
+    // Item 14 — the raw action code (e.g. "payment.recorded") used to be
+    // its own column, in tiny monospace, right beside the plain-English
+    // summary that already says the same thing more clearly. Folding it
+    // in under the summary as a muted meta line (same cell-primary/
+    // cell-meta idiom as everywhere else in this app) leaves one thing to
+    // actually read per row instead of two competing descriptions of it.
+    // A search box over the 150 already-fetched rows — filtering by actor,
+    // summary or the action code — replaces scrolling a long unfiltered
+    // list to find one thing.
+    var activitySearch = '';
 
-      (canExportAudit
-        ? '<p class="page-sub clay mb-2">This file may contain sensitive information. Do not share it unless required for legal purposes.</p>'
-        : '') +
+    function renderActionsTable() {
+      var q = activitySearch.trim().toLowerCase();
+      var filtered = !q ? entries : entries.filter(function (e) {
+        return (e.actor_email || e.actor_kind || '').toLowerCase().indexOf(q) !== -1 ||
+          (e.summary || '').toLowerCase().indexOf(q) !== -1 ||
+          (e.action || '').toLowerCase().indexOf(q) !== -1;
+      });
 
-      card('Actions', table(
-        [{ label: 'When' }, { label: 'Who', hideMobile: true }, { label: 'Action' }, { label: 'Detail' }, { label: '' }],
-        entries,
+      return card('Actions', table(
+        [{ label: 'When' }, { label: 'Who', hideMobile: true }, { label: 'What happened' }, { label: '' }],
+        filtered,
         function (e) {
           return '<tr>' +
             '<td class="muted nowrap">' + esc(R.fmtDateTime(e.created_at)) + '</td>' +
             '<td class="muted hide-mobile">' + esc(e.actor_email || e.actor_kind) + '</td>' +
-            '<td><span class="mono fs-11-5">' + esc(e.action) + '</span></td>' +
-            '<td class="muted">' + esc(e.summary || '') +
-              (e.reversed_at ? '<div class="cell-meta">Undone ' + esc(R.fmtRelative(e.reversed_at)) + '</div>' : '') +
+            '<td class="cell-primary">' + esc(e.summary || e.action) +
+              '<div class="cell-meta mono">' + esc(e.action) +
+                (e.reversed_at ? ' · undone ' + esc(R.fmtRelative(e.reversed_at)) : '') + '</div>' +
             '</td>' +
             '<td class="right">' +
               (canUndo && e.reversible && !e.reversed_at
@@ -7861,8 +8009,20 @@
             '</td>' +
           '</tr>';
         },
-        { emptyTitle: 'Nothing recorded yet' }
-      ), { flush: true }) +
+        q ? { emptyTitle: 'Nothing matches “' + activitySearch.trim() + '”' } : { emptyTitle: 'Nothing recorded yet' }
+      ), { flush: true });
+    }
+
+    view.innerHTML = head('Activity log', 'Who did what, when. Append-only — nothing in this product can edit or delete it.',
+      canExportAudit ? '<button class="btn" id="btn-export-audit">Export audit log</button>' : '') + tabs +
+
+      (canExportAudit
+        ? '<p class="page-sub clay mb-2">This file may contain sensitive information. Do not share it unless required for legal purposes.</p>'
+        : '') +
+
+      '<div class="field mb-2"><input class="input" id="activity-search" type="text" placeholder="Search by person, or what happened…" value="' + esc(activitySearch) + '"></div>' +
+
+      '<div id="activity-actions-table">' + renderActionsTable() + '</div>' +
 
       card('Messages sent', table(
         [{ label: 'When' }, { label: 'Channel' }, { label: 'To', hideMobile: true }, { label: 'Subject' }, { label: 'Result' }],
@@ -7894,23 +8054,35 @@
       });
     }
 
-    // FEATURE — system log with undo.
-    R.qsa('[data-undo-audit]', view).forEach(function (button) {
-      button.addEventListener('click', async function () {
-        var confirmed = await R.confirm({
-          title: 'Undo this action?',
-          message: 'This will reverse: "' + button.dataset.summary + '". Undo is limited to 10 per day for this workspace.',
-          confirmLabel: 'Undo',
+    // FEATURE — system log with undo. Re-wired after every search
+    // keystroke re-renders the table, same reasoning wireScheduleRowActions
+    // re-runs after every Payments render — a row hidden a moment ago (or
+    // freshly re-created here) may hold a button that has never been wired.
+    function wireUndoButtons() {
+      R.qsa('[data-undo-audit]', view).forEach(function (button) {
+        button.addEventListener('click', async function () {
+          var confirmed = await R.confirm({
+            title: 'Undo this action?',
+            message: 'This will reverse: "' + button.dataset.summary + '". Undo is limited to 10 per day for this workspace.',
+            confirmLabel: 'Undo',
+          });
+          if (!confirmed) return;
+          try {
+            await api.patch('/audit/' + button.dataset.undoAudit + '/undo', {});
+            toast('Undone.', 'ok');
+            R.reload();
+          } catch (err) {
+            toast(err.message || 'Could not undo this action.', 'err');
+          }
         });
-        if (!confirmed) return;
-        try {
-          await api.patch('/audit/' + button.dataset.undoAudit + '/undo', {});
-          toast('Undone.', 'ok');
-          R.reload();
-        } catch (err) {
-          toast(err.message || 'Could not undo this action.', 'err');
-        }
       });
+    }
+    wireUndoButtons();
+
+    R.el('activity-search').addEventListener('input', function (event) {
+      activitySearch = event.target.value;
+      R.el('activity-actions-table').innerHTML = renderActionsTable();
+      wireUndoButtons();
     });
   }
 
@@ -7988,7 +8160,7 @@
     var panel = R.modal({ title: 'Sessions', cancelLabel: 'Close', body: R.skeleton(3) });
 
     async function renderSessions() {
-      var sessions = await api('/auth/sessions');
+      var sessions = await R.authApi('/sessions');
       var otherCount = sessions.filter(function (s) { return !s.is_current; }).length;
 
       panel.form.innerHTML =
@@ -7999,7 +8171,7 @@
           : '');
 
       R.onClick(panel.form, '[data-revoke-session]', async function (button) {
-        await api('/auth/sessions/' + button.dataset.revokeSession, { method: 'DELETE' });
+        await R.authApi('/sessions/' + button.dataset.revokeSession, { method: 'DELETE' });
         toast('Session revoked.', 'ok');
         await renderSessions();
       });
@@ -8007,7 +8179,7 @@
       var revokeAll = R.qs('#btn-sessions-revoke-all', panel.form);
       if (revokeAll) {
         revokeAll.addEventListener('click', async function () {
-          await api('/auth/sessions', { method: 'DELETE' });
+          await R.authApi('/sessions', { method: 'DELETE' });
           toast('Signed out of all other devices.', 'ok');
           await renderSessions();
         });

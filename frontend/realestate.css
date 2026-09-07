@@ -973,9 +973,15 @@ button { cursor: pointer; background: none; border: none; padding: 0; }
   width: 100%; display: flex; align-items: center; justify-content: space-between;
   padding: 14px 18px; background: none; border: none; cursor: pointer;
   font-size: 13.5px; font-weight: 600; color: var(--text); text-align: left;
+  transition: background-color .12s;
 }
-.collapsible-toggle:hover { color: var(--accent); }
-.collapsible-chevron { color: var(--text-faint); font-size: 11px; }
+/* The whole bar is one <button> — clicking the label, the empty space, or
+   the chevron all open the same section. This background fill (not just a
+   text-color change) is what makes that read as one clickable control
+   rather than a plain text row with a small arrow floating at the end. */
+.collapsible-toggle:hover { color: var(--accent); background: var(--panel-2); }
+.collapsible-chevron { color: var(--text-faint); font-size: 13px; }
+.collapsible-toggle:hover .collapsible-chevron { color: var(--accent); }
 
 /* SECTION 23 — the dashboard's setup checklist card. */
 .onboarding-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 20px; }
@@ -1112,6 +1118,18 @@ table.data td.num, table.data th.num {
 .cell-primary { font-weight: 500; }
 .cell-meta { color: var(--text-faint); font-size: 11.5px; margin-top: 2px; }
 
+/* Team & sales reps — real presence (re_sessions.last_used_at, last 5
+   minutes), deliberately not moss: the Membership column right beside it
+   already uses moss for "active", and two different green facts side by
+   side read as one. */
+.presence-online { color: var(--accent); font-weight: 600; }
+
+/* A buyer's name used as the open-the-drawer affordance inside a table cell
+   — Reservations and Payments both point here rather than a separate "Open"
+   button competing with the row's other actions. */
+.name-link { cursor: pointer; }
+.name-link:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+
 /* ── 9. Forms + buttons ────────────────────────────────────────────────── */
 .field { margin-bottom: 15px; }
 .field:last-child { margin-bottom: 0; }
@@ -1150,14 +1168,19 @@ table.data td.num, table.data th.num {
 
 .textarea { resize: vertical; min-height: 82px; line-height: 1.6; }
 
-/* The native select arrow is bright grey on every platform; replace it. */
+/* The native select arrow is bright grey on every platform; replace it with
+   one that actually reads as "this opens a list of choices" — dark enough
+   for real contrast against --panel, and a touch larger than a stock
+   16x16 chevron so it doesn't disappear at a glance. */
 .select {
   appearance: none;
-  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%239CA3AF' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E");
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' fill='none'%3E%3Cpath d='M1 1.5l5 5 5-5' stroke='%234A463D' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 12px center;
-  padding-right: 32px;
+  background-position: right 14px center;
+  padding-right: 36px;
 }
+.select:hover { border-color: var(--line-strong); background-color: var(--panel-2); }
 
 /* Amount fields carry the currency, so nobody types "₦" into a number field. */
 .input-money { position: relative; }
@@ -1176,6 +1199,15 @@ table.data td.num, table.data th.num {
 .field-hint { font-size: 11.5px; color: var(--text-faint); margin-top: 5px; line-height: 1.5; }
 .field-hint.warn { color: var(--warn); }
 .field-error { font-size: 12px; color: var(--danger); margin-top: 5px; }
+
+/* A short legend explaining each option in a status select — reservation
+   status, document status, etc. dt/dd pairs read top-to-bottom rather than
+   side-by-side; a modal is narrow enough that a label-left layout would
+   wrap the definition awkwardly. */
+.status-legend { margin: 0; padding: 10px 12px; background: var(--panel-2); border-radius: 8px; }
+.status-legend dt { font-size: 12px; font-weight: 600; color: var(--text); margin-top: 8px; }
+.status-legend dt:first-child { margin-top: 0; }
+.status-legend dd { font-size: 12px; color: var(--text-faint); margin: 2px 0 0; line-height: 1.5; }
 
 .field-row { display: grid; gap: 13px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .field-row.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -1603,6 +1635,12 @@ table.data td.num, table.data th.num {
 .drawer-body { padding: 20px 22px 40px; overflow-y: auto; flex: 1; }
 .drawer-section + .drawer-section { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
 
+/* Item 8 — the AI sales forecast card's own stacked subsections (reasoning,
+   projected completion, default risks, recommended actions), which used to
+   run into each other with nothing but a margin between them. Same hairline
+   divider as .drawer-section, under a name that doesn't imply a drawer. */
+.card-section + .card-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+
 @keyframes fade { from { opacity: 0; } }
 @keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.99); } }
 @keyframes modal-in { from { opacity: 0; transform: translateY(8px); } }
@@ -1752,6 +1790,8 @@ table.data td.num, table.data th.num {
 .record:hover { background: var(--panel-2); }
 
 .record-top { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
+.record-top.is-clickable { cursor: pointer; }
+.record-top.is-clickable:hover .record-name { color: var(--accent); }
 .record-name { font-weight: 500; font-size: 14px; }
 .record-meta { font-size: 11.5px; color: var(--text-faint); margin-top: 2px; }
 
@@ -1951,19 +1991,6 @@ table.data td.num, table.data th.num {
 }
 .legal-step.signed .legal-step-dot { border-color: var(--accent); background: var(--accent); }
 
-/* Payments → Schedule: one row per buyer, expanding inline to their full
-   installment list. The caret rotates via a class on the row (set in JS when
-   it is the expanded one), not a CSS :has() — this app's minimum supported
-   browser predates it. */
-.expand-caret {
-  display: inline-block;
-  width: 12px;
-  margin-right: 2px;
-  color: var(--text-faint);
-  transition: transform .15s var(--ease);
-}
-tr.is-open .expand-caret { transform: rotate(90deg); }
-
 table.data td.sched-detail-cell {
   background: var(--panel-2);
   padding: 4px 16px 12px 34px;
@@ -2017,6 +2044,16 @@ table.data td.sched-detail-cell {
   min-height: 84px; padding: 10px 12px; border: 1px solid var(--line);
   border-radius: var(--radius-sm); background: var(--panel-2); font-size: 12.5px;
 }
+
+/* Item 13 — the document template editor's placeholder legend, moved ahead
+   of the HTML textarea so it reads as "here is what you can use" before
+   "here is a wall of markup". One row per placeholder rather than a run-on
+   comma list, so a non-technical owner can actually scan it. */
+.template-placeholder-legend {
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2);
+}
+.template-placeholder-list { display: grid; gap: 4px; }
+.template-placeholder-list code { margin-right: 6px; }
 
 /* Unit floor plan / photo thumbnails, in the media modal. */
 .media-card { text-decoration: none; overflow: hidden; }
