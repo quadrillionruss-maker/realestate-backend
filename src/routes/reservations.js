@@ -11,6 +11,7 @@ const planRecommendations = require('../services/planRecommendationService');
 const handover = require('../services/handoverService');
 const defaultRisk = require('../services/defaultRiskService');
 const jointSale = require('../services/jointSaleService');
+const projectTimeline = require('../services/projectTimelineService');
 const router = express.Router();
 
 // Documentation has reservations.read (permissions.js) — "which unit, which
@@ -154,9 +155,9 @@ router.post('/', requirePermission('reservations.create'), async (req, res, next
     }
 
     const [{ data: unit }, { data: customer }] = await Promise.all([
-      supabaseAdmin.from('re_units').select('id, status, list_price')
+      supabaseAdmin.from('re_units').select('id, status, list_price, project_id')
         .eq('id', unit_id).eq('organization_id', req.orgId).maybeSingle(),
-      supabaseAdmin.from('re_customers').select('id, blacklisted, blacklist_reason')
+      supabaseAdmin.from('re_customers').select('id, full_name, blacklisted, blacklist_reason')
         .eq('id', customer_id).eq('organization_id', req.orgId).maybeSingle(),
     ]);
 
@@ -338,6 +339,14 @@ router.post('/', requirePermission('reservations.create'), async (req, res, next
         } : null,
       },
     });
+
+    // SECTION 7 (feature expansion) — longitudinal project timeline.
+    if (unit.project_id) {
+      await projectTimeline.logEvent(req.orgId, unit.project_id, 'reservation_created', {
+        reservation_id: reservation.id, customer_id, customer_name: customer.full_name || null, property_type,
+        plan_total_amount: planResult ? plan.total_amount : null,
+      });
+    }
 
     res.status(201).json({ reservation, plan: planResult });
   } catch (e) { next(e); }

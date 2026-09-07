@@ -35,6 +35,8 @@
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { createPlanWithSchedule, buildSchedule } = require('./installmentService');
 const { audit } = require('./auditService');
+const outcomes = require('./outcomeService');
+const projectTimeline = require('./projectTimelineService');
 
 const toKobo = (naira) => Math.round(Number(naira || 0) * 100);
 const toNaira = (kobo) => kobo / 100;
@@ -52,7 +54,7 @@ async function assess(orgId, reservationId) {
     .select(`
       id, status, property_type,
       re_customers(id, full_name),
-      re_units(unit_number, list_price, re_projects(name)),
+      re_units(unit_number, list_price, project_id, re_projects(name)),
       re_installment_plans(
         id, status, total_amount, original_total_amount, carried_amount_paid,
         number_of_installments, frequency, start_date,
@@ -311,6 +313,38 @@ async function restructure(req, reservationId, {
       reason,
     },
   });
+
+  // SECTION 7 (feature expansion) — longitudinal project timeline.
+  if (state.reservation.re_units?.project_id) {
+    await projectTimeline.logEvent(orgId, state.reservation.re_units.project_id, 'restructure', {
+      reservation_id: reservationId, customer_id: state.reservation.re_customers?.id || null,
+      customer_name: state.reservation.re_customers?.full_name || null,
+      rescheduled_amount: state.remaining,
+    });
+  }
+
+  // SECTION 1 (feature expansion) — outcome database. Offering and
+  // completing a restructure is one atomic action in this product (there is
+  // no separate "propose, buyer accepts/declines" step to hang
+  // restructure_offered on by itself), so the action row is created and
+  // closed as 'restructured' in the same call — attribution_method is
+  // 'direct_source_link' via recordAction+closeBySource against the new
+  // plan's own id, not a guess.
+  if (state.reservation.re_customers?.id) {
+    const restructureAction = await outcomes.recordAction(orgId, {
+      customerId: state.reservation.re_customers.id,
+      reservationId,
+      actionType: 'restructure_offered',
+      sourceEntityType: 're_installment_plans',
+      sourceEntityId: created.plan.id,
+    });
+    if (restructureAction) {
+      await outcomes.closeBySource(
+        orgId, state.reservation.re_customers.id, 're_installment_plans', created.plan.id,
+        { outcomeType: 'restructured' }
+      );
+    }
+  }
 
   return {
     plan: linked,

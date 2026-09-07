@@ -49,7 +49,7 @@ async function loadPaymentContext(orgId, paymentId) {
           re_reservations(
             id, commission_rate, status, property_type,
             re_customers(id, full_name, email, phone, whatsapp_opt_out),
-            re_units(id, unit_number, unit_type, list_price, re_projects(name, location)),
+            re_units(id, unit_number, unit_type, list_price, project_id, re_projects(id, name, location)),
             re_sales_reps(id, commission_rate, users(id, full_name))
           )
         )

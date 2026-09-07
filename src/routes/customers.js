@@ -10,6 +10,8 @@ const creditScore = require('../services/creditScoreService');
 const contactTiming = require('../services/contactTimingService');
 const referrals = require('../services/referralService');
 const messages = require('../services/messageService');
+const outcomes = require('../services/outcomeService');
+const behavioralFingerprint = require('../services/behavioralFingerprintService');
 const router = express.Router();
 
 // Shared by the single-buyer send (POST /:id/portal-link) and the bulk send
@@ -128,6 +130,14 @@ router.get('/:id', requirePermission('customers.read'), async (req, res, next) =
 
     if (canAccess(req.orgRole, 'financial.view')) {
       data.unallocated_credit = await findUnallocatedCredit(req.orgId, data);
+      // SECTION 2 (feature expansion) — behavioral fingerprint. One
+      // server-formatted sentence rather than the frontend re-deriving the
+      // same three conditional clauses a second time — computed here,
+      // behind the same financial.view gate as everything else nulled
+      // below for Documentation, since a payment-day/promise-reliability
+      // pattern is exactly the kind of financial-behavior signal that
+      // boundary already exists to keep from them.
+      data.behavioral_fingerprint_summary = behavioralFingerprint.describeFingerprint(data);
     } else {
       // Documentation: "Reservations (read only — status only)". Every
       // amount is stripped rather than the nested plan/schedule being
@@ -172,6 +182,17 @@ router.get('/:id', requirePermission('customers.read'), async (req, res, next) =
 function stripFinancials(customer) {
   // SECTION 3 — same boundary as every amount on this object.
   customer.credit_score = null;
+  // SECTION 2 (feature expansion) — behavioral fingerprint. Same boundary:
+  // a payment-day pattern and a promise-reliability percentage are
+  // financial-behavior signals, not amounts, but the same reasoning
+  // credit_score is stripped for applies to them. preferred_contact_channel
+  // is left alone — which channel reaches a buyer fastest is operational,
+  // not financial.
+  customer.preferred_payment_day_of_month = null;
+  customer.avg_days_to_pay_after_reminder = null;
+  customer.promise_reliability_score = null;
+  customer.typical_payment_amount_pattern = null;
+  customer.behavioral_fingerprint_summary = null;
   for (const reservation of customer.re_reservations || []) {
     if (reservation.re_units) reservation.re_units.list_price = null;
     const plans = Array.isArray(reservation.re_installment_plans)
@@ -512,6 +533,19 @@ router.post('/:id/activities', requirePermission('activities.write'), async (req
     // awaiting it costs nothing and keeps this consistent with every other
     // derived-figure recompute in the product.
     await contactTiming.recompute(req.orgId, customer.id);
+
+    // SECTION 1 (feature expansion) — outcome database. Only 'call' maps
+    // onto the fixed action_type enum unambiguously — 'visit'/'site_visit'/
+    // 'note' have no clean equivalent there, and 'whatsapp'/'email' logged
+    // here are a REP'S OWN note that they messaged the buyer some other
+    // way, not this product's own automated send, so they are left out
+    // rather than conflated with the tracked whatsapp_sent/email_sent
+    // channels dealManager and campaignService write.
+    if (activity_type === 'call') {
+      await outcomes.recordAction(req.orgId, {
+        customerId: customer.id, actionType: 'call_logged', channel: 'call',
+      });
+    }
 
     res.status(201).json(data);
   } catch (e) { next(e); }

@@ -21,6 +21,7 @@ const { BUCKET, SIGNED_URL_TTL_SECONDS, ensureBucket, uploadPdf, createSignedUrl
 const { mapWithConcurrency } = require('../utils/concurrency');
 const portalNotifications = require('./portalNotificationService');
 const featureUsage = require('./featureUsageService');
+const projectTimeline = require('./projectTimelineService');
 
 // Template lives inside src/ so it travels with the code.
 const TEMPLATE_PATH = path.join(__dirname, '../templates/allocation_letter.html');
@@ -70,6 +71,19 @@ async function writeGeneratedVersion(orgId, doc, updates) {
       .single();
     if (error) throw error;
     featureUsage.track(orgId, 'document_generated');
+    // SECTION 7 (feature expansion) — longitudinal project timeline. Only
+    // the FIRST generation of a document is a timeline-worthy moment — a
+    // resend re-runs this exact function but takes the ELSE branch below
+    // (doc.status is no longer 'pending' by then), so this never fires a
+    // second time for the same document.
+    const projectId = doc.re_reservations?.re_units?.project_id;
+    if (projectId) {
+      await projectTimeline.logEvent(orgId, projectId, 'document_generated', {
+        reservation_id: doc.reservation_id, doc_type: doc.doc_type,
+        customer_id: doc.re_reservations?.re_customers?.id || null,
+        customer_name: doc.re_reservations?.re_customers?.full_name || null,
+      });
+    }
     return { document: updated, wasRegeneration: false };
   }
 
@@ -131,7 +145,7 @@ async function loadDocumentContext(orgId, documentId) {
       re_reservations(
         id, reserved_at,
         re_customers(id, full_name, email, phone),
-        re_units(unit_number, unit_type, size_sqm, list_price, re_projects(name, location)),
+        re_units(unit_number, unit_type, size_sqm, list_price, project_id, re_projects(name, location)),
         re_installment_plans(total_amount, number_of_installments, frequency, start_date)
       )`)
     .eq('id', documentId)

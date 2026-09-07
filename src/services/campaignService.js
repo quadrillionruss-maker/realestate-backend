@@ -17,6 +17,7 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const notify = require('./notificationService');
 const { mapWithConcurrency } = require('../utils/concurrency');
 const { escapeHtml } = require('../utils/escapeHtml');
+const outcomes = require('./outcomeService');
 
 const TYPES = ['email', 'sms', 'whatsapp'];
 const AUDIENCES = ['all', 'overdue', 'project', 'credit_below'];
@@ -252,6 +253,18 @@ async function send(orgId, campaignId) {
           delivered_at: wasSent ? new Date().toISOString() : null,
           error_message: wasSent ? null : String(result.reason || 'send failed').slice(0, 500),
         }, { onConflict: 'campaign_id,customer_id' });
+
+      // SECTION 1 (feature expansion) — outcome database. campaign.id is
+      // shared by every recipient, so it identifies WHICH campaign this was
+      // but not WHICH row is this buyer's — closeBySource/recordAction both
+      // filter on customer_id too, which is what actually disambiguates.
+      if (wasSent) {
+        await outcomes.recordAction(orgId, {
+          customerId: customer.id, actionType: 'campaign_sent', channel: campaign.type,
+          sourceEntityType: 're_campaigns', sourceEntityId: campaign.id,
+          messageText: campaign.message_body,
+        });
+      }
     } catch (err) {
       failed += 1;
       console.warn('[campaigns] one recipient failed and was skipped, batch continues:', customer.id, err.message);

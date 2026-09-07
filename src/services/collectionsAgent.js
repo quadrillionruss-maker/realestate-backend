@@ -20,6 +20,7 @@ const { auditSystem } = require('./auditService');
 const { lagosToday } = require('./overdueService');
 const { nextOccurrenceUTC } = require('./contactTimingService');
 const scheduledMessages = require('./scheduledMessageService');
+const outcomes = require('./outcomeService');
 
 const AGENT_NAME = 'collections_agent';
 // FEATURE — dynamic reminder timing. If a buyer's own optimal send time is
@@ -262,7 +263,7 @@ async function fileVerificationTask(orgId, customer, reservation, messageText) {
   if (error) console.warn('[collections-agent] could not file verification task:', error.message);
 }
 
-async function escalateToNextStage(orgId, reservation) {
+async function escalateToNextStage(orgId, reservation, customerId) {
   const currentIndex = STAGES.findIndex((s) => s.key === (reservation.escalation_stage || 'none'));
   const nextIndex = Math.min(currentIndex + 1, STAGES.length - 1);
   if (nextIndex <= currentIndex) return; // already at the worst stage
@@ -284,6 +285,13 @@ async function escalateToNextStage(orgId, reservation) {
     summary: `Escalated from ${describeStage(STAGES[currentIndex]?.key).label} to ${target.label} — buyer told the WhatsApp bot they cannot pay`,
     metadata: { from: STAGES[currentIndex]?.key, to: target.key, source: 'whatsapp_reply' },
   });
+
+  // SECTION 1 (feature expansion) — outcome database, same reasoning as
+  // escalationService.sweepEscalations' own hook: whatever contact was most
+  // recently open for this buyer gets closed as 'escalated'.
+  if (customerId) {
+    await outcomes.closeMostRecentOpen(orgId, customerId, { outcomeType: 'escalated' });
+  }
 }
 
 // Called from whatsappBotService.handleInboundMessage for a buyer who has
@@ -312,7 +320,7 @@ async function parseReply(orgId, customer, text) {
   }
 
   if (CANNOT_PAY_RE.test(text) && openSchedule?.reservation) {
-    await escalateToNextStage(orgId, openSchedule.reservation);
+    await escalateToNextStage(orgId, openSchedule.reservation, customer.id);
     await dealManager.logAction(orgId, AGENT_NAME, customer.id, 'escalated_from_reply', 'escalated');
     return { handled: true, reply: `We understand, ${customer.full_name}. Your account has been flagged for a member of our team to follow up with you directly.` };
   }

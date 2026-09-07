@@ -20,6 +20,7 @@ const { lagosToday, describeDue } = require('./overdueService');
 const { describeStage } = require('./escalationService');
 const notify = require('./notificationService');
 const { mapWithConcurrency } = require('../utils/concurrency');
+const outcomes = require('./outcomeService');
 
 // Termii calls, one per buyer — a developer with a couple hundred buyers
 // three days from due plus a couple hundred who just missed used to send
@@ -212,8 +213,8 @@ async function remindUpcoming(orgId) {
     id, due_date, amount_due, status,
     re_installment_plans!inner(
       re_reservations!inner(
-        escalation_stage,
-        re_customers(full_name, phone),
+        id, escalation_stage,
+        re_customers(id, full_name, phone),
         re_units(unit_number, re_projects(name))
       )
     )`;
@@ -259,7 +260,18 @@ async function remindUpcoming(orgId) {
       relatedType: 're_installment_schedule',
       relatedId: row.id,
     });
-    if (result.status === 'sent') sent += 1;
+    if (result.status === 'sent') {
+      sent += 1;
+      // SECTION 1 (feature expansion) — outcome database. An automated
+      // system-driven nudge, not a specific whatsapp/email send — channel
+      // (sms) already says how it went out, action_type says it was the
+      // system that sent it rather than a rep or an agent's clearance-gated
+      // WhatsApp.
+      await outcomes.recordAction(orgId, {
+        customerId: customer.id, reservationId: reservation.id,
+        actionType: 'agent_followup', channel: 'sms', messageText: body,
+      });
+    }
   };
 
   await mapWithConcurrency(upcoming.data || [], SMS_CONCURRENCY, (row) => send(row, 'upcoming'));

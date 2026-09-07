@@ -37,6 +37,12 @@ const {
 } = require('../services/overdueService');
 const { buildReceiptHtml } = require('../services/receiptService');
 const { resolveBranding } = require('../services/brandingService');
+const { pickPaidBucket, classifyMessageSpecificity, deriveTopInsights } = require('../services/outcomeService');
+const { computeStageRecommendation, MIN_STAGE_SAMPLE_SIZE } = require('../services/recoveryPlaybookService');
+const { giniCoefficient, coefficientOfVariation, MIN_PEER_ORGS } = require('../services/developerDnaService');
+const { detectQuestionCategory, resolveRefsInText, buildFallbackAnswer } = require('../services/aiAssistantService');
+const { computeKeyMetrics, buildFallbackSummary } = require('../services/projectSummaryService');
+const { computeFingerprint, MIN_OBSERVATIONS } = require('../services/behavioralFingerprintService');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { amountInWords } = require('../utils/amountInWords');
 const { parseCsvToObjects, parseAmount, parseDate, toCsv } = require('../utils/csv');
@@ -2594,6 +2600,464 @@ test('reports.forecast is owner-only, same tier as reports.investor', () => {
   assert.ok(canAccess('owner', 'reports.forecast'));
   assert.strictEqual(canAccess('sales_director', 'reports.forecast'), false);
   assert.strictEqual(canAccess('sales_rep', 'reports.forecast'), false);
+});
+
+test('analytics.outcomes is owner-only, same tier as reports.forecast', () => {
+  assert.ok(canAccess('owner', 'analytics.outcomes'));
+  assert.strictEqual(canAccess('sales_director', 'analytics.outcomes'), false);
+  assert.strictEqual(canAccess('sales_rep', 'analytics.outcomes'), false);
+  assert.strictEqual(canAccess('collections', 'analytics.outcomes'), false);
+});
+
+// SECTION 1 (feature expansion) — outcome database. pickPaidBucket is the
+// one place a payment's actual elapsed-days gap gets turned into exactly
+// ONE outcome_type — the commissioning spec's own safeguard against a
+// single payment producing more than one paid_within_* row.
+section('Outcome database — pickPaidBucket');
+
+test('same-day and next-day payments land in the 24h bucket', () => {
+  assert.strictEqual(pickPaidBucket(0), 'paid_within_24h');
+  assert.strictEqual(pickPaidBucket(1), 'paid_within_24h');
+});
+
+test('a payment on day 2 through day 7 lands in the 7d bucket, not 24h', () => {
+  assert.strictEqual(pickPaidBucket(2), 'paid_within_7d');
+  assert.strictEqual(pickPaidBucket(7), 'paid_within_7d');
+});
+
+test('a payment on day 8 through day 30 lands in the 30d bucket', () => {
+  assert.strictEqual(pickPaidBucket(8), 'paid_within_30d');
+  assert.strictEqual(pickPaidBucket(30), 'paid_within_30d');
+});
+
+test('a payment past every bucket (31+ days) is not attributed to anything', () => {
+  assert.strictEqual(pickPaidBucket(31), null);
+  assert.strictEqual(pickPaidBucket(400), null);
+});
+
+test('an invalid days_to_outcome (null, negative) is refused rather than mis-bucketed', () => {
+  assert.strictEqual(pickPaidBucket(null), null);
+  assert.strictEqual(pickPaidBucket(-1), null);
+});
+
+// SECTION 2 (feature expansion) — buyer behavioral fingerprint.
+// computeFingerprint is pure — everything it needs arrives as flat arrays,
+// exactly what loadFingerprintInputs hands it — so every dimension's own
+// minimum-sample rule is directly testable without a database.
+section('Behavioral fingerprint — computeFingerprint');
+
+test('fewer than MIN_OBSERVATIONS payments produces no pattern, not a guess', () => {
+  const result = computeFingerprint({
+    payments: [{ paid_at: '2026-01-15T10:00:00Z', schedule_id: 'a' }],
+    promiseBreakdown: { kept: 0, resolved: 0 },
+    paidOutcomes: [],
+  });
+  assert.strictEqual(result.preferred_payment_day_of_month, null);
+  assert.strictEqual(result.typical_payment_amount_pattern, null);
+  assert.strictEqual(result.sample_sizes.payment_day, 1);
+});
+
+test('the most frequent Lagos-local day of month wins, once there are enough payments', () => {
+  const result = computeFingerprint({
+    payments: [
+      { paid_at: '2026-01-15T10:00:00Z', schedule_id: 'a' },
+      { paid_at: '2026-02-15T09:00:00Z', schedule_id: 'b' },
+      { paid_at: '2026-03-15T11:00:00Z', schedule_id: 'c' },
+      { paid_at: '2026-04-02T10:00:00Z', schedule_id: 'd' },
+    ],
+    promiseBreakdown: { kept: 0, resolved: 0 },
+    paidOutcomes: [],
+  });
+  assert.strictEqual(result.preferred_payment_day_of_month, 15);
+});
+
+test('one live payment per installment reads as a "full" payer', () => {
+  const result = computeFingerprint({
+    payments: [
+      { paid_at: '2026-01-01T10:00:00Z', schedule_id: 'a' },
+      { paid_at: '2026-02-01T10:00:00Z', schedule_id: 'b' },
+      { paid_at: '2026-03-01T10:00:00Z', schedule_id: 'c' },
+    ],
+    promiseBreakdown: { kept: 0, resolved: 0 },
+    paidOutcomes: [],
+  });
+  assert.strictEqual(result.typical_payment_amount_pattern, 'full');
+});
+
+test('several live payments settling the same installment reads as a "partial" payer', () => {
+  const result = computeFingerprint({
+    payments: [
+      { paid_at: '2026-01-01T10:00:00Z', schedule_id: 'a' },
+      { paid_at: '2026-01-15T10:00:00Z', schedule_id: 'a' },
+      { paid_at: '2026-02-01T10:00:00Z', schedule_id: 'b' },
+      { paid_at: '2026-02-15T10:00:00Z', schedule_id: 'b' },
+      { paid_at: '2026-03-01T10:00:00Z', schedule_id: 'c' },
+      { paid_at: '2026-03-15T10:00:00Z', schedule_id: 'c' },
+    ],
+    promiseBreakdown: { kept: 0, resolved: 0 },
+    paidOutcomes: [],
+  });
+  assert.strictEqual(result.typical_payment_amount_pattern, 'partial');
+});
+
+test('a genuine mix of full and partial installments reads as "variable"', () => {
+  const result = computeFingerprint({
+    payments: [
+      { paid_at: '2026-01-01T10:00:00Z', schedule_id: 'a' }, // full
+      { paid_at: '2026-02-01T10:00:00Z', schedule_id: 'b' },
+      { paid_at: '2026-02-15T10:00:00Z', schedule_id: 'b' }, // partial (2 payments)
+      { paid_at: '2026-03-01T10:00:00Z', schedule_id: 'c' }, // full
+    ],
+    promiseBreakdown: { kept: 0, resolved: 0 },
+    paidOutcomes: [],
+  });
+  assert.strictEqual(result.typical_payment_amount_pattern, 'variable');
+});
+
+test('promise_reliability_score is null under the minimum, a 0-100 ratio at or above it', () => {
+  const tooFew = computeFingerprint({ payments: [], promiseBreakdown: { kept: 1, resolved: 2 }, paidOutcomes: [] });
+  assert.strictEqual(tooFew.promise_reliability_score, null);
+
+  const enough = computeFingerprint({ payments: [], promiseBreakdown: { kept: 3, resolved: 4 }, paidOutcomes: [] });
+  assert.strictEqual(enough.promise_reliability_score, 75);
+});
+
+test('preferred_contact_channel picks the fastest-closing channel among those with their OWN minimum sample', () => {
+  const result = computeFingerprint({
+    payments: [],
+    promiseBreakdown: { kept: 0, resolved: 0 },
+    paidOutcomes: [
+      // WhatsApp: fast (avg 1 day) but only 2 observations — below MIN_OBSERVATIONS.
+      { channel: 'whatsapp', days_to_outcome: 1 },
+      { channel: 'whatsapp', days_to_outcome: 1 },
+      // Email: slower (avg 4 days) but 3 observations — clears the bar.
+      { channel: 'email', days_to_outcome: 3 },
+      { channel: 'email', days_to_outcome: 4 },
+      { channel: 'email', days_to_outcome: 5 },
+    ],
+  });
+  assert.strictEqual(result.preferred_contact_channel, 'email');
+});
+
+test('an sms-channel outcome is never offered as a preferred_contact_channel', () => {
+  const result = computeFingerprint({
+    payments: [],
+    promiseBreakdown: { kept: 0, resolved: 0 },
+    paidOutcomes: [
+      { channel: 'sms', days_to_outcome: 1 },
+      { channel: 'sms', days_to_outcome: 1 },
+      { channel: 'sms', days_to_outcome: 1 },
+    ],
+  });
+  assert.strictEqual(result.preferred_contact_channel, null);
+  // avg_days_to_pay_after_reminder is channel-agnostic, so it still counts these.
+  assert.strictEqual(result.avg_days_to_pay_after_reminder, 1);
+});
+
+test('MIN_OBSERVATIONS is exactly the contactTimingService threshold this reuses, not a new arbitrary number', () => {
+  assert.strictEqual(MIN_OBSERVATIONS, 3);
+});
+
+// SECTION 3 (feature expansion) — communication effectiveness.
+section('Communication effectiveness — classifyMessageSpecificity');
+
+test('a message naming a naira figure is classified specific', () => {
+  assert.strictEqual(classifyMessageSpecificity('Please pay ₦150,000 by Friday.'), 'specific');
+  assert.strictEqual(classifyMessageSpecificity('You owe NGN50000, kindly settle it.'), 'specific');
+});
+
+test('a generic reminder with no figure is classified generic', () => {
+  assert.strictEqual(classifyMessageSpecificity('Please remember to make your payment soon.'), 'generic');
+});
+
+test('no message text at all is never classified — null, not a guess', () => {
+  assert.strictEqual(classifyMessageSpecificity(null), null);
+  assert.strictEqual(classifyMessageSpecificity(''), null);
+});
+
+section('Communication effectiveness — deriveTopInsights');
+
+test('the biggest real gap across dimensions is surfaced, phrased with real numbers', () => {
+  const insights = deriveTopInsights({
+    best_day_of_week: [
+      { day: 'Tuesday', payment_rate_within_7d: 0.34, sample_size: 20 },
+      { day: 'Friday', payment_rate_within_7d: 0.18, sample_size: 20 },
+    ],
+    best_time_of_day: [],
+    best_channel: [],
+    by_message_type: [],
+  });
+  assert.strictEqual(insights.length, 1);
+  assert.ok(insights[0].includes('Tuesday'));
+  assert.ok(insights[0].includes('34%'));
+  assert.ok(insights[0].includes('18%'));
+  assert.ok(insights[0].includes('Friday'));
+});
+
+test('at most 3 insights come back, ranked by the size of the gap, not declaration order', () => {
+  const insights = deriveTopInsights({
+    best_day_of_week: [
+      { day: 'Tuesday', payment_rate_within_7d: 0.30, sample_size: 20 },
+      { day: 'Friday', payment_rate_within_7d: 0.28, sample_size: 20 }, // small gap
+    ],
+    best_time_of_day: [
+      { part_of_day: 'morning', payment_rate_within_7d: 0.50, sample_size: 20 },
+      { part_of_day: 'evening', payment_rate_within_7d: 0.10, sample_size: 20 }, // biggest gap
+    ],
+    best_channel: [
+      { channel: 'whatsapp', recovery_rate: 0.40, sample_size: 20 },
+      { channel: 'email', recovery_rate: 0.20, sample_size: 20 }, // medium gap
+    ],
+    by_message_type: [],
+  });
+  assert.strictEqual(insights.length, 3);
+  assert.ok(insights[0].includes('morning') || insights[0].toLowerCase().includes('morning'));
+});
+
+test('with fewer than 2 groups in every dimension, there is nothing to compare — no fabricated insight', () => {
+  const insights = deriveTopInsights({
+    best_day_of_week: [{ day: 'Tuesday', payment_rate_within_7d: 0.34, sample_size: 20 }],
+    best_time_of_day: [],
+    best_channel: [],
+    by_message_type: [],
+  });
+  assert.deepStrictEqual(insights, []);
+});
+
+// SECTION 4 (feature expansion) — recovery playbook.
+section('Recovery playbook — computeStageRecommendation');
+
+function paidRow(daysAgo, channel, actionType) {
+  return { outcome_type: 'paid_within_7d', days_to_outcome: daysAgo, channel, action_type: actionType };
+}
+function unrecoveredRow(channel, actionType) {
+  return { outcome_type: 'no_response', days_to_outcome: null, channel, action_type: actionType };
+}
+
+test('fewer than MIN_STAGE_SAMPLE_SIZE outcomes stores sample_size but no recommendation', () => {
+  const rows = Array.from({ length: MIN_STAGE_SAMPLE_SIZE - 1 }, () => paidRow(5, 'whatsapp', 'whatsapp_sent'));
+  const result = computeStageRecommendation(rows);
+  assert.strictEqual(result.recovery_rate, null);
+  assert.strictEqual(result.avg_days_to_recovery, null);
+  assert.strictEqual(result.best_channel, null);
+  assert.strictEqual(result.best_action_type, null);
+  assert.strictEqual(result.sample_size, MIN_STAGE_SAMPLE_SIZE - 1);
+});
+
+test('at MIN_STAGE_SAMPLE_SIZE, the observed recovery rate and average days are computed', () => {
+  const rows = [
+    ...Array.from({ length: 4 }, () => paidRow(4, 'whatsapp', 'whatsapp_sent')),
+    ...Array.from({ length: 6 }, () => unrecoveredRow('whatsapp', 'whatsapp_sent')),
+  ];
+  const result = computeStageRecommendation(rows);
+  assert.strictEqual(result.sample_size, 10);
+  assert.strictEqual(result.recovery_rate, 0.4);
+  assert.strictEqual(result.avg_days_to_recovery, 4);
+});
+
+test('best_channel/best_action_type require their OWN minimum sample within the stage, not just the stage total', () => {
+  const rows = [
+    // whatsapp: 2 observations, both recovered — too few to be trusted on its own.
+    paidRow(1, 'whatsapp', 'whatsapp_sent'),
+    paidRow(1, 'whatsapp', 'whatsapp_sent'),
+    // call: 8 observations, half recovered — clears outcomeService.MIN_SAMPLE_SIZE (5).
+    ...Array.from({ length: 4 }, () => paidRow(3, 'call', 'call_logged')),
+    ...Array.from({ length: 4 }, () => unrecoveredRow('call', 'call_logged')),
+  ];
+  const result = computeStageRecommendation(rows);
+  assert.strictEqual(result.sample_size, 10);
+  // whatsapp's 100% rate is real but its sample is too small to recommend —
+  // call is the only channel/action_type that clears its own bar.
+  assert.strictEqual(result.best_channel, 'call');
+  assert.strictEqual(result.best_action_type, 'call_logged');
+});
+
+test('no channel/action_type clears its own minimum sample — no recommendation, not a guess', () => {
+  const rows = Array.from({ length: 10 }, (_, i) => paidRow(2, i % 2 === 0 ? 'whatsapp' : 'email', 'whatsapp_sent'));
+  const result = computeStageRecommendation(rows);
+  // 5 whatsapp + 5 email — each exactly clears MIN_SAMPLE_SIZE (5), so this
+  // one IS expected to pick a channel; assert it picks one of the two real
+  // candidates rather than something outside the data.
+  assert.ok(['whatsapp', 'email'].includes(result.best_channel));
+});
+
+// SECTION 5 (feature expansion) — developer DNA profile.
+section('Developer DNA — giniCoefficient / coefficientOfVariation');
+
+test('every rep closing the same number of deals is perfectly even — Gini 0', () => {
+  assert.strictEqual(giniCoefficient([10, 10, 10, 10]), 0);
+});
+
+test('one rep closing everything, the rest closing nothing, is maximal concentration', () => {
+  const g = giniCoefficient([0, 0, 0, 40]);
+  assert.ok(g > 0.7, `expected high concentration, got ${g}`);
+});
+
+test('no reps at all has no distribution to measure', () => {
+  assert.strictEqual(giniCoefficient([]), null);
+});
+
+test('no deals closed by anyone yet is even (0), not undefined', () => {
+  assert.strictEqual(giniCoefficient([0, 0, 0]), 0);
+});
+
+test('a perfectly steady monthly collection series has zero variation', () => {
+  assert.strictEqual(coefficientOfVariation([100, 100, 100, 100]), 0);
+});
+
+test('a wildly uneven series has a real, non-zero coefficient of variation', () => {
+  const cv = coefficientOfVariation([10, 200, 5, 300]);
+  assert.ok(cv > 0.5, `expected real spread, got ${cv}`);
+});
+
+test('fewer than 2 real data points is insufficient to say anything about consistency', () => {
+  assert.strictEqual(coefficientOfVariation([100]), null);
+  assert.strictEqual(coefficientOfVariation([]), null);
+});
+
+test('a zero mean cannot be normalized against — null, not Infinity or NaN', () => {
+  assert.strictEqual(coefficientOfVariation([0, 0, 0]), null);
+});
+
+test('MIN_PEER_ORGS is exactly 5, per the commissioning spec\'s own explicit number', () => {
+  assert.strictEqual(MIN_PEER_ORGS, 5);
+});
+
+// SECTION 6 (feature expansion) — AI Business Intelligence Assistant.
+section('AI assistant — detectQuestionCategory');
+
+test('a collections-shaped question resolves to collections', () => {
+  assert.strictEqual(detectQuestionCategory('Why did collections drop this month?'), 'collections');
+  assert.strictEqual(detectQuestionCategory('How much revenue did we bring in?'), 'collections');
+});
+
+test('a buyer/risk-shaped question resolves to buyers', () => {
+  assert.strictEqual(detectQuestionCategory('Which buyers are most likely to default?'), 'buyers');
+  assert.strictEqual(detectQuestionCategory('What is this customer\'s credit score?'), 'buyers');
+});
+
+test('a project-shaped question resolves to projects', () => {
+  assert.strictEqual(detectQuestionCategory('Which project is performing best?'), 'projects');
+});
+
+test('a sales-rep-shaped question resolves to sales', () => {
+  assert.strictEqual(detectQuestionCategory('Who is the top sales rep this quarter?'), 'sales');
+});
+
+test('a document-shaped question resolves to documents', () => {
+  assert.strictEqual(detectQuestionCategory('How many unsigned documents do we have?'), 'documents');
+});
+
+test('a question naming none of the above falls back to executive, the broad snapshot', () => {
+  assert.strictEqual(detectQuestionCategory('What changed since last week?'), 'executive');
+  assert.strictEqual(detectQuestionCategory(''), 'executive');
+});
+
+test('a question matching more than one area resolves to the first category checked, deterministically', () => {
+  // "collections" is checked before "buyers" — same question asked twice
+  // must resolve the same way every time, not depend on object key order.
+  assert.strictEqual(detectQuestionCategory('Which buyer default drove the drop in collections?'), 'collections');
+});
+
+section('AI assistant — resolveRefsInText / buildFallbackAnswer');
+
+test('every buyer ref token in a reply is replaced with the real name', () => {
+  const nameByRef = new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo'], ['BUYER_2', 'Mr Bello']]);
+  const text = 'BUYER_1 is 30 days late. BUYER_2 has an open promise.';
+  assert.strictEqual(
+    resolveRefsInText(text, nameByRef),
+    'Mrs Adeyemi Okonkwo is 30 days late. Mr Bello has an open promise.'
+  );
+});
+
+test('a ref with no matching name in the map is left as-is, not silently dropped', () => {
+  const nameByRef = new Map([['BUYER_1', 'Mrs Adeyemi Okonkwo']]);
+  assert.strictEqual(resolveRefsInText('BUYER_1 and BUYER_9', nameByRef), 'Mrs Adeyemi Okonkwo and BUYER_9');
+});
+
+test('the fallback answer is built entirely from the context object, with real figures', () => {
+  const answer = buildFallbackAnswer({
+    collections: { this_month: 5_000_000, last_month: 6_200_000 },
+    overdue: { total_amount: 1_250_000, buyer_count: 4 },
+    top_defaulting_buyers: [{ customer_ref: 'BUYER_1', default_risk_score: 88 }],
+  });
+  assert.ok(answer.includes('5,000,000'));
+  assert.ok(answer.includes('6,200,000'));
+  assert.ok(answer.includes('1,250,000'));
+  assert.ok(answer.includes('4'));
+  assert.ok(answer.includes('BUYER_1'));
+  assert.ok(answer.includes('88'));
+});
+
+// SECTION 8 (feature expansion) — institutional memory.
+section('Institutional memory — computeKeyMetrics');
+
+function projectEvent(type, createdAt, data) {
+  return { event_type: type, created_at: createdAt, event_data: data || {} };
+}
+
+test('total_buyers counts DISTINCT customers, not one per reservation', () => {
+  const metrics = computeKeyMetrics([
+    projectEvent('reservation_created', '2026-01-01', { customer_id: 'a' }),
+    projectEvent('reservation_created', '2026-01-05', { customer_id: 'b' }),
+    projectEvent('payment_received', '2026-02-01', { customer_id: 'a', amount: 100 }),
+  ]);
+  assert.strictEqual(metrics.total_buyers, 2);
+});
+
+test('total_collected sums every payment_received amount', () => {
+  const metrics = computeKeyMetrics([
+    projectEvent('payment_received', '2026-01-01', { customer_id: 'a', amount: 500000 }),
+    projectEvent('payment_received', '2026-02-01', { customer_id: 'a', amount: 250000 }),
+  ]);
+  assert.strictEqual(metrics.total_collected, 750000);
+});
+
+test('default_rate is defaults over DISTINCT buyers, null when there were never any buyers', () => {
+  const metrics = computeKeyMetrics([
+    projectEvent('reservation_created', '2026-01-01', { customer_id: 'a' }),
+    projectEvent('reservation_created', '2026-01-01', { customer_id: 'b' }),
+    projectEvent('buyer_defaulted', '2026-02-01', { customer_id: 'a' }),
+  ]);
+  assert.strictEqual(metrics.default_rate, 0.5);
+  assert.strictEqual(computeKeyMetrics([]).default_rate, null);
+});
+
+test('recovery_rate is recoveries over DEFAULTS, null (not 0) when nobody ever defaulted', () => {
+  const noDefaults = computeKeyMetrics([projectEvent('reservation_created', '2026-01-01', { customer_id: 'a' })]);
+  assert.strictEqual(noDefaults.recovery_rate, null);
+
+  const oneOfTwoRecovered = computeKeyMetrics([
+    projectEvent('buyer_defaulted', '2026-01-01', { customer_id: 'a' }),
+    projectEvent('buyer_defaulted', '2026-01-02', { customer_id: 'b' }),
+    projectEvent('buyer_recovered', '2026-02-01', { customer_id: 'a' }),
+  ]);
+  assert.strictEqual(oneOfTwoRecovered.recovery_rate, 0.5);
+});
+
+test('completion_days spans the FIRST reservation to the project_completed event', () => {
+  const metrics = computeKeyMetrics([
+    projectEvent('reservation_created', '2026-01-01T00:00:00Z', { customer_id: 'a' }),
+    projectEvent('reservation_created', '2026-03-01T00:00:00Z', { customer_id: 'b' }), // later, does not count
+    projectEvent('project_completed', '2026-04-01T00:00:00Z', {}),
+  ]);
+  assert.strictEqual(metrics.completion_days, 90);
+});
+
+test('completion_days is null when the project has not actually completed yet', () => {
+  const metrics = computeKeyMetrics([projectEvent('reservation_created', '2026-01-01', { customer_id: 'a' })]);
+  assert.strictEqual(metrics.completion_days, null);
+});
+
+test('the fallback summary is built entirely from key_metrics, with real figures', () => {
+  const summary = buildFallbackSummary('Lekki Gardens', {
+    total_buyers: 10, total_collected: 45_000_000, default_rate: 0.2, recovery_rate: 0.5, completion_days: 365,
+  });
+  assert.ok(summary.includes('Lekki Gardens'));
+  assert.ok(summary.includes('10'));
+  assert.ok(summary.includes('45,000,000'));
+  assert.ok(summary.includes('20%'));
+  assert.ok(summary.includes('50%'));
 });
 
 // SECTION 7 — smart payment plan AI. buildFallbackRecommendation is the pure

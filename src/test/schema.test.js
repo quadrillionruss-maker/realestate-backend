@@ -34,7 +34,15 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql', '054_client_errors.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql', '054_client_errors.sql',
+      // NOTE — 055 through 072 are real, already-shipped migrations that
+      // were never added to this list (a pre-existing gap, found while
+      // adding 073 below, not introduced by it). 073_action_outcomes.sql
+      // has no dependency on anything any of those 18 add, so appending it
+      // straight after 054 here is safe for THIS file's own purposes even
+      // though it does not mirror the real on-disk migration order — see
+      // this feature expansion's Section 1 report for the fuller note.
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -69,7 +77,15 @@ function check(name, cond, detail) {
       '017_paystack_org_keys.sql', '018_resend_org_keys.sql', '019_termii_org_keys.sql', '020_commission_rate_snapshot.sql',
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
-      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql', '054_client_errors.sql']) {
+      '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql', '054_client_errors.sql',
+      // NOTE — 055 through 072 are real, already-shipped migrations that
+      // were never added to this list (a pre-existing gap, found while
+      // adding 073 below, not introduced by it). 073_action_outcomes.sql
+      // has no dependency on anything any of those 18 add, so appending it
+      // straight after 054 here is safe for THIS file's own purposes even
+      // though it does not mirror the real on-disk migration order — see
+      // this feature expansion's Section 1 report for the fuller note.
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -123,6 +139,8 @@ function check(name, cond, detail) {
     're_agent_actions', 're_market_intel_reports', 're_activities', 're_hardship_requests', 're_messages', 're_legal_cases',
     're_financing_requests', 're_handover_checklists', 're_snagging_items', 're_contractors', 're_contractor_payments',
     're_community_posts', 're_community_replies', 're_project_health', 're_cron_runs', 're_admin_actions',
+    're_action_outcomes', 're_recovery_playbook', 're_developer_dna',
+    're_ai_conversations', 're_ai_proactive_insights', 're_project_events', 're_project_summaries',
   ];
   for (const t of expected) {
     check(`table ${t} exists`, tables.includes(t), `have: ${tables.join(', ')}`);
@@ -2499,6 +2517,338 @@ function check(name, cond, detail) {
   await q(`update re_client_errors set resolved_at = now() where id = $1`, [clientErrorId]);
   const [{ resolved_at: clientErrorResolvedAfter }] = await q(`select resolved_at from re_client_errors where id=$1`, [clientErrorId]);
   check('a client error can be marked resolved', clientErrorResolvedAfter !== null);
+
+  // ── 073: outcome database (SECTION 1 — feature expansion) ────────────────
+  const actionOutcomeCols = await colsOf('re_action_outcomes');
+  check('re_action_outcomes has the columns outcomeService selects/inserts',
+    ['organization_id', 'customer_id', 'reservation_id', 'action_type', 'action_taken_at', 'channel',
+      'source_entity_type', 'source_entity_id', 'source_action_id', 'attribution_method',
+      'outcome_type', 'outcome_recorded_at', 'days_to_outcome', 'amount_recovered',
+      'buyer_days_overdue_at_action', 'buyer_credit_score_at_action', 'escalation_stage_at_action', 'created_at']
+      .every((c) => actionOutcomeCols.includes(c)), actionOutcomeCols.join(', '));
+
+  const [{ id: aoUnit }] = await q(
+    `insert into re_units (organization_id, project_id, unit_number, list_price) values ($1,$2,'AO-1',5000000) returning id`,
+    [userId, cmProject]);
+  const [{ id: aoCustomer }] = await q(
+    `insert into re_customers (organization_id, full_name, credit_score) values ($1,'Outcome Buyer',82) returning id`, [userId]);
+  const [{ id: aoReservation }] = await q(
+    `insert into re_reservations (organization_id, unit_id, customer_id) values ($1,$2,$3) returning id`,
+    [userId, aoUnit, aoCustomer]);
+
+  const [{ id: aoPendingId, outcome_type: aoPendingOutcomeType }] = await q(
+    `insert into re_action_outcomes (organization_id, customer_id, reservation_id, action_type, channel)
+     values ($1,$2,$3,'whatsapp_sent','whatsapp') returning id, outcome_type`,
+    [userId, aoCustomer, aoReservation]);
+  check('an action outcome round-trips and starts pending (outcome_type null)', !!aoPendingId && aoPendingOutcomeType === null);
+
+  let badActionTypeRefused = false;
+  try {
+    await q(`insert into re_action_outcomes (organization_id, customer_id, action_type) values ($1,$2,'sms_blast')`,
+      [userId, aoCustomer]);
+  } catch (err) { badActionTypeRefused = /check/i.test(err.message); }
+  check('re_action_outcomes.action_type is limited to the seven known types', badActionTypeRefused);
+
+  let badChannelRefused = false;
+  try {
+    await q(`update re_action_outcomes set channel='telegram' where id=$1`, [aoPendingId]);
+  } catch (err) { badChannelRefused = /check/i.test(err.message); }
+  check('re_action_outcomes.channel is limited to whatsapp|email|sms|call', badChannelRefused);
+
+  let badOutcomeTypeRefused = false;
+  try {
+    await q(`update re_action_outcomes set outcome_type='paid_late', outcome_recorded_at=now() where id=$1`, [aoPendingId]);
+  } catch (err) { badOutcomeTypeRefused = /check/i.test(err.message); }
+  check('re_action_outcomes.outcome_type is limited to the nine known outcomes', badOutcomeTypeRefused);
+
+  let outcomeWithNoRecordedAtRefused = false;
+  try {
+    await q(`update re_action_outcomes set outcome_type='paid_within_24h' where id=$1`, [aoPendingId]);
+  } catch (err) { outcomeWithNoRecordedAtRefused = /check/i.test(err.message); }
+  check('an outcome_type cannot be set without outcome_recorded_at (and vice versa)', outcomeWithNoRecordedAtRefused);
+
+  // The close, done the way outcomeService.closeRow actually does it — an
+  // UPDATE guarded by `where outcome_type is null`, which is the whole
+  // idempotency mechanism this table's write side relies on.
+  const closed1 = await q(
+    `update re_action_outcomes set outcome_type='paid_within_24h', outcome_recorded_at=now(), days_to_outcome=1, amount_recovered=250000
+     where id=$1 and outcome_type is null returning id`, [aoPendingId]);
+  check('closing a pending row with the outcome_type-is-null guard succeeds the first time', closed1.length === 1);
+
+  const closed2 = await q(
+    `update re_action_outcomes set outcome_type='paid_within_7d', outcome_recorded_at=now(), days_to_outcome=5
+     where id=$1 and outcome_type is null returning id`, [aoPendingId]);
+  check('the SAME guarded close on an already-closed row is a no-op — the idempotency the whole write side depends on',
+    closed2.length === 0);
+
+  const [{ outcome_type: aoFinalOutcomeType, amount_recovered: aoFinalAmount }] = await q(
+    `select outcome_type, amount_recovered from re_action_outcomes where id=$1`, [aoPendingId]);
+  check('the row still reflects the FIRST close, not the rejected second attempt',
+    aoFinalOutcomeType === 'paid_within_24h' && Number(aoFinalAmount) === 250000);
+
+  let negativeDaysRefused = false;
+  try {
+    await q(`insert into re_action_outcomes (organization_id, customer_id, action_type, outcome_type, outcome_recorded_at, days_to_outcome)
+      values ($1,$2,'call_logged','no_response',now(),-1)`, [userId, aoCustomer]);
+  } catch (err) { negativeDaysRefused = /check/i.test(err.message); }
+  check('re_action_outcomes.days_to_outcome cannot be negative', negativeDaysRefused);
+
+  // source_action_id is self-referencing — a second row can point back at
+  // the first one (e.g. an escalation attributed to a prior contact
+  // attempt), the shape source_action_id exists for.
+  const [{ id: aoLinkedId }] = await q(
+    `insert into re_action_outcomes (organization_id, customer_id, action_type, source_action_id) values ($1,$2,'call_logged',$3) returning id`,
+    [userId, aoCustomer, aoPendingId]);
+  check('source_action_id can point back at an earlier action_outcomes row', !!aoLinkedId);
+
+  const [{ ok: actionOutcomesGrant, noDelete: actionOutcomesNoDelete }] = await q(
+    `select has_table_privilege('service_role', 'public.re_action_outcomes', 'select')
+        and has_table_privilege('service_role', 'public.re_action_outcomes', 'insert')
+        and has_table_privilege('service_role', 'public.re_action_outcomes', 'update') as ok,
+      not has_table_privilege('service_role', 'public.re_action_outcomes', 'delete') as "noDelete"`);
+  check('service_role can select/insert/update re_action_outcomes', actionOutcomesGrant);
+  check('re_action_outcomes grants no delete — every row is a permanent part of the outcome trail', actionOutcomesNoDelete);
+
+  // ── 074: buyer behavioral fingerprint (SECTION 2 — feature expansion) ────
+  const fingerprintCols = await colsOf('re_customers');
+  check('re_customers has the behavioral fingerprint columns behavioralFingerprintService selects/updates',
+    ['preferred_payment_day_of_month', 'preferred_contact_channel', 'avg_days_to_pay_after_reminder',
+      'promise_reliability_score', 'typical_payment_amount_pattern', 'behavioral_sample_sizes',
+      'behavioral_fingerprint_computed_at']
+      .every((c) => fingerprintCols.includes(c)), fingerprintCols.join(', '));
+
+  const [{ behavioral_sample_sizes: sampleSizesDefault }] = await q(
+    `select behavioral_sample_sizes from re_customers where id=$1`, [aoCustomer]);
+  check('behavioral_sample_sizes defaults to an empty object, not null', JSON.stringify(sampleSizesDefault) === '{}');
+
+  let badDayOfMonthRefused = false;
+  try {
+    await q(`update re_customers set preferred_payment_day_of_month=32 where id=$1`, [aoCustomer]);
+  } catch (err) { badDayOfMonthRefused = /check/i.test(err.message); }
+  check('preferred_payment_day_of_month is constrained to 1-31', badDayOfMonthRefused);
+
+  let badContactChannelRefused = false;
+  try {
+    await q(`update re_customers set preferred_contact_channel='sms' where id=$1`, [aoCustomer]);
+  } catch (err) { badContactChannelRefused = /check/i.test(err.message); }
+  check('preferred_contact_channel is limited to whatsapp|email|call — sms is deliberately excluded', badContactChannelRefused);
+
+  let badPromiseReliabilityRefused = false;
+  try {
+    await q(`update re_customers set promise_reliability_score=150 where id=$1`, [aoCustomer]);
+  } catch (err) { badPromiseReliabilityRefused = /check/i.test(err.message); }
+  check('promise_reliability_score is constrained to 0-100', badPromiseReliabilityRefused);
+
+  let badPaymentPatternRefused = false;
+  try {
+    await q(`update re_customers set typical_payment_amount_pattern='erratic' where id=$1`, [aoCustomer]);
+  } catch (err) { badPaymentPatternRefused = /check/i.test(err.message); }
+  check('typical_payment_amount_pattern is limited to full|partial|variable', badPaymentPatternRefused);
+
+  let goodFingerprintValuesAccepted = true;
+  try {
+    await q(`update re_customers set
+        preferred_payment_day_of_month=15, preferred_contact_channel='whatsapp',
+        avg_days_to_pay_after_reminder=2.5, promise_reliability_score=78,
+        typical_payment_amount_pattern='full', behavioral_sample_sizes='{"payment_day":5}'::jsonb
+      where id=$1`, [aoCustomer]);
+  } catch (err) { goodFingerprintValuesAccepted = false; console.log(`       ${err.message}`); }
+  check('a full set of valid fingerprint values round-trips', goodFingerprintValuesAccepted);
+
+  // ── 075: message specificity (SECTION 3 — feature expansion) ────────────
+  const messageSpecificityCols = await colsOf('re_action_outcomes');
+  check('re_action_outcomes has message_specificity', messageSpecificityCols.includes('message_specificity'));
+
+  const [{ id: aoSpecificId }] = await q(
+    `insert into re_action_outcomes (organization_id, customer_id, action_type, message_specificity) values ($1,$2,'whatsapp_sent','specific') returning id`,
+    [userId, aoCustomer]);
+  check('a specific-message action outcome round-trips', !!aoSpecificId);
+
+  let badMessageSpecificityRefused = false;
+  try {
+    await q(`update re_action_outcomes set message_specificity='vague' where id=$1`, [aoSpecificId]);
+  } catch (err) { badMessageSpecificityRefused = /check/i.test(err.message); }
+  check('message_specificity is limited to specific|generic', badMessageSpecificityRefused);
+
+  let nullMessageSpecificityStillAllowed = true;
+  try {
+    await q(`update re_action_outcomes set message_specificity=null where id=$1`, [aoSpecificId]);
+  } catch (err) { nullMessageSpecificityStillAllowed = false; console.log(`       ${err.message}`); }
+  check('message_specificity can still be null (no message text to classify)', nullMessageSpecificityStillAllowed);
+
+  // ── 076: recovery playbook (SECTION 4 — feature expansion) ───────────────
+  const playbookCols = await colsOf('re_recovery_playbook');
+  check('re_recovery_playbook has the columns recoveryPlaybookService selects/upserts',
+    ['organization_id', 'escalation_stage', 'recovery_rate', 'avg_days_to_recovery',
+      'best_channel', 'best_action_type', 'sample_size', 'computed_at']
+      .every((c) => playbookCols.includes(c)), playbookCols.join(', '));
+
+  const [{ id: playbookRowId, sample_size: playbookSampleDefault }] = await q(
+    `insert into re_recovery_playbook (organization_id, escalation_stage) values ($1,'reminder') returning id, sample_size`,
+    [userId]);
+  check('a recovery playbook row round-trips and sample_size defaults to 0', !!playbookRowId && playbookSampleDefault === 0);
+
+  let badEscalationStageInPlaybookRefused = false;
+  try {
+    await q(`insert into re_recovery_playbook (organization_id, escalation_stage) values ($1,'overdue')`, [userId]);
+  } catch (err) { badEscalationStageInPlaybookRefused = /check/i.test(err.message); }
+  check('re_recovery_playbook.escalation_stage is limited to the five known stages', badEscalationStageInPlaybookRefused);
+
+  let duplicateStageForSameOrgRefused = false;
+  try {
+    await q(`insert into re_recovery_playbook (organization_id, escalation_stage) values ($1,'reminder')`, [userId]);
+  } catch (err) { duplicateStageForSameOrgRefused = /unique|duplicate/i.test(err.message); }
+  check('only one playbook row per (organization, escalation_stage) — the weekly recompute upserts, never duplicates', duplicateStageForSameOrgRefused);
+
+  const upserted = await q(
+    `insert into re_recovery_playbook (organization_id, escalation_stage, recovery_rate, avg_days_to_recovery, best_channel, best_action_type, sample_size)
+     values ($1,'reminder',0.4300,8.2,'whatsapp','call_logged',14)
+     on conflict (organization_id, escalation_stage) do update set
+       recovery_rate=excluded.recovery_rate, avg_days_to_recovery=excluded.avg_days_to_recovery,
+       best_channel=excluded.best_channel, best_action_type=excluded.best_action_type, sample_size=excluded.sample_size
+     returning recovery_rate, sample_size`, [userId]);
+  check('the same upsert recoveryPlaybookService.computePlaybook uses updates the existing row in place',
+    upserted.length === 1 && Number(upserted[0].recovery_rate) === 0.43 && upserted[0].sample_size === 14);
+
+  const [{ organization_id: rpcOrgId }] = await q(`select * from distinct_action_outcome_org_ids() limit 1`);
+  check('distinct_action_outcome_org_ids() returns the fixture org, having recorded outcomes earlier in this file',
+    rpcOrgId === userId);
+
+  // ── 077: developer DNA profile (SECTION 5 — feature expansion) ──────────
+  const dnaCols = await colsOf('re_developer_dna');
+  check('re_developer_dna has the columns developerDnaService selects/upserts',
+    ['organization_id', 'avg_buyer_default_rate', 'avg_days_reservation_to_allocation_letter',
+      'milestone_completion_rate', 'restructuring_rate', 'avg_restructuring_month',
+      'promise_kept_rate', 'avg_credit_score', 'collections_consistency_score',
+      'rep_gini_coefficient', 'computed_at']
+      .every((c) => dnaCols.includes(c)), dnaCols.join(', '));
+
+  const [{ id: dnaRowId }] = await q(
+    `insert into re_developer_dna (organization_id, avg_buyer_default_rate, rep_gini_coefficient) values ($1,0.12,0.35) returning id`,
+    [userId]);
+  check('a developer DNA row round-trips', !!dnaRowId);
+
+  let secondDnaRowForSameOrgRefused = false;
+  try {
+    await q(`insert into re_developer_dna (organization_id) values ($1)`, [userId]);
+  } catch (err) { secondDnaRowForSameOrgRefused = /unique|duplicate/i.test(err.message); }
+  check('only one developer DNA row per organization — the weekly recompute upserts, never duplicates', secondDnaRowForSameOrgRefused);
+
+  const [{ ok: dnaGrant }] = await q(
+    `select has_table_privilege('service_role', 'public.re_developer_dna', 'select')
+        and has_table_privilege('service_role', 'public.re_developer_dna', 'insert')
+        and has_table_privilege('service_role', 'public.re_developer_dna', 'update') as ok`);
+  check('service_role can select/insert/update re_developer_dna', dnaGrant);
+
+  // ── 078: AI Business Intelligence Assistant (SECTION 6 — feature expansion)
+  const conversationCols = await colsOf('re_ai_conversations');
+  check('re_ai_conversations has the columns aiAssistantService selects/inserts',
+    ['organization_id', 'user_id', 'question', 'answer', 'question_category',
+      'context_snapshot', 'tokens_used', 'generated_by', 'created_at']
+      .every((c) => conversationCols.includes(c)), conversationCols.join(', '));
+
+  const [{ id: conversationId, generated_by: conversationGeneratedByDefault }] = await q(
+    `insert into re_ai_conversations (organization_id, user_id, question, answer, question_category)
+     values ($1,$2,'Why did collections drop?','Because of Project X.','collections') returning id, generated_by`,
+    [userId, userId]);
+  check('an AI conversation round-trips and generated_by defaults to model', !!conversationId && conversationGeneratedByDefault === 'model');
+
+  let badQuestionCategoryRefused = false;
+  try {
+    await q(`update re_ai_conversations set question_category='marketing' where id=$1`, [conversationId]);
+  } catch (err) { badQuestionCategoryRefused = /check/i.test(err.message); }
+  check('re_ai_conversations.question_category is limited to the six known categories', badQuestionCategoryRefused);
+
+  const [{ ok: conversationGrant, noUpdate: conversationNoUpdate }] = await q(
+    `select has_table_privilege('service_role', 'public.re_ai_conversations', 'select')
+        and has_table_privilege('service_role', 'public.re_ai_conversations', 'insert') as ok,
+      not has_table_privilege('service_role', 'public.re_ai_conversations', 'update') as "noUpdate"`);
+  check('service_role can select/insert re_ai_conversations', conversationGrant);
+  check('re_ai_conversations is append-only — the transcript is never edited after the fact', conversationNoUpdate);
+
+  const insightCols = await colsOf('re_ai_proactive_insights');
+  check('re_ai_proactive_insights has the columns the assistant selects/inserts',
+    ['organization_id', 'message', 'question', 'trigger_reason', 'dismissed_at', 'created_at']
+      .every((c) => insightCols.includes(c)), insightCols.join(', '));
+
+  const [{ id: insightId, dismissed_at: insightDismissedDefault }] = await q(
+    `insert into re_ai_proactive_insights (organization_id, message, question, trigger_reason)
+     values ($1,'Collections are down 18 percent this month.','Why did collections drop?','collections_drop') returning id, dismissed_at`,
+    [userId]);
+  check('a proactive insight round-trips and starts undismissed', !!insightId && insightDismissedDefault === null);
+
+  let badTriggerReasonRefused = false;
+  try {
+    await q(`insert into re_ai_proactive_insights (organization_id, message, question, trigger_reason) values ($1,'x','y','random_hunch')`, [userId]);
+  } catch (err) { badTriggerReasonRefused = /check/i.test(err.message); }
+  check('re_ai_proactive_insights.trigger_reason is limited to the four known triggers', badTriggerReasonRefused);
+
+  await q(`update re_ai_proactive_insights set dismissed_at = now() where id=$1`, [insightId]);
+  const [{ dismissed_at: insightDismissedAfter }] = await q(`select dismissed_at from re_ai_proactive_insights where id=$1`, [insightId]);
+  check('a proactive insight can be dismissed', insightDismissedAfter !== null);
+
+  // ── 079: longitudinal project timeline (SECTION 7 — feature expansion) ───
+  const projectEventCols = await colsOf('re_project_events');
+  check('re_project_events has the columns projectTimelineService selects/inserts',
+    ['organization_id', 'project_id', 'event_type', 'event_data', 'created_at']
+      .every((c) => projectEventCols.includes(c)), projectEventCols.join(', '));
+
+  const [{ id: projectEventId }] = await q(
+    `insert into re_project_events (organization_id, project_id, event_type, event_data)
+     values ($1,$2,'reservation_created','{"customer_id":"x"}'::jsonb) returning id`,
+    [userId, cmProject]);
+  check('a project event round-trips', !!projectEventId);
+
+  let badEventTypeRefused = false;
+  try {
+    await q(`insert into re_project_events (organization_id, project_id, event_type) values ($1,$2,'buyer_won_the_lottery')`,
+      [userId, cmProject]);
+  } catch (err) { badEventTypeRefused = /check/i.test(err.message); }
+  check('re_project_events.event_type is limited to the twelve known types', badEventTypeRefused);
+
+  const [{ 'count': projectEventCount }] = await q(
+    `select count(*)::int from re_project_events where project_id=$1 and organization_id=$2`, [cmProject, userId]);
+  check('the timeline can be queried back per project', projectEventCount > 0);
+
+  const [{ ok: projectEventGrant }] = await q(
+    `select has_table_privilege('service_role', 'public.re_project_events', 'select')
+        and has_table_privilege('service_role', 'public.re_project_events', 'insert') as ok`);
+  check('service_role can select/insert re_project_events', projectEventGrant);
+
+  // ── 080: institutional memory (SECTION 8 — feature expansion) ───────────
+  const projectSummaryCols = await colsOf('re_project_summaries');
+  check('re_project_summaries has the columns projectSummaryService selects/upserts',
+    ['organization_id', 'project_id', 'summary_text', 'key_metrics', 'generated_by', 'generated_at']
+      .every((c) => projectSummaryCols.includes(c)), projectSummaryCols.join(', '));
+
+  const [{ id: projectSummaryId, generated_by: projectSummaryGeneratedByDefault }] = await q(
+    `insert into re_project_summaries (organization_id, project_id, summary_text, key_metrics)
+     values ($1,$2,'A steady project with no notable defaults.','{"total_buyers":4}'::jsonb) returning id, generated_by`,
+    [userId, cmProject]);
+  check('a project summary round-trips and generated_by defaults to model',
+    !!projectSummaryId && projectSummaryGeneratedByDefault === 'model');
+
+  let secondSummaryForSameProjectRefused = false;
+  try {
+    await q(`insert into re_project_summaries (organization_id, project_id, summary_text) values ($1,$2,'Another one')`,
+      [userId, cmProject]);
+  } catch (err) { secondSummaryForSameProjectRefused = /unique|duplicate/i.test(err.message); }
+  check('only one summary per (organization, project) — regeneration upserts, never duplicates', secondSummaryForSameProjectRefused);
+
+  const upsertedSummary = await q(
+    `insert into re_project_summaries (organization_id, project_id, summary_text, generated_by)
+     values ($1,$2,'Updated summary after a late payment was recorded.','fallback')
+     on conflict (organization_id, project_id) do update set summary_text=excluded.summary_text, generated_by=excluded.generated_by
+     returning summary_text, generated_by`, [userId, cmProject]);
+  check('regenerating a summary updates the existing row in place',
+    upsertedSummary.length === 1 && upsertedSummary[0].summary_text === 'Updated summary after a late payment was recorded.'
+      && upsertedSummary[0].generated_by === 'fallback');
+
+  let badGeneratedByOnSummaryRefused = false;
+  try {
+    await q(`update re_project_summaries set generated_by='guessed' where id=$1`, [projectSummaryId]);
+  } catch (err) { badGeneratedByOnSummaryRefused = /check/i.test(err.message); }
+  check('re_project_summaries.generated_by is limited to model|fallback', badGeneratedByOnSummaryRefused);
 
   // admin_wipe_organization — exercised against the SAME fixture org every
   // assertion above this point has been building up (userId), deliberately

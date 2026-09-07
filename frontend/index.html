@@ -440,6 +440,29 @@
   </a>
 </nav>
 
+<!-- SECTION 6 (feature expansion) — AI Business Intelligence Assistant.
+     "Archta Intelligence": a floating chat bubble on every screen, owner/
+     sales_director only (realestate.js's initAiAssistant shows/hides it off
+     R.can('ai.ask'), the same permission POST /ai/ask itself is gated on).
+     Both start hidden — realestate.js unhides the bubble once R.can is
+     known, and the panel only ever opens on a click. -->
+<button class="ai-chat-bubble hidden" id="ai-chat-bubble" type="button" aria-label="Archta Intelligence">
+  <span aria-hidden="true">💬</span>
+  <span class="ai-chat-unread hidden" id="ai-chat-unread"></span>
+</button>
+
+<aside class="ai-chat-panel hidden" id="ai-chat-panel" role="dialog" aria-label="Archta Intelligence" aria-modal="false">
+  <div class="ai-chat-head">
+    <span class="ai-chat-title">Archta Intelligence</span>
+    <button class="icon-btn" id="ai-chat-close" type="button" aria-label="Close">×</button>
+  </div>
+  <div class="ai-chat-messages" id="ai-chat-messages"></div>
+  <form class="ai-chat-input-row" id="ai-chat-form">
+    <textarea id="ai-chat-input" rows="1" placeholder="Ask about your business…" autocomplete="off"></textarea>
+    <button class="btn primary" id="ai-chat-send" type="submit">Send</button>
+  </form>
+</aside>
+
 <div class="toasts" id="toasts"></div>
 <div id="overlay"></div>
 

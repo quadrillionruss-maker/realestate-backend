@@ -17,10 +17,14 @@
 const cron = require('node-cron');
 const env = require('../config/env');
 const { supabaseAdmin } = require('../middleware/orgContext');
-const { markOverdue } = require('../services/overdueService');
-const { generateDailyBrief } = require('../services/aiBrief');
+const { markOverdue, lagosToday } = require('../services/overdueService');
+const { generateDailyBrief, isMonday } = require('../services/aiBrief');
 const { sweepBrokenPromises } = require('../services/promiseService');
 const { sweepEscalations } = require('../services/escalationService');
+const { sweepUnresolvedOutcomes } = require('../services/outcomeService');
+const { recomputeForAllOrgs: recomputeRecoveryPlaybook } = require('../services/recoveryPlaybookService');
+const { recomputeForAllOrgs: recomputeDeveloperDna } = require('../services/developerDnaService');
+const aiAssistant = require('../services/aiAssistantService');
 const { notifyOverdue, remindUpcoming } = require('../services/overdueAlerts');
 const { checkTenancyRenewals } = require('../services/rentalService');
 const { sweepOverdueContractorPayments } = require('../services/contractorService');
@@ -119,6 +123,49 @@ async function runDailyJob() {
     console.log(`[re-daily] raised escalation on ${escalations.raised} reservation(s)`);
   }
 
+  // SECTION 1 (feature expansion) — outcome database. Closes any
+  // still-open awaiting-payment action row (whatsapp/email/call/agent-
+  // followup/campaign) past outcomeService.NO_RESPONSE_WINDOW_DAYS as
+  // no_response. Platform-wide, same shape as the two sweeps above —
+  // idempotent by construction (see outcomeService.sweepUnresolvedOutcomes'
+  // own comment), so a retry after a partial failure just finds fewer rows
+  // still open.
+  const outcomeSweep = await sweepUnresolvedOutcomes().catch((err) => {
+    console.error('[re-daily] outcome sweep failed:', err.message);
+    return { closed: 0 };
+  });
+  if (outcomeSweep.closed) {
+    console.log(`[re-daily] closed ${outcomeSweep.closed} unresolved outcome row(s) as no_response`);
+  }
+
+  // SECTION 4 (feature expansion) — recovery playbook. Monday only, same
+  // isMonday() gate and reasoning aiBrief.js's own weekly project-health
+  // summary already uses: this is a stage-by-stage RECOMMENDATION, not a
+  // same-day fact like the sweeps above, and recomputing it daily would
+  // just repeat last week's near-identical answer at 6x the cost.
+  if (isMonday(lagosToday())) {
+    const playbook = await recomputeRecoveryPlaybook().catch((err) => {
+      console.error('[re-daily] recovery playbook recompute failed:', err.message);
+      return { computed: 0 };
+    });
+    if (playbook.computed) {
+      console.log(`[re-daily] recomputed the recovery playbook for ${playbook.computed} org(s)`);
+    }
+
+    // SECTION 5 (feature expansion) — developer DNA profile. Same Monday
+    // gate: a workspace's own operating fingerprint moves slowly enough
+    // that a weekly recompute is the right cadence, and peer benchmarking
+    // needs every eligible org's row already sitting here to average
+    // across on read.
+    const dna = await recomputeDeveloperDna().catch((err) => {
+      console.error('[re-daily] developer DNA recompute failed:', err.message);
+      return { computed: 0 };
+    });
+    if (dna.computed) {
+      console.log(`[re-daily] recomputed the developer DNA profile for ${dna.computed} org(s)`);
+    }
+  }
+
   // A tenancy inside 60 days of its end gets a task asking whether to renew or
   // end it. Filed once per lease (title-matched against open AI tasks), so a
   // sweep that runs every morning for two months does not ask twice.
@@ -185,9 +232,11 @@ async function runDailyJob() {
   await mapWithConcurrency(orgIds, ORG_CONCURRENCY, async (orgId) => {
     // Alerts first: a rep should hear that their buyer missed a payment even
     // if OpenAI is down and the brief fails.
+    let newOverdueCount = 0;
     try {
       const result = await notifyOverdue(orgId);
       alerted += result.sent;
+      newOverdueCount = result.new_overdue || 0;
     } catch (err) {
       console.error(`[re-daily] overdue alerts failed for org ${orgId}:`, err.message);
     }
@@ -207,6 +256,18 @@ async function runDailyJob() {
     } catch (err) {
       // One org's failure must not cost every other org their morning brief.
       console.error(`[re-daily] brief failed for org ${orgId}:`, err.message);
+    }
+
+    // SECTION 6 (feature expansion) — AI assistant proactive insights.
+    // Deliberately AFTER the brief above, per the commissioning spec's own
+    // "once per day after brief generation" — reuses notifyOverdue's own
+    // new_overdue count from moments ago rather than re-querying "who
+    // became overdue today" a second time this same pass.
+    try {
+      const insight = await aiAssistant.checkProactiveInsights(orgId, { newOverdueCount });
+      if (insight) console.log(`[re-daily] filed a proactive insight for org ${orgId}`);
+    } catch (err) {
+      console.error(`[re-daily] proactive insight check failed for org ${orgId}:`, err.message);
     }
 
     // SECTION 11 — the five v2 agents, each one AFTER the brief above (some

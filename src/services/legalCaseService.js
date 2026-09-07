@@ -15,6 +15,7 @@ const { fillPlaceholders } = require('./documentService');
 const { uploadPdf } = require('./documentStorage');
 const { contractValue } = require('./restructureService');
 const { audit, auditSystem } = require('./auditService');
+const projectTimeline = require('./projectTimelineService');
 const notify = require('./notificationService');
 
 const TEMPLATE_PATH = path.join(__dirname, '../templates/demand_letter.html');
@@ -163,7 +164,7 @@ async function openCase(req, { customerId, reservationId, lawyerName, lawyerPhon
 
   const { data: reservation } = await supabaseAdmin
     .from('re_reservations')
-    .select('id, customer_id')
+    .select('id, customer_id, re_units(project_id)')
     .eq('id', reservationId)
     .eq('organization_id', req.orgId)
     .maybeSingle();
@@ -222,6 +223,14 @@ async function openCase(req, { customerId, reservationId, lawyerName, lawyerPhon
       template: 'legal_case_opened',
       relatedType: 're_customers',
       relatedId: customerId,
+    });
+  }
+
+  // SECTION 7 (feature expansion) — longitudinal project timeline.
+  if (reservation.re_units?.project_id) {
+    await projectTimeline.logEvent(req.orgId, reservation.re_units.project_id, 'legal_action', {
+      reservation_id: reservationId, customer_id: customerId, customer_name: customer?.full_name || null,
+      legal_case_id: legalCase.id,
     });
   }
 

@@ -31,12 +31,15 @@ const { escapeHtml } = require('../utils/escapeHtml');
 const creditScore = require('./creditScoreService');
 const defaultRisk = require('./defaultRiskService');
 const contactTiming = require('./contactTimingService');
+const behavioralFingerprint = require('./behavioralFingerprintService');
 const jointSale = require('./jointSaleService');
 const referrals = require('./referralService');
 const pushService = require('./pushService');
 const portalNotifications = require('./portalNotificationService');
 const featureUsage = require('./featureUsageService');
 const { generateDocument } = require('./documentService');
+const outcomes = require('./outcomeService');
+const projectTimeline = require('./projectTimelineService');
 
 const naira = (amount) => {
   const n = Number(amount || 0);
@@ -197,15 +200,43 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
         .eq('schedule_id', schedule.id)
         .eq('status', 'open')
         .select('id');
-      if (kept?.length) outcome.promise = 'kept';
+      if (kept?.length) {
+        outcome.promise = 'kept';
+        // SECTION 1 (feature expansion) — outcome database. This path
+        // closes the promise directly (not through promiseService.
+        // resolvePromise), so it has to record the same outcome row itself
+        // — closeBySource is idempotent per (customer, source entity), so
+        // a promise ALSO caught by the morning sweep before this payment
+        // posts is simply a no-op here.
+        for (const row of kept) {
+          await outcomes.closeBySource(orgId, customer.id, 're_payment_promises', row.id, { outcomeType: 'promised_kept' });
+        }
+      }
     } catch (err) {
       console.warn('[payment-events] could not close promise:', err.message);
     }
 
     // If nothing is overdue on this reservation any more, the buyer is back in
     // good standing and should stop receiving formal-notice wording.
-    await maybeDeescalate(orgId, reservation.id);
+    const deescalated = await maybeDeescalate(orgId, reservation.id);
+    // SECTION 7 (feature expansion) — longitudinal project timeline. Only
+    // when this reservation was genuinely AT a worse stage a moment ago —
+    // maybeDeescalate's own return tells "just cleared" from "was already
+    // fine", the same distinction handoverService's signed_off trigger
+    // checks for its own dedup.
+    if (deescalated && project.id) {
+      await projectTimeline.logEvent(orgId, project.id, 'buyer_recovered', {
+        reservation_id: reservation.id, customer_id: customer.id, customer_name: customer.full_name || null,
+      });
+    }
   }
+
+  // ── Outcome database (SECTION 1 — feature expansion) ─────────────────────
+  // Attributes this payment to whichever awaiting-payment action (a
+  // WhatsApp, an email, a logged call, a campaign send) is still open and
+  // most recent for this buyer — best-effort correlation, not proof that
+  // action caused this payment, per outcomeService's own header.
+  await outcomes.recordPaymentOutcome(orgId, customer.id, Number(payment.amount));
 
   // ── Outright sale completion (FEATURE — outright sales) ──────────────────
   // An outright reservation always has a one-row plan due immediately (see
@@ -237,6 +268,11 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
   // A payment is one of the two signals this reads (the other is activity
   // log entries) — see contactTimingService.js.
   await contactTiming.recompute(orgId, customer.id);
+
+  // ── Behavioral fingerprint (SECTION 2 — feature expansion) ────────────────
+  // Every dimension this reads (payment day-of-month, payment pattern,
+  // promise reliability) can move on any payment.
+  await behavioralFingerprint.recompute(orgId, customer.id);
 
   // ── Referral completion (SECTION 5) ──────────────────────────────────────
   // A no-op unless this customer was referred AND this is their first ever
@@ -299,6 +335,14 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
     reversible: true,
     reversalData: { payment_id: paymentId, commission_id: accrual.accrued ? accrual.commission.id : null },
   });
+
+  // SECTION 7 (feature expansion) — longitudinal project timeline.
+  if (project.id) {
+    await projectTimeline.logEvent(orgId, project.id, 'payment_received', {
+      reservation_id: reservation.id, customer_id: customer.id, customer_name: customer.full_name || null,
+      amount: Number(payment.amount), method: payment.method,
+    });
+  }
 
   return outcome;
 }
@@ -415,6 +459,12 @@ async function orgSettings(orgId) {
 // escalation that real arrears on the old term still justify. Restructuring
 // costs this nothing in the other direction — it WAIVES the old plan's
 // unpaid rows, and a waived row is never 'overdue'.
+// Returns true only when a reservation genuinely WAS at a worse stage a
+// moment ago and this call is what cleared it — false for "still overdue
+// elsewhere" and for "was already at 'none', nothing to clear" alike. SECTION
+// 7 (feature expansion)'s own buyer_recovered project event depends on this
+// distinction, the same way handoverService's signed_off trigger already
+// checks "just happened" vs "already was" before firing its own side effect.
 async function maybeDeescalate(orgId, reservationId) {
   try {
     const { data: stillOverdue } = await supabaseAdmin
@@ -425,16 +475,19 @@ async function maybeDeescalate(orgId, reservationId) {
       .eq('status', 'overdue')
       .limit(1);
 
-    if (stillOverdue?.length) return;
+    if (stillOverdue?.length) return false;
 
-    await supabaseAdmin
+    const { data: cleared } = await supabaseAdmin
       .from('re_reservations')
       .update({ escalation_stage: 'none', escalated_at: null })
       .eq('id', reservationId)
       .eq('organization_id', orgId)
-      .neq('escalation_stage', 'none');
+      .neq('escalation_stage', 'none')
+      .select('id');
+    return Boolean(cleared?.length);
   } catch (err) {
     console.warn('[payment-events] could not de-escalate:', err.message);
+    return false;
   }
 }
 

@@ -47,5 +47,7 @@ router.use('/client-errors', require('./clientErrors'));
 router.use('/attendance', require('./attendance'));
 router.use('/logs', require('./logs'));
 router.use('/campaigns', require('./campaigns'));
+router.use('/analytics', require('./analytics'));
+router.use('/ai', require('./ai'));
 
 module.exports = router;

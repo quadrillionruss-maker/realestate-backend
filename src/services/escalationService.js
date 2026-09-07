@@ -17,6 +17,8 @@
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { auditSystem } = require('./auditService');
 const { mapWithConcurrency } = require('../utils/concurrency');
+const outcomes = require('./outcomeService');
+const projectTimeline = require('./projectTimelineService');
 
 const ESCALATION_CONCURRENCY = 8;
 
@@ -116,7 +118,7 @@ async function sweepEscalations(orgId = null) {
   const ids = [...overdueByReservation.keys()];
   const { data: reservations, error: resErr } = await supabaseAdmin
     .from('re_reservations')
-    .select('id, organization_id, escalation_stage, status')
+    .select('id, organization_id, escalation_stage, status, customer_id, re_units(project_id), re_customers(full_name)')
     .in('id', ids);
   if (resErr) throw resErr;
 
@@ -166,6 +168,33 @@ async function sweepEscalations(orgId = null) {
       summary: `Escalated from ${current.label} to ${target.label} — ${count} overdue installments`,
       metadata: { from: current.key, to: target.key, overdue_count: count },
     });
+
+    // SECTION 1 (feature expansion) — outcome database. Escalating despite
+    // whatever contact was most recently attempted is itself the outcome
+    // worth recording against that attempt — best-effort correlation, same
+    // as payment attribution, not a claim the earlier action caused this.
+    // A reservation with no open action at all (nobody has tried anything
+    // recently) simply has nothing to attribute — closeMostRecentOpen
+    // returns null and nothing is written, which is correct: there is no
+    // false attribution to avoid here, just nothing to record.
+    if (reservation.customer_id) {
+      await outcomes.closeMostRecentOpen(reservation.organization_id, reservation.customer_id, {
+        outcomeType: 'escalated',
+      });
+    }
+
+    // SECTION 7 (feature expansion) — longitudinal project timeline.
+    // buyer_defaulted fires once per reservation — the FIRST time it ever
+    // leaves 'none', not every further stage raise past that (a buyer
+    // sliding from reminder to formal_notice is still the SAME default,
+    // not a second one).
+    const projectId = reservation.re_units?.project_id;
+    if (projectId && current.key === 'none') {
+      await projectTimeline.logEvent(reservation.organization_id, projectId, 'buyer_defaulted', {
+        reservation_id: reservation.id, customer_id: reservation.customer_id,
+        customer_name: reservation.re_customers?.full_name || null, overdue_count: count,
+      });
+    }
   });
 
   return { evaluated: overdueByReservation.size, raised };

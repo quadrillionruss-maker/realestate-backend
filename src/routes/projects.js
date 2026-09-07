@@ -6,6 +6,8 @@ const { audit } = require('../services/auditService');
 const construction = require('../services/constructionService');
 const contractors = require('../services/contractorService');
 const projectHealth = require('../services/projectHealthService');
+const projectTimeline = require('../services/projectTimelineService');
+const { generateSummary: generateProjectSummary, getSummary: getProjectSummary } = require('../services/projectSummaryService');
 const router = express.Router();
 
 // Up to 10 photos per milestone, a handful of milestones per project — this
@@ -116,6 +118,14 @@ router.patch('/:id', requirePermission('inventory.write'), async (req, res, next
       return res.status(400).json({ error: 'No updatable fields provided' });
     }
 
+    // SECTION 7 (feature expansion) — read BEFORE the update, so the
+    // project_completed timeline event below can tell "just went sold_out"
+    // from "already was, this is an unrelated later edit" — same dedup
+    // shape handoverService's own signed_off trigger already uses.
+    const wasAlreadySoldOut = updates.status === 'sold_out'
+      ? (await supabaseAdmin.from('re_projects').select('status').eq('id', req.params.id).eq('organization_id', req.orgId).maybeSingle()).data?.status === 'sold_out'
+      : true;
+
     const { data, error } = await supabaseAdmin
       .from('re_projects')
       .update(updates)
@@ -133,6 +143,21 @@ router.patch('/:id', requirePermission('inventory.write'), async (req, res, next
       summary: `Project "${data.name}" updated`,
       metadata: updates,
     });
+
+    // There is no literal "completed" project status in this schema —
+    // 'sold_out' (migrations/001) is its closest equivalent, see
+    // migrations/079's own header.
+    if (data.status === 'sold_out' && !wasAlreadySoldOut) {
+      await projectTimeline.logEvent(req.orgId, data.id, 'project_completed', {});
+      // SECTION 8 (feature expansion) — institutional memory. Generated
+      // once, here, at the moment a project completes — never inline in
+      // this response (an OpenAI round trip has no place blocking a status
+      // PATCH), and never throws over it: the status change is already
+      // real and committed by this point.
+      generateProjectSummary(req.orgId, data.id).catch((err) => {
+        console.warn('[projects] could not generate the project summary:', err.message);
+      });
+    }
 
     res.json(data);
   } catch (e) { next(e); }
@@ -157,6 +182,43 @@ router.get('/:id/milestones', requirePermission('inventory.read'), async (req, r
   try {
     if (!(await assertProjectInOrg(req, res))) return;
     res.json(await construction.getMilestones(req.orgId, req.params.id));
+  } catch (e) { next(e); }
+});
+
+// SECTION 7 (feature expansion) — longitudinal project timeline. Same
+// inventory.read tier as milestones just above: a full operational history
+// (reservations, payments, defaults/recoveries, restructures, documents,
+// legal action, handovers, completion) is descriptive, not a financial
+// amount gated behind financial.view the way a naira figure would be.
+router.get('/:id/timeline', requirePermission('inventory.read'), async (req, res, next) => {
+  try {
+    if (!(await assertProjectInOrg(req, res))) return;
+    res.json(await projectTimeline.getTimeline(req.orgId, req.params.id));
+  } catch (e) { next(e); }
+});
+
+// SECTION 8 (feature expansion) — institutional memory. null until the
+// project has actually completed (generateProjectSummary only ever runs
+// off the project_completed trigger above) — a project still in progress
+// simply has no summary yet, not an empty placeholder one.
+router.get('/:id/summary', requirePermission('inventory.read'), async (req, res, next) => {
+  try {
+    if (!(await assertProjectInOrg(req, res))) return;
+    res.json(await getProjectSummary(req.orgId, req.params.id));
+  } catch (e) { next(e); }
+});
+
+// Manual regenerate — the spec's own "if underlying data changes after the
+// fact, provide a mechanism to regenerate rather than presenting a stale
+// summary". Same tier as writing to the project at all (inventory.write,
+// not the read-only tier the GET above uses) — this re-runs a real OpenAI
+// call, not a free read.
+router.post('/:id/summary/regenerate', requirePermission('inventory.write'), async (req, res, next) => {
+  try {
+    if (!(await assertProjectInOrg(req, res))) return;
+    const summary = await generateProjectSummary(req.orgId, req.params.id);
+    if (!summary) return res.status(404).json({ error: 'Project not found' });
+    res.json(summary);
   } catch (e) { next(e); }
 });
 

@@ -1680,6 +1680,7 @@
     await renderRoute();
     refreshCounts();
     refreshNotifBell();
+    initAiAssistant();
   }
 
   function showGate() {
@@ -1933,6 +1934,7 @@
     wireSearch();
     wireCallLinks();
     wireNotifBell();
+    wireAiChat();
 
     el('btn-signout').addEventListener('click', function () { signOut(); });
     el('btn-signout-icon').addEventListener('click', function () { signOut(); });
@@ -2253,6 +2255,154 @@
     button.addEventListener('click', function () {
       if (notifDropdownOpen) closeNotifDropdown();
       else openNotifDropdown();
+    });
+  }
+
+  // ── SECTION 6 (feature expansion) — AI Business Intelligence Assistant ──
+  // "Archta Intelligence". The bubble/panel markup lives in index.html,
+  // hidden until initAiAssistant (called from enterApp, once role/
+  // permissions are known) decides whether this signed-in person can ask
+  // it anything at all — same R.can('ai.ask') gate POST /ai/ask itself
+  // enforces server-side; hiding the bubble here is convenience, not the
+  // real boundary.
+  var aiChatHistory = []; // [{role: 'user'|'assistant', content, fallback, pending}]
+  var aiChatPendingInsight = null;
+
+  var AI_SUGGESTED_QUESTIONS = [
+    'Why did collections drop this month?',
+    'Which buyers are most likely to default?',
+    'Which project is performing best?',
+    'How many unsigned documents do we have?',
+    'What changed since last week?',
+  ];
+
+  function initAiAssistant() {
+    var bubble = el('ai-chat-bubble');
+    if (!bubble) return;
+    var canAsk = can('ai.ask');
+    bubble.classList.toggle('hidden', !canAsk);
+    if (canAsk) refreshAiProactiveInsight();
+  }
+
+  async function refreshAiProactiveInsight() {
+    try {
+      var insight = await api('/ai/proactive-insight');
+      aiChatPendingInsight = insight || null;
+      var dot = el('ai-chat-unread');
+      if (dot) dot.classList.toggle('hidden', !insight);
+    } catch (e) { /* the bubble's unread dot is decoration, never worth breaking a screen over */ }
+  }
+
+  function renderAiChatMessages() {
+    var container = el('ai-chat-messages');
+    if (!container) return;
+
+    if (!aiChatHistory.length) {
+      container.innerHTML =
+        '<p class="page-sub mb-2">Ask a question about your business — collections, buyers at risk, ' +
+          'which project needs attention, anything.</p>' +
+        '<div class="ai-chat-suggested">' +
+          AI_SUGGESTED_QUESTIONS.map(function (q) {
+            return '<button type="button" class="ai-chat-suggested-item" data-suggested="' + esc(q) + '">' + esc(q) + '</button>';
+          }).join('') +
+        '</div>';
+      qsa('[data-suggested]', container).forEach(function (btn) {
+        btn.addEventListener('click', function () { sendAiChatMessage(btn.dataset.suggested); });
+      });
+      return;
+    }
+
+    container.innerHTML = aiChatHistory.map(function (m) {
+      if (m.pending) return '<div class="ai-chat-message pending">Thinking…</div>';
+      var cls = 'ai-chat-message ' + m.role + (m.fallback ? ' is-fallback' : '');
+      return '<div class="' + cls + '">' + esc(m.content) + '</div>';
+    }).join('');
+    container.scrollTop = container.scrollHeight;
+  }
+
+  async function sendAiChatMessage(text) {
+    text = String(text || '').trim();
+    if (!text) return;
+
+    // Last 10 turns BEFORE this one — the question itself is sent
+    // separately as `question`, not folded into the history array.
+    var historyForServer = aiChatHistory
+      .filter(function (m) { return !m.pending; })
+      .slice(-10)
+      .map(function (m) { return { role: m.role, content: m.content }; });
+
+    aiChatHistory.push({ role: 'user', content: text });
+    aiChatHistory.push({ role: 'assistant', content: '', pending: true });
+    renderAiChatMessages();
+
+    var input = el('ai-chat-input');
+    if (input) input.value = '';
+
+    try {
+      var result = await api.post('/ai/ask', { question: text, conversation_history: historyForServer });
+      aiChatHistory.pop();
+      aiChatHistory.push({ role: 'assistant', content: result.answer, fallback: result.generated_by === 'fallback' });
+    } catch (err) {
+      aiChatHistory.pop();
+      aiChatHistory.push({ role: 'assistant', content: err.message || 'Something went wrong. Try again.', fallback: true });
+    }
+    renderAiChatMessages();
+  }
+
+  function openAiChatPanel() {
+    var panel = el('ai-chat-panel');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+
+    // A pending proactive insight pre-fills the question (not auto-sent —
+    // the person still reads and decides to send it) and is dismissed the
+    // moment it is shown, so it does not reappear on the next visit.
+    if (aiChatPendingInsight) {
+      var input = el('ai-chat-input');
+      if (input) input.value = aiChatPendingInsight.question;
+      var insightId = aiChatPendingInsight.id;
+      aiChatPendingInsight = null;
+      var dot = el('ai-chat-unread');
+      if (dot) dot.classList.add('hidden');
+      api.post('/ai/proactive-insight/' + insightId + '/dismiss', {}).catch(function () {});
+    }
+
+    renderAiChatMessages();
+    var input = el('ai-chat-input');
+    if (input) setTimeout(function () { input.focus(); }, 40);
+  }
+
+  function closeAiChatPanel() {
+    var panel = el('ai-chat-panel');
+    if (panel) panel.classList.add('hidden');
+  }
+
+  function wireAiChat() {
+    var bubble = el('ai-chat-bubble');
+    var panel = el('ai-chat-panel');
+    var form = el('ai-chat-form');
+    var input = el('ai-chat-input');
+    if (!bubble || !panel || !form || !input) return;
+
+    bubble.addEventListener('click', function () {
+      if (panel.classList.contains('hidden')) openAiChatPanel();
+      else closeAiChatPanel();
+    });
+    el('ai-chat-close').addEventListener('click', closeAiChatPanel);
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      sendAiChatMessage(input.value);
+    });
+
+    // Enter sends; Shift+Enter still writes a newline — the same idiom
+    // every chat interface uses, and the only sane way to allow a
+    // multi-line question at all in a single-line-tall textarea.
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendAiChatMessage(input.value);
+      }
     });
   }
 

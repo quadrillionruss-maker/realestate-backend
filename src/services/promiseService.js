@@ -22,6 +22,8 @@ const { overdueThroughDate } = require('./overdueService');
 const { auditSystem } = require('./auditService');
 const { mapWithConcurrency } = require('../utils/concurrency');
 const creditScore = require('./creditScoreService');
+const outcomes = require('./outcomeService');
+const behavioralFingerprint = require('./behavioralFingerprintService');
 
 const AUDIT_CONCURRENCY = 8;
 
@@ -65,13 +67,14 @@ async function logPromise(orgId, { scheduleId, promisedDate, promisedAmount, spo
 
   const { data: schedule } = await supabaseAdmin
     .from('re_installment_schedule')
-    .select('id, re_installment_plans(re_reservations(customer_id))')
+    .select('id, re_installment_plans(re_reservations(id, customer_id))')
     .eq('id', scheduleId)
     .eq('organization_id', orgId)
     .maybeSingle();
   if (!schedule) throw Object.assign(new Error('Installment not found'), { statusCode: 404 });
 
   const customerId = schedule.re_installment_plans?.re_reservations?.customer_id || null;
+  const reservationId = schedule.re_installment_plans?.re_reservations?.id || null;
 
   const { data: superseded } = await supabaseAdmin
     .from('re_payment_promises')
@@ -97,6 +100,17 @@ async function logPromise(orgId, { scheduleId, promisedDate, promisedAmount, spo
     .single();
   if (error) throw error;
 
+  // SECTION 1 (feature expansion) — outcome database. This promise IS the
+  // action; source_entity_id lets sweepBrokenPromises/resolvePromise below
+  // close this exact row later without any guessing about which action a
+  // resolved promise belongs to.
+  if (customerId) {
+    await outcomes.recordAction(orgId, {
+      customerId, reservationId, actionType: 'promise_recorded',
+      sourceEntityType: 're_payment_promises', sourceEntityId: data.id,
+    });
+  }
+
   return { promise: data, superseded: superseded?.length || 0 };
 }
 
@@ -119,6 +133,17 @@ async function resolvePromise(orgId, promiseId, status) {
   // score's promise-reliability dimension is meant to catch.
   if (data?.customer_id && (status === 'kept' || status === 'broken')) {
     await creditScore.recompute(orgId, data.customer_id);
+    // SECTION 2 (feature expansion) — behavioral fingerprint. Promise
+    // reliability moves on every resolution, same trigger as the credit
+    // score line above.
+    await behavioralFingerprint.recompute(orgId, data.customer_id);
+    // SECTION 1 (feature expansion) — outcome database. 'cancelled' (the
+    // buyer walked the date back on a later call) is neither kept nor
+    // broken and closes nothing here — the same row is left open for
+    // whatever the buyer does next, or for the no-response sweep.
+    await outcomes.closeBySource(orgId, data.customer_id, 're_payment_promises', promiseId, {
+      outcomeType: status === 'kept' ? 'promised_kept' : 'promised_broken',
+    });
   }
 
   return data;
@@ -184,6 +209,17 @@ async function sweepBrokenPromises(orgId = null) {
     }));
   }
 
+  // SECTION 1 (feature expansion) — outcome database. Same closeBySource
+  // path resolvePromise's manual "Mark kept"/"Cancel promise" uses — a
+  // promise closed by this sweep and one closed by a human produce the
+  // exact same shape of outcome row, whichever path got there first.
+  await mapWithConcurrency(kept, AUDIT_CONCURRENCY, (row) => row.customer_id
+    ? outcomes.closeBySource(row.organization_id, row.customer_id, 're_payment_promises', row.id, { outcomeType: 'promised_kept' })
+    : Promise.resolve());
+  await mapWithConcurrency(broken, AUDIT_CONCURRENCY, (row) => row.customer_id
+    ? outcomes.closeBySource(row.organization_id, row.customer_id, 're_payment_promises', row.id, { outcomeType: 'promised_broken' })
+    : Promise.resolve());
+
   // SECTION 3 — every promise this sweep just resolved (kept or broken)
   // changed that buyer's promise-reliability dimension. One recompute per
   // buyer, not per promise: a buyer with two promises resolved in the same
@@ -194,6 +230,10 @@ async function sweepBrokenPromises(orgId = null) {
   }
   await mapWithConcurrency([...affected.entries()], AUDIT_CONCURRENCY,
     ([customerId, orgId]) => creditScore.recompute(orgId, customerId));
+  // SECTION 2 (feature expansion) — behavioral fingerprint. Same one-per-
+  // buyer batching as the credit score recompute just above.
+  await mapWithConcurrency([...affected.entries()], AUDIT_CONCURRENCY,
+    ([customerId, orgId]) => behavioralFingerprint.recompute(orgId, customerId));
 
   return { broken: broken.length, kept: kept.length };
 }

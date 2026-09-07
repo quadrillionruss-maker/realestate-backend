@@ -21,6 +21,7 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const notify = require('./notificationService');
 const { lagosToday } = require('./overdueService');
 const featureUsage = require('./featureUsageService');
+const outcomes = require('./outcomeService');
 
 const HUMAN_HANDLING_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -123,6 +124,21 @@ async function sendWithClearance(orgId, agentName, customer, { template, body, a
     relatedType, relatedId: relatedId || customer.id,
   });
   await logAction(orgId, agentName, customer.id, actionType, result.status);
+
+  // SECTION 1 (feature expansion) — outcome database. Every agent's
+  // WhatsApp send that actually went out is an action worth attributing a
+  // later payment to; a skipped one (the four clearance() reasons above)
+  // never reaches here at all, same as it never reached notify.sendWhatsApp.
+  if (result.status === 'sent') {
+    await outcomes.recordAction(orgId, {
+      customerId: customer.id,
+      reservationId: reservationIds[0] || null,
+      actionType: 'whatsapp_sent',
+      channel: 'whatsapp',
+      messageText: body,
+    });
+  }
+
   return result;
 }
 

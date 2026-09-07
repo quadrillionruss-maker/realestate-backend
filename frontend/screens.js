@@ -1579,6 +1579,10 @@
       R.onClick(view, '[data-project-community]', async function (button) {
         await openCommunityModerationModal(button.dataset.projectCommunity, button.dataset.projectName);
       });
+
+      R.onClick(view, '[data-project-timeline]', async function (button) {
+        await openProjectTimelineModal(button.dataset.projectTimeline, button.dataset.projectName);
+      });
     },
   };
 
@@ -1610,6 +1614,11 @@
         (canModerateCommunity
           ? '<button class="btn-quiet mt-2" data-stop data-project-community="' + esc(p.id) + '" data-project-name="' + esc(p.name) + '">Community</button>'
           : '') +
+        // SECTION 7 (feature expansion) — longitudinal project timeline.
+        // Same inventory.read tier as the project card itself, so no
+        // permission check gates this button — anyone who can see the
+        // card at all can see its history.
+        '<button class="btn-quiet mt-2" data-stop data-project-timeline="' + esc(p.id) + '" data-project-name="' + esc(p.name) + '">Timeline</button>' +
       '</div>' +
     '</div>';
   }
@@ -1663,6 +1672,94 @@
     });
 
     wireMilestoneEditors(panel, projectId, projectName);
+  }
+
+  // SECTION 7 (feature expansion) — longitudinal project timeline. Same
+  // fetch-first modal shape as the three siblings above — this one has no
+  // action at all, only a read-only history, so it uses R.confirm's cancel-
+  // only affordance rather than a form.
+  var PROJECT_EVENT_META = {
+    reservation_created: ['🔑', 'Reservation created'],
+    payment_received: ['💰', 'Payment received'],
+    buyer_defaulted: ['⚠️', 'Buyer went into arrears'],
+    buyer_recovered: ['✅', 'Buyer caught up'],
+    restructure: ['🔄', 'Plan restructured'],
+    document_generated: ['📄', 'Document generated'],
+    milestone_completed: ['🏗️', 'Construction milestone completed'],
+    construction_delay: ['⏳', 'Construction delay'],
+    buyer_communications: ['💬', 'Buyer contacted'],
+    legal_action: ['⚖️', 'Legal action taken'],
+    handover: ['🏠', 'Unit handed over'],
+    project_completed: ['🎉', 'Project completed'],
+  };
+
+  function describeProjectEvent(e) {
+    var d = e.event_data || {};
+    // Escaped once, here, at the source — every branch below builds its
+    // sentence out of this already-safe value rather than each remembering
+    // to escape a buyer's name itself.
+    var buyer = d.customer_name ? esc(d.customer_name) : null;
+    switch (e.event_type) {
+      case 'reservation_created':
+        return (buyer || 'A buyer') + ' reserved a unit' + (d.plan_total_amount ? ' — ' + esc(naira(d.plan_total_amount)) : '');
+      case 'payment_received':
+        return (buyer || 'A buyer') + ' paid ' + esc(naira(d.amount)) + (d.method ? ' (' + esc(String(d.method).replace(/_/g, ' ')) + ')' : '');
+      case 'buyer_defaulted':
+        return (buyer || 'A buyer') + ' missed a payment' + (d.overdue_count ? ' (' + Number(d.overdue_count) + ' installment(s) overdue)' : '');
+      case 'buyer_recovered':
+        return (buyer || 'A buyer') + ' caught up — no arrears remaining';
+      case 'restructure':
+        return (buyer ? buyer + '’s' : 'A buyer’s') + ' plan was restructured'
+          + (d.rescheduled_amount ? ' — ' + esc(naira(d.rescheduled_amount)) + ' rescheduled' : '');
+      case 'document_generated':
+        return (d.doc_type ? esc(String(d.doc_type).replace(/_/g, ' ')) : 'A document') + ' generated' + (buyer ? ' for ' + buyer : '');
+      case 'milestone_completed':
+        return (d.milestone_name ? esc(d.milestone_name) : 'A construction milestone') + ' completed';
+      case 'legal_action':
+        return 'Legal case opened' + (buyer ? ' for ' + buyer : '');
+      case 'handover':
+        return 'Unit handed over' + (buyer ? ' to ' + buyer : '');
+      case 'project_completed':
+        return 'This project was marked sold out / completed';
+      default:
+        return PROJECT_EVENT_META[e.event_type] ? esc(PROJECT_EVENT_META[e.event_type][1]) : esc(e.event_type);
+    }
+  }
+
+  async function openProjectTimelineModal(projectId, projectName) {
+    var results = await Promise.all([
+      api('/projects/' + projectId + '/timeline'),
+      // SECTION 8 (feature expansion) — institutional memory. null for any
+      // project that has not actually completed yet — nothing renders for
+      // that case, same "nothing rather than a placeholder" convention as
+      // the rest of this feature expansion.
+      api('/projects/' + projectId + '/summary'),
+    ]);
+    var events = results[0], summary = results[1];
+
+    R.modal({
+      title: esc(projectName) + ' — Timeline',
+      wide: true,
+      cancelLabel: 'Close',
+      body:
+        (summary
+          ? '<div class="notice info mb-2"><b>Institutional memory</b><p class="mt-1 mb-0">' + esc(summary.summary_text) + '</p>' +
+              (summary.generated_by === 'fallback' ? '<p class="page-sub mt-1 mb-0">Generated from recorded metrics — the AI model was unavailable when this was written.</p>' : '') +
+            '</div>'
+          : '') +
+        (events.length
+          ? '<div>' + events.map(function (e) {
+              var meta = PROJECT_EVENT_META[e.event_type] || ['•', e.event_type];
+              return '<div class="flex-row gap-10 mb-2" style="align-items:flex-start">' +
+                '<span style="flex-shrink:0">' + meta[0] + '</span>' +
+                '<div><div>' + describeProjectEvent(e) + '</div>' +
+                  '<div class="page-sub">' + esc(R.fmtDateTime(e.created_at)) + '</div></div>' +
+              '</div>';
+            }).join('') + '</div>'
+          : R.emptyState('Nothing recorded yet', 'This project\'s history — reservations, payments, defaults, restructures and more — will build up here over time.')),
+      // No submitLabel — a read-only history has no form to submit.
+      onSubmit: function () {},
+    });
   }
 
   var CONTRACTOR_TYPES = ['foundation', 'roofing', 'finishing', 'electrical', 'plumbing', 'landscaping', 'other'];
@@ -3061,6 +3158,16 @@
         // rather than a "no pattern yet" placeholder nobody asked for.
         (optimalContactHint(c)
           ? '<p class="page-sub mb-2">Best time to reach — ' + esc(optimalContactHint(c)) + '</p>'
+          : '') +
+
+        // SECTION 2 (feature expansion) — behavioral fingerprint. Null
+        // (and this renders nothing) until at least 3 observations back
+        // every sentence it would otherwise show — same "no pattern yet
+        // reads as nothing, not a placeholder" convention as the contact-
+        // timing hint just above. Server-formatted (routes/customers.js's
+        // behavioral_fingerprint_summary) rather than re-derived here.
+        (c.behavioral_fingerprint_summary
+          ? '<div class="notice info mb-2">' + esc(c.behavioral_fingerprint_summary) + '</div>'
           : '') +
 
         // SECTION 7 — the badge on the Buyers row is a glance; this is the
@@ -6086,6 +6193,65 @@
   };
   var leaderboardSort = 'total_collected'; // module-level: survives a sort-pill click's local re-render, resets on navigation away like projectFilter above
 
+  // SECTION 4 (feature expansion) — recovery playbook. One row per
+  // escalation stage: the observed numbers once there is enough evidence,
+  // the same "not enough data yet" wording the commissioning spec itself
+  // asked for while there isn't. "Observed", not "predicted" — this is a
+  // historical rate, never a forecast, per that spec's own safeguard.
+  function recoveryPlaybookRow(s) {
+    if (!s.has_enough_data) {
+      return '<div class="card-section">' +
+        '<b>' + esc(s.escalation_label) + '</b>' +
+        '<p class="page-sub mb-0 mt-1">Not enough data yet (' + s.sample_size + ' of 10 needed) — ' +
+          'the playbook will populate as your team logs more actions.</p>' +
+      '</div>';
+    }
+    var actionLabel = s.best_action_type ? s.best_action_type.replace(/_/g, ' ') : null;
+    return '<div class="card-section">' +
+      '<div class="flex-row justify-between gap-10">' +
+        '<b>' + esc(s.escalation_label) + '</b>' +
+        '<span class="mono">' + Math.round(s.recovery_rate * 100) + '% observed recovery rate</span>' +
+      '</div>' +
+      '<p class="page-sub mb-0 mt-1">' +
+        (s.avg_days_to_recovery != null ? 'Average recovery: ' + s.avg_days_to_recovery + ' day(s) after contact. ' : '') +
+        (s.best_channel ? 'Best channel: ' + esc(s.best_channel.charAt(0).toUpperCase() + s.best_channel.slice(1)) + '. ' : '') +
+        (actionLabel ? 'Best action: ' + esc(actionLabel.charAt(0).toUpperCase() + actionLabel.slice(1)) + '.' : '') +
+      '</p>' +
+    '</div>';
+  }
+
+  // SECTION 5 (feature expansion) — developer DNA profile. One row per
+  // metric; the peer figure only ever appears once peer_benchmark.eligible
+  // (5+ other workspaces have their own row) — never one other workspace's
+  // own number, always the anonymized platform-wide average.
+  var DNA_METRICS = [
+    ['avg_buyer_default_rate', 'Buyer default rate', function (v) { return Math.round(v * 100) + '%'; }],
+    ['milestone_completion_rate', 'Construction milestone completion', function (v) { return Math.round(v * 100) + '%'; }],
+    ['promise_kept_rate', 'Promise kept rate', function (v) { return Math.round(v * 100) + '%'; }],
+    ['restructuring_rate', 'Buyers who restructure', function (v) { return Math.round(v * 100) + '%'; }],
+    ['avg_days_reservation_to_allocation_letter', 'Days to allocation letter', function (v) { return Math.round(v); }],
+    ['avg_credit_score', 'Average buyer credit score', function (v) { return Math.round(v); }],
+    ['rep_gini_coefficient', 'Sales rep deal concentration', function (v) { return v.toFixed(2); }],
+  ];
+
+  function dnaMetricsHtml(dna, benchmark) {
+    var eligible = benchmark && benchmark.eligible;
+    return '<div class="grid cols-2">' +
+      DNA_METRICS.map(function (m) {
+        var key = m[0], label = m[1], format = m[2];
+        var value = dna[key];
+        if (value == null) return '';
+        var sub = eligible && benchmark.averages[key] != null
+          ? 'Similar developers: ' + format(benchmark.averages[key])
+          : null;
+        return stat(label, format(value), sub ? { sub: sub } : undefined);
+      }).join('') +
+    '</div>' +
+    (eligible ? '' : '<p class="page-sub mt-2 mb-0">Compared against similar developers once ' +
+      benchmark.min_required + ' or more workspaces on the platform have their own profile ' +
+      '(' + benchmark.peer_count + ' so far).</p>');
+  }
+
   function leaderboardTableHtml(rows) {
     var sorted = rows.slice().sort(LEADERBOARD_SORTS[leaderboardSort][1]);
     return table(
@@ -6183,6 +6349,10 @@
       // on this screen — the return this workspace's own accountant needs,
       // not the owner-only strategic view reports.investor is.
       var canVat = R.can('reports.vat');
+      // SECTION 3 (feature expansion) — communication effectiveness. Same
+      // owner-only tier as reports.forecast beside it — both are a
+      // workspace-wide operating pattern, not any one director's own book.
+      var canCommEffectiveness = R.can('analytics.outcomes');
       var leaderboardPeriod = LEADERBOARD_PERIODS.indexOf(query.period) >= 0 ? query.period : 'all_time';
 
       var results = await Promise.all([
@@ -6198,11 +6368,22 @@
         canHeatmap ? api('/reports/payment-heatmap') : Promise.resolve(null),
         canSatisfaction ? api('/reports/satisfaction') : Promise.resolve(null),
         canVat ? api('/reports/vat') : Promise.resolve(null),
+        canCommEffectiveness ? api('/analytics/communication-effectiveness') : Promise.resolve(null),
+        // SECTION 4 (feature expansion) — recovery playbook. Same
+        // analytics.outcomes gate as communication effectiveness beside it.
+        canCommEffectiveness ? api('/analytics/recovery-playbook') : Promise.resolve(null),
+        // SECTION 5 (feature expansion) — developer DNA profile. Its own
+        // permission (analytics.developerDna) — a different data domain
+        // than the outcome-database routes above, same owner-only tier.
+        R.can('analytics.developerDna') ? api('/analytics/developer-dna') : Promise.resolve(null),
       ]);
       var report = results[0], collections = results[1], rental = results[2], referralStats = results[3], forecast = results[4];
       var legalSummary = results[5], legalCases = results[6], financingRequests = results[7];
       var leaderboard = results[8], heatmap = results[9], satisfaction = results[10];
       var vatReport = results[11];
+      var commEffectiveness = results[12];
+      var recoveryPlaybook = results[13];
+      var developerDna = results[14];
       var t = report && report.totals;
       // Only a developer who actually runs a rental portfolio sees this
       // section — nothing to report on is nothing to show.
@@ -6280,6 +6461,40 @@
                   '</div>'
                 : ''),
               { flush: false })
+          : '') +
+
+        // SECTION 3 (feature expansion) — communication effectiveness. Only
+        // once there is at least one real insight to show — a workspace
+        // with too few outcomes yet (every group under min_sample_size)
+        // gets nothing here rather than an empty card with a title and no
+        // content, same "nothing renders rather than a placeholder"
+        // convention the rest of this screen already follows.
+        (canCommEffectiveness && commEffectiveness && commEffectiveness.top_insights.length
+          ? '<div class="mt-2">' + card('Communication insights',
+              '<ul class="mb-0">' +
+                commEffectiveness.top_insights.map(function (insight) { return '<li class="mb-1">' + esc(insight) + '</li>'; }).join('') +
+              '</ul>'
+            ) + '</div>'
+          : '') +
+
+        // SECTION 4 (feature expansion) — recovery playbook. 'none' (no
+        // arrears — nothing to recover) is excluded from the list itself;
+        // the other four stages always render, either the observed
+        // numbers or the same "not enough data yet" line every other
+        // insufficient-sample state in this feature expansion uses.
+        (canCommEffectiveness && recoveryPlaybook
+          ? '<div class="mt-2">' + card('Recovery playbook',
+              recoveryPlaybook.filter(function (s) { return s.escalation_stage !== 'none'; }).map(recoveryPlaybookRow).join('')
+            ) + '</div>'
+          : '') +
+
+        // SECTION 5 (feature expansion) — developer DNA profile. Nothing
+        // renders until the Monday sweep has computed a row at all (a
+        // brand-new workspace's first Monday hasn't happened yet) — same
+        // "nothing rather than an empty card" convention as the rest of
+        // this screen.
+        (developerDna && developerDna.dna
+          ? '<div class="mt-2">' + card('Developer DNA', dnaMetricsHtml(developerDna.dna, developerDna.peer_benchmark)) + '</div>'
           : '') +
 
         (canInvestor

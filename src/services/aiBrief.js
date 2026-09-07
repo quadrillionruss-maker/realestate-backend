@@ -947,4 +947,10 @@ async function fileRecommendationsAsTasks(orgId, recommendations = []) {
 module.exports = {
   generateDailyBrief, gatherOrgState, buildFallbackBrief,
   sanitizeStateForModel, resolveRefs,
+  // Exported for recoveryPlaybookService (SECTION 4 — feature expansion):
+  // the same "is today Monday, Lagos-local" check this file already uses
+  // to gate its own weekly project-health summary, reused rather than a
+  // third near-identical day-of-week helper (contactTimingService.js has
+  // its own for a different purpose already).
+  isMonday,
 };

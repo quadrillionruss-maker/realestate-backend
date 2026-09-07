@@ -15,6 +15,7 @@ const { uploadPdf, uploadPrivateMedia, createSignedUrl } = require('./documentSt
 const { assignedRepUser } = require('./messageService');
 const { audit, auditSystem } = require('./auditService');
 const satisfactionSurvey = require('./satisfactionSurveyService');
+const projectTimeline = require('./projectTimelineService');
 
 const TEMPLATE_PATH = path.join(__dirname, '../templates/handover_certificate.html');
 const CHECKLIST_STATUSES = ['pending', 'inspection_done', 'issues_raised', 'resolved', 'signed_off'];
@@ -162,6 +163,22 @@ async function updateChecklist(req, id, updates) {
       await satisfactionSurvey.sendForHandover(req.orgId, data.reservation_id);
     } catch (err) {
       console.warn('[handover] could not send satisfaction survey:', err.message);
+    }
+
+    // SECTION 7 (feature expansion) — longitudinal project timeline. Same
+    // "just happened" guard as the survey send just above.
+    try {
+      const { data: reservation } = await supabaseAdmin
+        .from('re_reservations').select('customer_id, re_units(project_id), re_customers(full_name)')
+        .eq('id', data.reservation_id).eq('organization_id', req.orgId).maybeSingle();
+      if (reservation?.re_units?.project_id) {
+        await projectTimeline.logEvent(req.orgId, reservation.re_units.project_id, 'handover', {
+          reservation_id: data.reservation_id, customer_id: reservation.customer_id,
+          customer_name: reservation.re_customers?.full_name || null,
+        });
+      }
+    } catch (err) {
+      console.warn('[handover] could not log a project timeline event:', err.message);
     }
   }
 

@@ -9,6 +9,7 @@ const { uploadMedia, MAX_MEDIA_BYTES } = require('./documentStorage');
 const { sendEmail } = require('./notificationService');
 const { audit } = require('./auditService');
 const { escapeHtml } = require('../utils/escapeHtml');
+const projectTimeline = require('./projectTimelineService');
 
 const MILESTONE_NAMES = ['Foundation', 'Superstructure', 'Roofing', 'Finishing', 'Handover'];
 const MAX_PHOTOS_PER_MILESTONE = 10;
@@ -158,6 +159,13 @@ async function updateMilestone(req, projectId, milestoneId, updates) {
   const justCompleted = before.status !== 'completed' && after.status === 'completed';
   if (justCompleted && !after.notified_at) {
     await notifyBuyersOfMilestone(req.orgId, projectId, after);
+  }
+
+  // SECTION 7 (feature expansion) — longitudinal project timeline.
+  if (justCompleted) {
+    await projectTimeline.logEvent(req.orgId, projectId, 'milestone_completed', {
+      milestone_id: after.id, milestone_name: after.name,
+    });
   }
 
   return after;

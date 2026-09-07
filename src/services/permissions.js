@@ -128,6 +128,17 @@ const PERMISSIONS = {
   // owner-only tier as the investor report it sits beside on the Reports
   // screen.
   'reports.forecast': OWNER,
+  // SECTION 1 (feature expansion) — outcome-database analytics (recovery
+  // rates by action type, best day/channel to contact, promise reliability
+  // by credit band). Same owner-only tier as reports.forecast just above:
+  // a workspace-wide pattern derived from every rep's actions, not any one
+  // director's own book.
+  'analytics.outcomes': OWNER,
+  // SECTION 5 (feature expansion) — the developer DNA profile and its peer
+  // benchmark. Same owner-only tier — a workspace-wide operating
+  // fingerprint compared against other workspaces, not any one director's
+  // own book.
+  'analytics.developerDna': OWNER,
   'commissions.markPaid': OWNER,
   // FEATURE — system log with undo. Reversing a recorded payment, a void,
   // a waived debt, a blacklist or a generated legal document is the same
@@ -247,6 +258,13 @@ const PERMISSIONS = {
   // FEATURE — buyer satisfaction survey averages/comments. Same DIRECTORS
   // tier as every other report on this screen.
   'reports.satisfaction': DIRECTORS,
+  // SECTION 6 (feature expansion) — the AI Business Intelligence Assistant.
+  // The commissioning spec's own explicit tier: owner and sales_director,
+  // the same pair who already see every figure the assistant's context
+  // draws from (financial.view, reports.leaderboard, reports.forecast's
+  // neighbours) — a Sales Executive asking it "why did collections drop"
+  // would be asking about buyers outside their own book.
+  'ai.ask': DIRECTORS,
   'commissions.approve': DIRECTORS,
   'commissions.readAll': DIRECTORS,
   'brief.read': DIRECTORS,
