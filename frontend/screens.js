@@ -7045,6 +7045,9 @@
               '<div class="field"><label for="s-website">Website</label>' +
                 '<input class="input" id="s-website" name="website" value="' + esc(settings.website || '') + '"></div>' +
             '</div>' +
+            '<div class="field"><label for="s-regno">Registration number <span class="muted">(CAC RC/BN, optional)</span></label>' +
+              '<input class="input" id="s-regno" name="registration_number" value="' + esc(settings.registration_number || '') + '" placeholder="RC 1234567">' +
+              '<p class="field-hint">Printed on allocation letters and receipts alongside your address. Leave blank until you\'re CAC-registered.</p></div>' +
             '<button class="btn primary mt-1" type="submit">Save company details</button>' +
           '</form>') +
 
@@ -7160,6 +7163,17 @@
                 'commission, activity and audit entry as one CSV each, zipped. Once a day.</p>' +
                 '<button class="btn" type="button" id="btn-workspace-backup">Download backup</button>')
             : '') +
+
+          // Visible to every role, not gated behind settings.write — these
+          // are the same three documents anyone creating an account already
+          // agreed to on the sign-up screen; a team member should be able to
+          // find them again without asking the owner.
+          card('Legal', '<p class="field-hint mb-2">The terms your workspace operates under, and how buyer and staff data is handled.</p>' +
+            '<div class="btn-row">' +
+              '<a class="btn" href="/privacy.html" target="_blank" rel="noopener">Privacy policy</a>' +
+              '<a class="btn" href="/terms.html" target="_blank" rel="noopener">Terms &amp; conditions</a>' +
+              '<a class="btn" href="/refund-policy.html" target="_blank" rel="noopener">Refund policy</a>' +
+            '</div>') +
         '</div>' +
       '</div>';
 

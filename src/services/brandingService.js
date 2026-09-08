@@ -29,6 +29,7 @@ const shape = (source) => ({
   address: source.address || null,
   phone: source.phone || null,
   website: source.website || null,
+  registration_number: source.registration_number || null,
   reply_to: source.reply_to || null,
 });
 
@@ -46,7 +47,7 @@ async function resolveBranding(orgId) {
   // the same way for a solo account and a team.
   const { data: settings } = await supabaseAdmin
     .from('re_org_settings')
-    .select('company_name, logo_url, address, phone, website, reply_to_email')
+    .select('company_name, logo_url, address, phone, website, registration_number, reply_to_email')
     .eq('organization_id', orgId)
     .maybeSingle();
 
@@ -132,6 +133,6 @@ const safeLogoUrl = (url) =>
 
 // The line along the bottom of every generated document.
 const contactLine = (branding) =>
-  [branding.address, branding.phone, branding.website].filter(Boolean).join(' · ');
+  [branding.registration_number, branding.address, branding.phone, branding.website].filter(Boolean).join(' · ');
 
 module.exports = { resolveBranding, safeLogoUrl, contactLine, PROFILE_COLUMNS };

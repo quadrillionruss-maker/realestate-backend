@@ -42,7 +42,7 @@ function check(name, cond, detail) {
       // straight after 054 here is safe for THIS file's own purposes even
       // though it does not mirror the real on-disk migration order — see
       // this feature expansion's Section 1 report for the fuller note.
-      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql']) {
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -85,7 +85,7 @@ function check(name, cond, detail) {
       // straight after 054 here is safe for THIS file's own purposes even
       // though it does not mirror the real on-disk migration order — see
       // this feature expansion's Section 1 report for the fuller note.
-      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql']) {
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -2902,6 +2902,10 @@ function check(name, cond, detail) {
   const [{ noUpdate }] = await q(
     `select not has_table_privilege('service_role', 'public.re_admin_actions', 'update') as "noUpdate"`);
   check('re_admin_actions is append-only — even service_role cannot update a row once written', noUpdate);
+
+  // ── re_org_settings.registration_number (migrations/081) ────────────────
+  const orgSettingsCols081 = await colsOf('re_org_settings');
+  check('re_org_settings has registration_number', orgSettingsCols081.includes('registration_number'), orgSettingsCols081.join(', '));
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

@@ -2776,3 +2776,23 @@ table.data td.sched-detail-cell {
 .milestone-editor:last-child { border-bottom: none; padding-bottom: 0; }
 .milestone-photos { display: flex; flex-wrap: wrap; gap: 8px; }
 .milestone-thumb { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line-strong); }
+
+/* ── Legal pages (privacy.html / terms.html / refund-policy.html) ────────
+   Static, unauthenticated pages — reachable from Settings → Legal and from
+   the sign-up gate's agreement line, not part of the SPA router. Reuses
+   .portal-wrap/.portal-header/.portal-mark/.portal-brand/.portal-footer
+   above rather than a second copy of "one centered column with a brand
+   header", plus this one prose block for the document body itself. */
+.legal-page h1 { font-family: var(--display); text-transform: uppercase; font-weight: 900; font-size: 22px; letter-spacing: -.01em; margin: 0 0 6px; }
+.legal-page .legal-updated { color: var(--text-faint); font-size: 12px; margin-bottom: 28px; }
+.legal-page h2 { font-size: 15px; font-weight: 700; margin: 30px 0 10px; }
+.legal-page p, .legal-page li { font-size: 13.5px; line-height: 1.7; color: var(--text-dim); }
+.legal-page ul, .legal-page ol { padding-left: 20px; margin: 0 0 14px; }
+.legal-page p { margin: 0 0 14px; }
+.legal-page a { color: var(--accent); text-decoration: underline; }
+.legal-page strong { color: var(--text); }
+.legal-page .legal-placeholder { background: var(--gold-soft); color: var(--gold-deep); padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 12px; }
+.legal-page .legal-notice { border: 1px solid var(--line-strong); border-radius: 8px; padding: 12px 14px; margin-bottom: 24px; font-size: 12.5px; color: var(--text-dim); background: var(--panel-2); }
+
+.gate-legal { text-align: center; margin: 12px 0 -4px; }
+.gate-legal a { color: var(--accent); text-decoration: underline; }

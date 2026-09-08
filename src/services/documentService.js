@@ -200,6 +200,7 @@ function buildAllocationLetterHtml(doc, branding) {
   const projectLine = [project.name, project.location].filter(Boolean).map(escapeHtml).join(', ');
 
   const senderContact = [
+    branding.registration_number,
     branding.brand_address || branding.address,
     branding.brand_phone || branding.phone,
     branding.brand_website || branding.website,

@@ -19,7 +19,7 @@ const { buildBackup } = require('../services/backupService');
 const vat = require('../services/vatService');
 const router = express.Router();
 
-const SETTINGS_COLUMNS = `organization_id, company_name, logo_url, address, phone, website,
+const SETTINGS_COLUMNS = `organization_id, company_name, logo_url, address, phone, website, registration_number,
   default_commission_rate, notify_md_email, notify_on_payment, notify_on_overdue,
   notify_payment_reminders, reply_to_email, updated_at,
   paystack_public_key, paystack_secret_key_last4,
@@ -80,6 +80,7 @@ router.get('/', requirePermission('settings.read'), async (req, res, next) => {
       address: null,
       phone: null,
       website: null,
+      registration_number: null,
       default_commission_rate: 0,
       notify_md_email: null,
       notify_on_payment: true,
@@ -135,7 +136,7 @@ router.put('/', requirePermission('settings.write'), async (req, res, next) => {
     const body = req.body || {};
     const updates = { organization_id: req.orgId };
 
-    for (const field of ['company_name', 'logo_url', 'address', 'phone', 'website',
+    for (const field of ['company_name', 'logo_url', 'address', 'phone', 'website', 'registration_number',
       'notify_md_email', 'reply_to_email']) {
       if (body[field] !== undefined) updates[field] = body[field] || null;
     }
