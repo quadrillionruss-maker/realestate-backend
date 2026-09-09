@@ -48,3 +48,8 @@ begin
   grant select, insert, update on public.re_subscriptions to service_role;
   revoke all on public.re_subscriptions from anon, authenticated;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('052_subscriptions.sql')
+  on conflict (filename) do nothing;

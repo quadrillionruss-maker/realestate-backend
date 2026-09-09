@@ -40,3 +40,8 @@ begin
 
   grant select, insert, update on public.re_org_settings to service_role;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('063_whatsapp_app_secret.sql')
+  on conflict (filename) do nothing;

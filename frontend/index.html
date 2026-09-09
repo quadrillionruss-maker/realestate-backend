@@ -451,18 +451,38 @@
      Both start hidden — realestate.js unhides the bubble once R.can is
      known, and the panel only ever opens on a click. -->
 <button class="ai-chat-bubble hidden" id="ai-chat-bubble" type="button" aria-label="Archta Intelligence">
-  <span aria-hidden="true">💬</span>
+  <!-- A sparkle, not the ◆ brand mark or a speech bubble — the one glyph on
+       this whole page whose job is specifically "this is the AI", not "this
+       is Archta" (the mark already means that everywhere else). Inline SVG
+       rather than an emoji so its color is the gold token, not whatever a
+       given OS's emoji font happens to render. -->
+  <svg class="ai-chat-bubble-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M12 2l1.8 5.6L19.4 9.4 13.8 11.2 12 17l-1.8-5.8L4.6 9.4l5.6-1.8L12 2z"/>
+    <path d="M19 14l.9 2.7L22.6 17.6 19.9 18.5 19 21.2l-.9-2.7-2.7-.9 2.7-.9L19 14z"/>
+  </svg>
   <span class="ai-chat-unread hidden" id="ai-chat-unread"></span>
 </button>
 
 <aside class="ai-chat-panel hidden" id="ai-chat-panel" role="dialog" aria-label="Archta Intelligence" aria-modal="false">
   <div class="ai-chat-head">
     <span class="ai-chat-title">Archta Intelligence</span>
-    <button class="icon-btn" id="ai-chat-close" type="button" aria-label="Close">×</button>
+    <div class="ai-chat-head-actions">
+      <button class="icon-btn" id="ai-chat-clear" type="button" aria-label="Clear conversation" title="Clear conversation">
+        <svg class="ai-chat-head-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="ai-chat-expand" type="button" aria-label="Expand" title="Expand">
+        <svg class="ai-chat-head-icon" id="ai-chat-expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="ai-chat-close" type="button" aria-label="Close">×</button>
+    </div>
   </div>
   <div class="ai-chat-messages" id="ai-chat-messages"></div>
   <form class="ai-chat-input-row" id="ai-chat-form">
-    <textarea id="ai-chat-input" rows="1" placeholder="Ask about your business…" autocomplete="off"></textarea>
+    <textarea id="ai-chat-input" rows="1" placeholder="Ask about your business… (or type /clear)" autocomplete="off"></textarea>
     <button class="btn primary" id="ai-chat-send" type="submit">Send</button>
   </form>
 </aside>

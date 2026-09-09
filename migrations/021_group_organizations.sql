@@ -56,3 +56,8 @@ begin
   grant select, insert, update, delete on public.parent_organizations to service_role;
   revoke all on public.parent_organizations from anon, authenticated;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('021_group_organizations.sql')
+  on conflict (filename) do nothing;

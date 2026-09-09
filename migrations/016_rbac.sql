@@ -117,3 +117,8 @@ create index if not exists idx_re_sales_reps_org_user
 -- to be a single-row read.
 create index if not exists idx_team_members_user_status
   on team_members(user_id, status);
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('016_rbac.sql')
+  on conflict (filename) do nothing;

@@ -105,3 +105,8 @@ end $$;
 create index if not exists idx_re_reservations_tenancy_end
   on re_reservations(organization_id, tenancy_end_date)
   where property_type = 'rental' and tenancy_end_date is not null and deleted_at is null;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('006_rentals.sql')
+  on conflict (filename) do nothing;

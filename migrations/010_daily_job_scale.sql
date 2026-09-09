@@ -35,3 +35,8 @@ begin
 
   grant execute on function distinct_reservation_org_ids() to service_role;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('010_daily_job_scale.sql')
+  on conflict (filename) do nothing;

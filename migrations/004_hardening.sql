@@ -99,3 +99,8 @@ end $$;
 -- Finding every unallocated credit has to be one cheap query, or nobody runs it.
 create index if not exists idx_re_payments_overpaid
   on re_payments(organization_id, paid_at desc) where overpayment > 0;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('004_hardening.sql')
+  on conflict (filename) do nothing;

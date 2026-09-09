@@ -331,3 +331,8 @@ begin
     execute format('revoke all on public.%I from anon, authenticated', t);
   end loop;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('003_operations.sql')
+  on conflict (filename) do nothing;

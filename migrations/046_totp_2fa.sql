@@ -30,3 +30,8 @@
 alter table users add column if not exists totp_secret_encrypted text;
 alter table users add column if not exists totp_enabled boolean not null default false;
 alter table users add column if not exists totp_backup_codes jsonb not null default '[]'::jsonb;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('046_totp_2fa.sql')
+  on conflict (filename) do nothing;

@@ -67,3 +67,8 @@ begin
   revoke all on public.re_recovery_playbook from anon, authenticated;
   grant execute on function distinct_action_outcome_org_ids() to service_role;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('076_recovery_playbook.sql')
+  on conflict (filename) do nothing;

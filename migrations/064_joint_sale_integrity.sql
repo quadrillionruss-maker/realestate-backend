@@ -100,3 +100,8 @@ begin
 
   grant execute on function replace_joint_sale_parties(uuid, uuid, jsonb) to service_role;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('064_joint_sale_integrity.sql')
+  on conflict (filename) do nothing;

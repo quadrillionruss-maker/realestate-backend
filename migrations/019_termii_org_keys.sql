@@ -25,3 +25,8 @@
 alter table re_org_settings add column if not exists termii_api_key_encrypted text;
 alter table re_org_settings add column if not exists termii_api_key_last4     text;
 alter table re_org_settings add column if not exists termii_sender_id        text;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('019_termii_org_keys.sql')
+  on conflict (filename) do nothing;

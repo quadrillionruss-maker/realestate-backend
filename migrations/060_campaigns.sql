@@ -68,3 +68,8 @@ begin
   revoke all on public.re_campaigns from anon, authenticated;
   revoke all on public.re_campaign_deliveries from anon, authenticated;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('060_campaigns.sql')
+  on conflict (filename) do nothing;

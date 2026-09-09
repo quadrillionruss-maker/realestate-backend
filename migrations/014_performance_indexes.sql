@@ -22,3 +22,8 @@ create index if not exists idx_re_promises_status_date
 
 create index if not exists idx_re_commissions_org_created
   on re_commissions(organization_id, created_at desc);
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('014_performance_indexes.sql')
+  on conflict (filename) do nothing;

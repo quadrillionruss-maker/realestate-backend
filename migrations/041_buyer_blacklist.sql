@@ -33,3 +33,8 @@ alter table re_customers add column if not exists blacklisted_by uuid references
 -- blacklisted ones" scan the Buyers screen's filter runs.
 create index if not exists idx_re_customers_blacklisted
   on re_customers(organization_id) where blacklisted = true;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('041_buyer_blacklist.sql')
+  on conflict (filename) do nothing;

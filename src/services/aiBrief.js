@@ -146,6 +146,12 @@ async function gatherOrgState(orgId) {
       console.warn('[re-brief] could not read promises:', err.message);
       return [];
     }),
+    // PostgrestBuilder only ever implements `.then(onFulfilled, onRejected)`
+    // (it's a thenable, not a real Promise — no `.catch` exists on it), so
+    // the two-argument form of `.then` is what actually catches a failed
+    // query here; a bare `.catch(...)` chained straight onto the builder
+    // throws "catch is not a function" before the query even runs — this
+    // whole call site never executed as fallback-tolerant as it looked.
     supabaseAdmin
       .from('re_activities')
       .select('activity_type, notes, outcome, created_at, re_customers(id, full_name)')
@@ -154,7 +160,7 @@ async function gatherOrgState(orgId) {
       .lt('created_at', `${today}T00:00:00.000Z`)
       .is('deleted_at', null)
       .order('created_at', { ascending: false })
-      .catch((err) => {
+      .then((res) => res, (err) => {
         console.warn('[re-brief] could not read activities:', err.message);
         return { data: [] };
       }),

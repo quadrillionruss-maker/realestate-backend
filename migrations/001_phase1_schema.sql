@@ -35,6 +35,32 @@ exception when others then
   raise notice 'pgcrypto unavailable; relying on built-in gen_random_uuid()';
 end $$;
 
+-- schema_migrations (formally introduced in migrations/082) is created HERE,
+-- first, rather than only in 082 itself: every migration file from 001
+-- onward ends with an `insert into schema_migrations` self-registration
+-- (see 082's own header for why), and on a from-scratch database these
+-- files run in one pass, in numeric order — 001 first, 082 nowhere near
+-- yet. Without the table existing before 001's own footer statement runs,
+-- 001 fails outright with "relation schema_migrations does not exist" on
+-- exactly the "empty Supabase project" case this file's own header above
+-- promises to handle. 082 creates it again with the same IF NOT EXISTS,
+-- which is a no-op once this has already run — safe either order.
+create table if not exists schema_migrations (
+  filename text primary key,
+  applied_at timestamptz not null default now()
+);
+alter table schema_migrations enable row level security;
+
+do $$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then
+    raise notice 'service_role absent — not a Supabase database, skipping grants';
+  else
+    grant select, insert on public.schema_migrations to service_role;
+    revoke all on public.schema_migrations from anon, authenticated;
+  end if;
+end $$;
+
 -- ============================================================
 -- SECTION A — IDENTITY
 --
@@ -410,3 +436,8 @@ end $$;
 --     )
 --   );
 -- ------------------------------------------------------------
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('001_phase1_schema.sql')
+  on conflict (filename) do nothing;

@@ -21,3 +21,8 @@
 alter table re_campaigns drop constraint if exists re_campaigns_status_check;
 alter table re_campaigns add constraint re_campaigns_status_check
   check (status in ('draft', 'scheduled', 'sending', 'sent'));
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('065_campaign_sending_status.sql')
+  on conflict (filename) do nothing;

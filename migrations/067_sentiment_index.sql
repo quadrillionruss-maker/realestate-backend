@@ -14,3 +14,8 @@
 create index if not exists idx_re_customers_org_sentiment
   on re_customers(organization_id, latest_sentiment)
   where latest_sentiment = 'at_risk';
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('067_sentiment_index.sql')
+  on conflict (filename) do nothing;

@@ -13,3 +13,8 @@
 
 create index if not exists idx_re_commissions_org_reservation
   on re_commissions(organization_id, reservation_id);
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('070_commissions_reservation_index.sql')
+  on conflict (filename) do nothing;

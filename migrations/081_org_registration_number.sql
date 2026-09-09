@@ -15,3 +15,8 @@
 -- ============================================================
 
 alter table re_org_settings add column if not exists registration_number text;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('081_org_registration_number.sql')
+  on conflict (filename) do nothing;

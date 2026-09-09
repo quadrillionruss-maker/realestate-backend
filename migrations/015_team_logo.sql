@@ -9,3 +9,8 @@
 -- ============================================================
 
 alter table teams add column if not exists logo_url text;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('015_team_logo.sql')
+  on conflict (filename) do nothing;

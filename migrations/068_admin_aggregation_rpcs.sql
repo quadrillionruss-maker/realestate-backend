@@ -90,3 +90,8 @@ begin
   grant execute on function admin_total_collections() to service_role;
   grant execute on function admin_notification_counts_by_channel() to service_role;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('068_admin_aggregation_rpcs.sql')
+  on conflict (filename) do nothing;

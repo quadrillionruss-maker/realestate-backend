@@ -104,7 +104,7 @@ a { color: var(--accent); }
 
 /* ── Shell ── */
 #app-shell { display: grid; grid-template-columns: 210px 1fr; min-height: 100vh; }
-.sidebar { background: var(--sidebar-bg); color: var(--sidebar-text); padding: 18px 12px; }
+.sidebar { background: var(--sidebar-bg); color: var(--sidebar-text); padding: 18px 12px; display: flex; flex-direction: column; min-height: 100vh; }
 .sidebar-brand {
   display: flex; align-items: center; gap: 9px;
   color: #fff; font-family: var(--mono); text-transform: uppercase; font-weight: 600;
@@ -117,17 +117,43 @@ a { color: var(--accent); }
   background: var(--accent); border-radius: 5px;
   color: var(--gold); font-size: 10px;
 }
+.sidebar nav { flex: 1; }
 .sidebar nav button {
-  display: block; width: 100%; text-align: left; background: none; border: none;
+  display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; background: none; border: none;
   color: var(--sidebar-text); padding: 9px 10px; border-radius: var(--radius); font-size: 13.5px; margin-bottom: 2px;
 }
+.sidebar nav button i { font-size: 15px; color: inherit; }
 .sidebar nav button:hover { background: rgba(255,255,255,0.06); color: #fff; }
 .sidebar nav button.is-active { background: var(--accent); color: #fff; font-weight: 600; }
+
+/* Sign out + version, pinned to the bottom of the sidebar via the flex
+   column above rather than the nav's own list — neither should scroll
+   away with a long nav list on a narrow viewport. */
+.sidebar-foot { border-top: 1px solid var(--sidebar-line); padding-top: 10px; margin-top: 10px; }
+.sidebar-signout {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: none; border: none; color: var(--sidebar-text); padding: 9px 10px;
+  border-radius: var(--radius); font-size: 13px;
+}
+.sidebar-signout i { font-size: 15px; }
+.sidebar-signout:hover { background: rgba(178,58,36,0.18); color: #F7B5A8; }
+.sidebar-version { color: rgba(255,255,255,0.35); font-size: 10px; padding: 8px 10px 0; }
+
 .main { padding: 28px 32px 60px; max-width: 1280px; }
 .page-title { font-family: var(--display); text-transform: uppercase; font-size: 19px; font-weight: 900; margin: 0 0 20px; }
+.page-title-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 12px; }
+.page-title-row .page-title { margin-bottom: 0; }
+.btn-icon-refresh {
+  background: none; border: 1px solid var(--line-strong); color: var(--text-dim);
+  width: 28px; height: 28px; border-radius: var(--radius); font-size: 14px;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.btn-icon-refresh:hover { background: var(--panel); color: var(--text); }
+.btn-icon-refresh.is-spinning i { animation: adminSpin .6s linear; }
+@keyframes adminSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
 /* ── Cards / KPIs ── */
-.kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 24px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 24px; }
 .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
 .kpi-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint); font-weight: 600; }
 .kpi-value { font-family: var(--mono); font-size: 22px; font-weight: 700; margin-top: 6px; }
@@ -235,6 +261,11 @@ select.filter { padding: 7px 10px; border: 1.5px solid var(--line-strong); borde
 
 .empty { text-align: center; padding: 30px; color: var(--text-faint); font-size: 13px; }
 .muted { color: var(--text-faint); font-size: 12px; }
+.cell-sub { display: block; color: var(--text-faint); font-size: 10.5px; margin-top: 2px; }
+
+/* Recipient masking (notifications) and inactivity flag (workspaces) share
+   the existing .mono/.badge.warn treatment above — nothing new needed for
+   either beyond the JS that produces the masked string / picks the badge. */
 
 /* ── Modal ── */
 .scrim { position: fixed; inset: 0; background: rgba(22,59,75,0.45); display: grid; place-items: center; z-index: 100; padding: 20px; }

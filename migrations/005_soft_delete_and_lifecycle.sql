@@ -233,3 +233,8 @@ exception when unique_violation then
     'Find them with: select reservation_id, count(*) from re_installment_plans '
     'where status = ''active'' and deleted_at is null group by 1 having count(*) > 1;';
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('005_soft_delete_and_lifecycle.sql')
+  on conflict (filename) do nothing;

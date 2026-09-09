@@ -17,3 +17,8 @@ alter table re_campaign_deliveries add constraint re_campaign_deliveries_status_
   check (status in ('pending', 'sent', 'delivered', 'failed', 'opened', 'skipped'));
 
 alter table re_campaigns add column if not exists skipped_count integer not null default 0;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('069_campaign_delivery_skipped.sql')
+  on conflict (filename) do nothing;

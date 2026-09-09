@@ -2265,8 +2265,22 @@
   // it anything at all — same R.can('ai.ask') gate POST /ai/ask itself
   // enforces server-side; hiding the bubble here is convenience, not the
   // real boundary.
-  var aiChatHistory = []; // [{role: 'user'|'assistant', content, fallback, pending}]
+  var aiChatHistory = []; // [{role: 'user'|'assistant', content, fallback, pending, ts}]
   var aiChatPendingInsight = null;
+
+  // Shown instead of result.answer whenever generated_by is 'fallback', and
+  // instead of err.message in the catch below — the fallback text itself is
+  // a direct numeric readout (collections/overdue figures with no model
+  // prose around them), which reads as broken rather than as an honest
+  // degraded state; a network/HTTP error's raw message is backend detail
+  // nobody asking a business question needs to see. One calm sentence
+  // either way, never the raw text underneath it.
+  var AI_UNAVAILABLE_MESSAGE = 'Archta Intelligence is temporarily unavailable. Try again in a moment.';
+
+  var AI_ICON_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>';
+  var AI_ICON_COPIED = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
+  var AI_ICON_EXPAND = '<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>';
+  var AI_ICON_COLLAPSE = '<path d="M9 3v6H3M15 21v-6h6M3 9l7-7M21 15l-7 7"/>';
 
   var AI_SUGGESTED_QUESTIONS = [
     'Why did collections drop this month?',
@@ -2290,7 +2304,16 @@
       aiChatPendingInsight = insight || null;
       var dot = el('ai-chat-unread');
       if (dot) dot.classList.toggle('hidden', !insight);
+      // The pulse (CSS, realestate.css) is the primary signal; the dot stays
+      // as a secondary, static one for prefers-reduced-motion and anyone
+      // who glances past an animation.
+      var bubble = el('ai-chat-bubble');
+      if (bubble) bubble.classList.toggle('has-insight', !!insight);
     } catch (e) { /* the bubble's unread dot is decoration, never worth breaking a screen over */ }
+  }
+
+  function aiMessageTime(ts) {
+    return new Date(ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
   }
 
   function renderAiChatMessages() {
@@ -2312,17 +2335,58 @@
       return;
     }
 
-    container.innerHTML = aiChatHistory.map(function (m) {
-      if (m.pending) return '<div class="ai-chat-message pending">Thinking…</div>';
+    container.innerHTML = aiChatHistory.map(function (m, i) {
+      if (m.pending) {
+        return '<div class="ai-chat-message pending"><div class="ai-chat-typing">' +
+          '<span class="ai-chat-typing-dot"></span><span class="ai-chat-typing-dot"></span><span class="ai-chat-typing-dot"></span>' +
+        '</div></div>';
+      }
       var cls = 'ai-chat-message ' + m.role + (m.fallback ? ' is-fallback' : '');
-      return '<div class="' + cls + '">' + esc(m.content) + '</div>';
+      return '<div class="' + cls + '">' +
+        esc(m.content) +
+        '<div class="ai-chat-message-meta">' +
+          (m.role === 'assistant' ? '<button type="button" class="ai-chat-message-copy" data-copy-index="' + i + '" aria-label="Copy" title="Copy">' + AI_ICON_COPY + '</button>' : '') +
+          '<span class="ai-chat-message-time">' + aiMessageTime(m.ts) + '</span>' +
+        '</div>' +
+      '</div>';
     }).join('');
     container.scrollTop = container.scrollHeight;
+
+    qsa('[data-copy-index]', container).forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var msg = aiChatHistory[Number(btn.dataset.copyIndex)];
+        if (!msg) return;
+        copyText(msg.content).then(function () {
+          btn.classList.add('is-copied');
+          btn.innerHTML = AI_ICON_COPIED;
+          setTimeout(function () {
+            btn.classList.remove('is-copied');
+            btn.innerHTML = AI_ICON_COPY;
+          }, 1500);
+        }).catch(function () { /* clipboard denied — nothing else to do about it here */ });
+      });
+    });
+  }
+
+  // Resets the conversation to a fresh state (suggested questions again),
+  // wired to both the trash-icon button in the header and a `/clear` typed
+  // into the input itself (sendAiChatMessage intercepts that before it ever
+  // becomes a question sent to the model).
+  function clearAiChat() {
+    aiChatHistory = [];
+    var input = el('ai-chat-input');
+    if (input) input.value = '';
+    renderAiChatMessages();
   }
 
   async function sendAiChatMessage(text) {
     text = String(text || '').trim();
     if (!text) return;
+
+    if (/^\/clear$/i.test(text)) {
+      clearAiChat();
+      return;
+    }
 
     // Last 10 turns BEFORE this one — the question itself is sent
     // separately as `question`, not folded into the history array.
@@ -2331,7 +2395,7 @@
       .slice(-10)
       .map(function (m) { return { role: m.role, content: m.content }; });
 
-    aiChatHistory.push({ role: 'user', content: text });
+    aiChatHistory.push({ role: 'user', content: text, ts: Date.now() });
     aiChatHistory.push({ role: 'assistant', content: '', pending: true });
     renderAiChatMessages();
 
@@ -2341,10 +2405,16 @@
     try {
       var result = await api.post('/ai/ask', { question: text, conversation_history: historyForServer });
       aiChatHistory.pop();
-      aiChatHistory.push({ role: 'assistant', content: result.answer, fallback: result.generated_by === 'fallback' });
+      var isFallback = result.generated_by === 'fallback';
+      aiChatHistory.push({
+        role: 'assistant',
+        content: isFallback ? AI_UNAVAILABLE_MESSAGE : result.answer,
+        fallback: isFallback,
+        ts: Date.now(),
+      });
     } catch (err) {
       aiChatHistory.pop();
-      aiChatHistory.push({ role: 'assistant', content: err.message || 'Something went wrong. Try again.', fallback: true });
+      aiChatHistory.push({ role: 'assistant', content: AI_UNAVAILABLE_MESSAGE, fallback: true, ts: Date.now() });
     }
     renderAiChatMessages();
   }
@@ -2364,6 +2434,8 @@
       aiChatPendingInsight = null;
       var dot = el('ai-chat-unread');
       if (dot) dot.classList.add('hidden');
+      var bubble = el('ai-chat-bubble');
+      if (bubble) bubble.classList.remove('has-insight');
       api.post('/ai/proactive-insight/' + insightId + '/dismiss', {}).catch(function () {});
     }
 
@@ -2375,6 +2447,19 @@
   function closeAiChatPanel() {
     var panel = el('ai-chat-panel');
     if (panel) panel.classList.add('hidden');
+  }
+
+  function toggleAiChatExpand() {
+    var panel = el('ai-chat-panel');
+    var icon = el('ai-chat-expand-icon');
+    var btn = el('ai-chat-expand');
+    if (!panel) return;
+    var expanded = panel.classList.toggle('is-expanded');
+    if (icon) icon.innerHTML = expanded ? AI_ICON_COLLAPSE : AI_ICON_EXPAND;
+    if (btn) {
+      btn.setAttribute('aria-label', expanded ? 'Collapse' : 'Expand');
+      btn.setAttribute('title', expanded ? 'Collapse' : 'Expand');
+    }
   }
 
   function wireAiChat() {
@@ -2389,6 +2474,8 @@
       else closeAiChatPanel();
     });
     el('ai-chat-close').addEventListener('click', closeAiChatPanel);
+    el('ai-chat-clear').addEventListener('click', clearAiChat);
+    el('ai-chat-expand').addEventListener('click', toggleAiChatExpand);
 
     form.addEventListener('submit', function (e) {
       e.preventDefault();

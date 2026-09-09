@@ -17,3 +17,8 @@
 create unique index if not exists uniq_re_team_members_pending_invite
   on team_members(team_id, invited_email)
   where user_id is null;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('012_invite_dedup.sql')
+  on conflict (filename) do nothing;

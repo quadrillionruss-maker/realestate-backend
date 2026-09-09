@@ -17,3 +17,8 @@
 alter table users add column if not exists failed_login_count integer not null default 0;
 
 alter table users add column if not exists locked_until timestamptz;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('009_account_lockout.sql')
+  on conflict (filename) do nothing;

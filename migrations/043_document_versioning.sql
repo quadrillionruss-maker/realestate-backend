@@ -61,3 +61,8 @@ end $$;
 create index if not exists idx_re_documents_current_version
   on re_documents(reservation_id, doc_type)
   where superseded_at is null and deleted_at is null;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('043_document_versioning.sql')
+  on conflict (filename) do nothing;

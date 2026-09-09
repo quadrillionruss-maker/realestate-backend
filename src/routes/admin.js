@@ -127,6 +127,14 @@ router.post('/workspaces/:id/impersonate', wrap(async (req, res) => {
   res.json(await adminService.impersonateWorkspace(req.params.id));
 }));
 
+router.post('/workspaces/:id/send-test-brief', wrap(async (req, res) => {
+  res.json(await adminService.sendTestBrief(req.params.id));
+}));
+
+router.post('/workspaces/:id/reset-brief-cache', wrap(async (req, res) => {
+  res.json(await adminService.resetBriefCache(req.params.id));
+}));
+
 router.get('/agents', wrap(async (req, res) => {
   const { org, agent, outcome } = req.query;
   res.json(await adminService.agentActionsLog({ orgId: org || null, agentName: agent || null, outcome: outcome || null }));

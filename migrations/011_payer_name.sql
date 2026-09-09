@@ -11,3 +11,8 @@
 -- ============================================================
 
 alter table re_payments add column if not exists payer_name text;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('011_payer_name.sql')
+  on conflict (filename) do nothing;

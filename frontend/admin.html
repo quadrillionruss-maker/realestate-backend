@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Archivo+Black&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/3.46.0/tabler-icons.min.css">
 <!--
   ADMIN DASHBOARD — completely standalone.
 
@@ -50,16 +51,20 @@
   <aside class="sidebar">
     <div class="sidebar-brand">ARCHTA ADMIN</div>
     <nav id="nav">
-      <button data-section="overview" class="is-active">Overview</button>
-      <button data-section="workspaces">Workspaces</button>
-      <button data-section="users">Users</button>
-      <button data-section="agents">Agents</button>
-      <button data-section="notifications">Notifications</button>
-      <button data-section="health">Health</button>
-      <button data-section="revenue">Revenue</button>
-      <button data-section="usage">Usage</button>
-      <button data-section="errors">Errors</button>
+      <button data-section="overview" class="is-active"><i class="ti ti-layout-dashboard"></i>Overview</button>
+      <button data-section="workspaces"><i class="ti ti-building"></i>Workspaces</button>
+      <button data-section="users"><i class="ti ti-users"></i>Users</button>
+      <button data-section="agents"><i class="ti ti-robot"></i>Agents</button>
+      <button data-section="notifications"><i class="ti ti-bell"></i>Notifications</button>
+      <button data-section="health"><i class="ti ti-heart"></i>Health</button>
+      <button data-section="revenue"><i class="ti ti-currency-naira"></i>Revenue</button>
+      <button data-section="usage"><i class="ti ti-chart-bar"></i>Usage</button>
+      <button data-section="errors"><i class="ti ti-bug"></i>Errors</button>
     </nav>
+    <div class="sidebar-foot">
+      <button id="btn-sign-out" class="sidebar-signout"><i class="ti ti-logout"></i>Sign out</button>
+      <div class="sidebar-version mono">Archta Admin</div>
+    </div>
   </aside>
   <main class="main" id="view"></main>
 </div>

@@ -18,3 +18,8 @@
 create unique index if not exists uniq_re_tasks_open_ai_title
   on re_tasks(organization_id, title)
   where source = 'ai' and status = 'open' and deleted_at is null;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('013_ai_task_dedup.sql')
+  on conflict (filename) do nothing;

@@ -464,6 +464,61 @@ async function impersonateWorkspace(orgId) {
   return { token, user_email: owner.email, expires_in_seconds: IMPERSONATE_TTL_SECONDS };
 }
 
+// Runs the same generateDailyBrief() jobs/daily.js calls at 07:00, on demand,
+// for one workspace — support diagnosing "why does today's brief look wrong"
+// without waiting for tomorrow morning. Lazy require: aiBrief.js is a large
+// module with its own web of service dependencies, none of which need to be
+// loaded for every other admin route that never touches a brief.
+async function sendTestBrief(orgId) {
+  const [{ data: team }, { data: soloUser }] = await Promise.all([
+    supabaseRaw.from('teams').select('id').eq('id', orgId).maybeSingle(),
+    supabaseRaw.from('users').select('id').eq('id', orgId).maybeSingle(),
+  ]);
+  if (!team && !soloUser) throw notFound('Workspace not found.');
+
+  const aiBrief = require('./aiBrief');
+  const result = await aiBrief.generateDailyBrief(orgId);
+
+  await auditSystem({
+    orgId,
+    actorKind: 'admin',
+    action: 'admin.test_brief_sent',
+    entityType: 'organization',
+    entityId: null,
+    summary: `Platform admin triggered an immediate brief regeneration (generated_by: ${result.generated_by}).`,
+  });
+
+  return { generated_by: result.generated_by, summary: result.summary };
+}
+
+// Deletes today's re_ai_briefs row (Africa/Lagos date, the same key
+// storeBrief upserts on) for one workspace. Nothing regenerates it
+// immediately — the next 07:00 cron run does, same as any other day this
+// org never had a cached brief. Useful when a brief was generated before a
+// data-affecting fix (a payment correction, a plan restructure) and would
+// otherwise sit stale until tomorrow regardless of the underlying numbers
+// having already changed.
+async function resetBriefCache(orgId) {
+  const { lagosToday } = require('./overdueService');
+  const { error, count } = await supabaseRaw
+    .from('re_ai_briefs')
+    .delete({ count: 'exact' })
+    .eq('organization_id', orgId)
+    .eq('brief_date', lagosToday());
+  if (error) throw error;
+
+  await auditSystem({
+    orgId,
+    actorKind: 'admin',
+    action: 'admin.brief_cache_reset',
+    entityType: 'organization',
+    entityId: null,
+    summary: 'Platform admin cleared today\'s cached brief; it will regenerate at the next 07:00 run.',
+  });
+
+  return { cleared: Boolean(count) };
+}
+
 // ── Agents ──────────────────────────────────────────────────────────────────
 async function agentActionsLog({ orgId, agentName, outcome } = {}) {
   let query = supabaseRaw
@@ -554,48 +609,24 @@ async function health() {
   };
 }
 
-// Every migration that introduces a new table, keyed by the file prefix that
-// creates it — checked directly against the database. A migration with no
-// entry here only ever ALTERs an existing table (adds a column, an index, a
-// constraint), which this file has no cheap, generic way to detect the
-// presence of — those are reported as "applied" exactly when the NEXT
-// checkpointed migration is, since this product's own rule (CLAUDE.md's
-// "Before first use") is that every file from 001 up to the highest present
-// is run in one pass, in order, every time.
-const MIGRATION_CHECKPOINTS = {
-  '001': 'users', '002': 're_ai_briefs', '003': 're_org_settings',
-  '021': 'parent_organizations', '022': 're_construction_milestones',
-  '024': 're_customer_referrals', '025': 're_forecasts', '026': 're_plan_recommendations',
-  '027': 're_document_templates', '028': 're_agent_actions', '029': 're_activities',
-  '030': 're_hardship_requests', '031': 're_messages', '033': 're_legal_cases',
-  '034': 're_financing_requests', '035': 're_handover_checklists', '036': 're_contractors',
-  '037': 're_community_posts', '038': 're_project_health', '039': 're_cron_runs',
-  '040': 're_admin_actions', '044': 're_email_templates', '045': 're_push_subscriptions',
-  '047': 're_sessions', '048': 're_receipt_templates', '049': 're_scheduled_messages',
-  '050': 're_satisfaction_surveys', '051': 're_portal_notifications', '052': 're_subscriptions',
-  '053': 're_feature_events', '054': 're_client_errors',
-  // FEATURE EXPANSION SESSION — this map stopped at '040' for several
-  // migrations' worth of new tables (044-054), which meant every one of them
-  // (and everything alter-only in between, via the forward-fill below) read
-  // as "not applied" on the Health tab regardless of the database's real
-  // state. Extended through the current highest migration so the same class
-  // of false negative doesn't recur for this batch.
-  '055': 're_attendance', '059': 're_joint_sales', '060': 're_campaigns',
-  '062': 're_sentiment_cache',
-  // AUDIT FIX SESSION — same class of gap, caught this time before it could
-  // recur: 072 is the only migration in this audit-fix batch (063-072) that
-  // creates a genuinely new table (the rest are alter-only constraint/index/
-  // function changes, which the forward-fill below already reports
-  // correctly). Everything from 063 up to it forward-fills from this entry.
-  '072': 're_processed_whatsapp_messages',
-};
-
-// Reads which migration files exist on disk and, best-effort, whether the
-// database has run far enough to know about them — there is no formal
-// migrations-ledger table in this schema (migrations/*.sql are applied by
-// hand in the Supabase SQL editor), so "applied" is inferred from whether
-// each migration's own checkpoint table exists, the same idempotency check
-// every migration file already performs on itself via `if not exists`.
+// Reads which migration files exist on disk and cross-references them
+// against schema_migrations (migrations/082) — every migration from 001
+// onward ends with `insert into schema_migrations values ('NNN_name.sql')
+// on conflict do nothing`, so a file's row exists here the moment it has
+// actually been pasted into the Supabase SQL editor and run. This replaced
+// a hand-maintained map from file prefix to the table it creates
+// (MIGRATION_CHECKPOINTS): that map required a new entry every time a
+// migration added a table, went stale twice in practice (once caught and
+// patched, once not — 073 through 081 shipped with no entry and read as
+// "not applied" regardless of the database's real state), and would keep
+// going stale by the same mechanism forever. A straight ledger lookup has
+// nothing to fall behind.
+//
+// A database that has not yet run 082 (or the updated 001, which also
+// creates schema_migrations — see that file's own header) has no ledger
+// table at all; that read is treated as "nothing registered yet" rather
+// than thrown, so the Health tab still renders instead of 500ing on a
+// database mid-upgrade.
 async function migrationStatus() {
   const fs = require('fs');
   const path = require('path');
@@ -607,40 +638,18 @@ async function migrationStatus() {
     return [];
   }
 
-  // AUDIT FIX (P8) — one round trip instead of one per checkpoint (currently
-  // in the high 20s, growing by roughly one per future feature migration
-  // that introduces a new table). admin_tables_exist (migrations/071) does
-  // the existence check for every table name in a single query.
-  const prefixesByTable = new Map();
-  for (const [prefix, table] of Object.entries(MIGRATION_CHECKPOINTS)) {
-    if (!prefixesByTable.has(table)) prefixesByTable.set(table, []);
-    prefixesByTable.get(table).push(prefix);
-  }
-  const { data: existenceRows, error: existenceErr } = await supabaseRaw.rpc('admin_tables_exist', {
-    table_names: [...prefixesByTable.keys()],
-  });
-  if (existenceErr) throw existenceErr;
+  const { data: rows, error } = await supabaseRaw.from('schema_migrations').select('filename');
+  // 42P01 = undefined_table, the raw Postgres code. PGRST205 is PostgREST's
+  // OWN code for the same situation ("Could not find the table ... in the
+  // schema cache") — a plain .from().select() through Supabase's REST layer
+  // surfaces this one, not 42P01, when the table genuinely does not exist
+  // yet (or exists but PostgREST's schema cache has not reloaded since it
+  // was created) — confirmed against a real Supabase project that had not
+  // yet run 082. Either way: this database hasn't run 082/updated-001 yet.
+  if (error && error.code !== '42P01' && error.code !== 'PGRST205') throw error;
 
-  const checkpointApplied = {};
-  for (const row of existenceRows || []) {
-    for (const prefix of prefixesByTable.get(row.table_name) || []) {
-      checkpointApplied[prefix] = row.table_exists;
-    }
-  }
-
-  // Forward-fill: an alter-only file between two checkpoints is reported
-  // applied exactly when the next checkpoint at or after it is.
-  const results = files.map((file) => {
-    const prefix = file.slice(0, 3);
-    return { file, prefix, applied: prefix in checkpointApplied ? checkpointApplied[prefix] : null };
-  });
-  for (let i = results.length - 1; i >= 0; i -= 1) {
-    if (results[i].applied === null) {
-      results[i].applied = i + 1 < results.length ? results[i + 1].applied : false;
-    }
-  }
-
-  return results.map(({ file, applied }) => ({ file, applied }));
+  const applied = new Set((rows || []).map((r) => r.filename));
+  return files.map((file) => ({ file, applied: applied.has(file) }));
 }
 
 // ── SECTION 21 — Archta's own subscription revenue ──────────────────────────
@@ -776,6 +785,8 @@ module.exports = {
   resetUserPassword,
   hardDeleteUser,
   impersonateWorkspace,
+  sendTestBrief,
+  resetBriefCache,
   agentActionsLog,
   notificationStats,
   health,

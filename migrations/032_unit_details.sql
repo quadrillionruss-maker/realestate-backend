@@ -32,3 +32,8 @@ alter table re_units drop constraint if exists re_units_bathrooms_check;
 alter table re_units add constraint re_units_bathrooms_check check (bathrooms is null or bathrooms >= 0);
 alter table re_units drop constraint if exists re_units_parking_spaces_check;
 alter table re_units add constraint re_units_parking_spaces_check check (parking_spaces is null or parking_spaces >= 0);
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('032_unit_details.sql')
+  on conflict (filename) do nothing;

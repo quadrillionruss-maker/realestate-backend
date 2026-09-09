@@ -31,3 +31,8 @@ begin
 
   grant execute on function admin_tables_exist(text[]) to service_role;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('071_admin_tables_exist_rpc.sql')
+  on conflict (filename) do nothing;

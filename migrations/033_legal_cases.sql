@@ -78,3 +78,8 @@ begin
   grant select, insert, update, delete on public.re_legal_cases to service_role;
   revoke all on public.re_legal_cases from anon, authenticated;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('033_legal_cases.sql')
+  on conflict (filename) do nothing;

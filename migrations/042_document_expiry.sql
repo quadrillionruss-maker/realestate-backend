@@ -27,3 +27,8 @@ alter table re_documents add column if not exists expires_at timestamptz;
 create index if not exists idx_re_documents_expiry
   on re_documents(organization_id, expires_at)
   where expires_at is not null and status in ('generated', 'sent');
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('042_document_expiry.sql')
+  on conflict (filename) do nothing;

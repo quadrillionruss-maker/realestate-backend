@@ -90,3 +90,8 @@ begin
   grant select, insert, update, delete on public.re_document_templates to service_role;
   revoke all on public.re_document_templates from anon, authenticated;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('027_legal_documents_esignature.sql')
+  on conflict (filename) do nothing;

@@ -58,3 +58,8 @@ begin
   grant select, insert, update, delete on public.re_financing_requests to service_role;
   revoke all on public.re_financing_requests from anon, authenticated;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('034_financing_requests.sql')
+  on conflict (filename) do nothing;

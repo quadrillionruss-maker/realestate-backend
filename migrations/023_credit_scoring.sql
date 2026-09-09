@@ -34,3 +34,8 @@ end $$;
 -- everyone under 40" is exactly the kind of scan a collections-minded
 -- owner runs often.
 create index if not exists idx_re_customers_credit_score on re_customers(organization_id, credit_score);
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('023_credit_scoring.sql')
+  on conflict (filename) do nothing;

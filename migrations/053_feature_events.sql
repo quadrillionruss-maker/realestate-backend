@@ -61,3 +61,8 @@ begin
   revoke all on public.re_feature_events from anon, authenticated;
   grant execute on function increment_feature_event(uuid, text) to service_role;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('053_feature_events.sql')
+  on conflict (filename) do nothing;

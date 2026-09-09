@@ -45,8 +45,11 @@ app.use(helmet({
       scriptSrc: ["'self'", 'https://accounts.google.com'],
       // 'unsafe-inline' for styles only: the app sets width on progress bars
       // and unit-mix segments from data, which is a style attribute.
-      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-      fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+      // cdnjs.cloudflare.com: admin.html's Tabler icon font (stylesheet +
+      // the woff/ttf files it references) — see frontend/vercel.json's own
+      // CSP for why this same pair of origins is added there too.
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com', 'https://cdnjs.cloudflare.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'https://cdnjs.cloudflare.com'],
       // https: for images because a developer's logo is a URL they own.
       imgSrc: ["'self'", 'data:', 'https:'],
       // NOTE: this is what the served app itself may call out to, not who may

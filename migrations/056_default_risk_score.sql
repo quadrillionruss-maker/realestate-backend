@@ -35,3 +35,8 @@ alter table re_reservations add column if not exists default_risk_score integer
 create index if not exists idx_re_reservations_default_risk
   on re_reservations(organization_id, default_risk_score desc)
   where default_risk_score is not null and deleted_at is null;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('056_default_risk_score.sql')
+  on conflict (filename) do nothing;

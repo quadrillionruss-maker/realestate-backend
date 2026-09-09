@@ -54,3 +54,8 @@ begin
   grant select, insert on public.re_project_events to service_role;
   revoke all on public.re_project_events from anon, authenticated;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('079_project_events.sql')
+  on conflict (filename) do nothing;

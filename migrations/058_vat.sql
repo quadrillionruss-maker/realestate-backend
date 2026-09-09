@@ -33,3 +33,8 @@ end $$;
 alter table re_payments add column if not exists vat_rate numeric(5,2);
 alter table re_payments add column if not exists vat_amount numeric;
 alter table re_payments add column if not exists vat_inclusive boolean;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('058_vat.sql')
+  on conflict (filename) do nothing;

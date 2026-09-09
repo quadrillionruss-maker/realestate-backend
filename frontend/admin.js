@@ -97,8 +97,21 @@
   function showApp() {
     loginScreen.hidden = true;
     appShell.hidden = false;
-    goToSection('overview');
+    // URL hash persistence — a reload (or a bookmarked/shared link) lands
+    // back on whichever section was open, not always Overview. SECTIONS is
+    // guaranteed assigned by the time showApp() actually runs: it is only
+    // ever called from the login handler or the bottom-of-file session
+    // check, both of which fire after this whole script has finished
+    // evaluating — see that check's own comment for why the ordering here
+    // matters at all.
+    var hashSection = String(window.location.hash || '').replace(/^#/, '');
+    goToSection(SECTIONS[hashSection] ? hashSection : 'overview');
   }
+
+  document.getElementById('btn-sign-out').addEventListener('click', function () {
+    sessionStorage.removeItem(SECRET_KEY);
+    window.location.reload();
+  });
 
   loginForm.addEventListener('submit', function (e) {
     e.preventDefault();
@@ -125,6 +138,33 @@
   // ── Nav / router ───────────────────────────────────────────────────────
   var view = document.getElementById('view');
   var currentSection = null;
+  var overviewAutoRefreshTimer = null;
+  var overviewLastRefreshedAt = null;
+
+  function stopOverviewAutoRefresh() {
+    if (overviewAutoRefreshTimer) { clearInterval(overviewAutoRefreshTimer); overviewAutoRefreshTimer = null; }
+  }
+
+  // Only ever armed while Overview is the visible section — goToSection
+  // stops it on every navigation away, and renderOverview re-arms it once
+  // loaded, so leaving the tab open elsewhere never fires a silent fetch
+  // for a screen nobody is looking at.
+  function startOverviewAutoRefresh() {
+    stopOverviewAutoRefresh();
+    overviewAutoRefreshTimer = setInterval(function () {
+      if (currentSection === 'overview') renderOverview().catch(function () {});
+    }, 5 * 60 * 1000);
+  }
+
+  // A title row with a manual refresh button, reused by every section —
+  // clicking it just re-runs whatever SECTIONS[currentSection] already is,
+  // so this one delegated listener (below) covers every tab without each
+  // render function wiring its own.
+  function pageTitleRow(title) {
+    return '<div class="page-title-row"><h1 class="page-title">' + esc(title) + '</h1>' +
+      '<button class="btn-icon-refresh" id="btn-section-refresh" type="button" title="Refresh" aria-label="Refresh">' +
+        '<i class="ti ti-refresh"></i></button></div>';
+  }
   var SECTIONS = {
     overview: renderOverview,
     workspaces: renderWorkspaces,
@@ -143,8 +183,22 @@
     goToSection(btn.dataset.section);
   });
 
+  // Delegated on `view` itself (which survives every innerHTML replace,
+  // unlike anything inside it) so pageTitleRow's refresh button works on
+  // every section without each render function wiring its own listener.
+  view.addEventListener('click', function (e) {
+    var btn = e.target.closest('#btn-section-refresh');
+    if (!btn || !currentSection) return;
+    btn.classList.add('is-spinning');
+    SECTIONS[currentSection]().catch(function (err) {
+      view.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+    });
+  });
+
   function goToSection(name) {
     currentSection = name;
+    window.location.hash = name;
+    stopOverviewAutoRefresh();
     Array.prototype.forEach.call(document.querySelectorAll('#nav button'), function (btn) {
       btn.classList.toggle('is-active', btn.dataset.section === name);
     });
@@ -175,8 +229,10 @@
   // ── Overview ───────────────────────────────────────────────────────────
   function renderOverview() {
     return api('/overview').then(function (d) {
+      overviewLastRefreshedAt = new Date();
       view.innerHTML =
-        '<h1 class="page-title">Overview</h1>' +
+        pageTitleRow('Overview') +
+        '<p class="muted" id="overview-last-refreshed">Last refreshed ' + timeAgo(overviewLastRefreshedAt) + '</p>' +
         '<div class="kpi-grid">' +
           kpi('Workspaces', d.total_workspaces) +
           kpi('Users', d.total_users) +
@@ -192,6 +248,7 @@
               (d.last_cron_run.finished_at ? ' → ' + fmtDate(d.last_cron_run.finished_at) : ' (still running or did not finish)') + '</div></div>'
             : '<div class="empty">No cron run recorded yet.</div>') +
         '</div></div>';
+      startOverviewAutoRefresh();
     });
   }
 
@@ -212,7 +269,7 @@
       var peak = Math.max.apply(null, d.monthly_mrr_last_12.map(function (m) { return m.mrr; }).concat([1]));
 
       view.innerHTML =
-        '<h1 class="page-title">Revenue</h1>' +
+        pageTitleRow('Revenue') +
         '<div class="kpi-grid">' +
           kpi('MRR', naira(d.mrr)) +
           kpi('Paying customers', d.total_paying_customers) +
@@ -285,7 +342,7 @@
       }, 0);
 
       view.innerHTML =
-        '<h1 class="page-title">Usage</h1>' +
+        pageTitleRow('Usage') +
         '<p class="muted">Since ' + esc(d.since) + ' — every workspace on the platform.</p>' +
 
         '<div class="card"><div class="card-head"><h2>Feature usage, last 30 days</h2></div><div class="card-body">' +
@@ -366,7 +423,7 @@
     var distinctScreens = new Set(clientErrorsCache.map(function (r) { return r.app + '/' + (r.screen || '—'); })).size;
 
     view.innerHTML =
-      '<h1 class="page-title">Errors</h1>' +
+      pageTitleRow('Errors') +
       '<p class="muted">Client-side bugs reported by the operator and admin apps, last 30 days — grouped by app, screen and message.</p>' +
       '<div class="kpi-grid">' +
         kpi('Open', openCount) +
@@ -447,7 +504,7 @@
     });
 
     view.innerHTML =
-      '<h1 class="page-title">Workspaces</h1>' +
+      pageTitleRow('Workspaces') +
       '<div class="filter-row"><input class="search-input" id="ws-search" placeholder="Search by name or owner email…" value="' + esc(filterText) + '"></div>' +
       '<div class="table-wrap"><table class="data"><thead><tr>' +
         '<th>Name</th><th>Owner</th><th>Last login</th><th>Buyers</th><th>Brief last generated</th><th>WhatsApp</th><th>Paystack</th><th></th>' +
@@ -485,6 +542,45 @@
         impersonate(btn.dataset.impersonate, btn.dataset.name);
       });
     });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-send-test-brief]'), function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var orgId = btn.dataset.sendTestBrief;
+        btn.disabled = true;
+        btn.textContent = 'Sending…';
+        api('/workspaces/' + orgId + '/send-test-brief', { method: 'POST' }).then(function (result) {
+          toast('Brief generated (' + result.generated_by + ').', 'ok');
+          btn.disabled = false;
+          btn.textContent = 'Send test brief';
+        }).catch(function (err) {
+          toast(err.message, 'err');
+          btn.disabled = false;
+          btn.textContent = 'Send test brief';
+        });
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-reset-brief-cache]'), function (btn) {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var orgId = btn.dataset.resetBriefCache;
+        btn.disabled = true;
+        btn.textContent = 'Clearing…';
+        api('/workspaces/' + orgId + '/reset-brief-cache', { method: 'POST' }).then(function (result) {
+          toast(result.cleared ? 'Cleared — regenerates at the next 07:00 run.' : 'No cached brief for today.', 'ok');
+          btn.disabled = false;
+          btn.textContent = 'Reset brief cache';
+        }).catch(function (err) {
+          toast(err.message, 'err');
+          btn.disabled = false;
+          btn.textContent = 'Reset brief cache';
+        });
+      });
+    });
+  }
+
+  var INACTIVE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
+  function isWorkspaceInactive(w) {
+    return !w.owner_last_login || (Date.now() - new Date(w.owner_last_login).getTime()) > INACTIVE_THRESHOLD_MS;
   }
 
   function workspaceRow(w) {
@@ -492,7 +588,8 @@
     var rows = '<tr data-ws-row="' + esc(w.organization_id) + '" class="is-clickable">' +
       '<td>' + esc(w.name) + '</td>' +
       '<td>' + esc(w.owner_email || '—') + '</td>' +
-      '<td>' + timeAgo(w.owner_last_login) + '</td>' +
+      '<td>' + timeAgo(w.owner_last_login) +
+        (isWorkspaceInactive(w) ? ' <span class="badge warn">Inactive</span>' : '') + '</td>' +
       '<td class="mono">' + esc(w.buyer_count) + '</td>' +
       '<td>' + timeAgo(w.brief_last_generated_at) + '</td>' +
       '<td>' + badge(w.whatsapp_configured, 'On', 'Off') + '</td>' +
@@ -512,6 +609,11 @@
         detail('Organization id', w.organization_id) +
         '</div>' +
         onboardingBlock(onboardingCache[w.organization_id]) +
+        '<div class="onboarding-block">' +
+          '<div class="k">Quick actions</div>' +
+          '<button class="btn sm" data-send-test-brief="' + esc(w.organization_id) + '">Send test brief</button>' +
+          '<button class="btn sm" data-reset-brief-cache="' + esc(w.organization_id) + '">Reset brief cache</button>' +
+        '</div>' +
         '</td></tr>';
     }
     return rows;
@@ -545,8 +647,17 @@
 
   function impersonate(orgId, name) {
     api('/workspaces/' + orgId + '/impersonate', { method: 'POST' }).then(function (result) {
+      // realestate.js's own session storage keys (its TOKEN_KEY/WORKSPACE_KEY
+      // constants) are 'archta.token' / 'archta.workspace', not 're_token' —
+      // this snippet used the wrong key for the token entirely, so pasting
+      // it and reloading left the app exactly as signed-out as before,
+      // silently. archta.workspace is set too, not just the token: without
+      // it, an owner who belongs to more than one workspace would sign in
+      // to whichever membership resolves oldest-first rather than the
+      // workspace this modal actually names.
       var instructions =
-        'localStorage.setItem("re_token", "' + result.token + '"); location.reload();';
+        'localStorage.setItem("archta.token", "' + result.token + '"); ' +
+        'localStorage.setItem("archta.workspace", "' + orgId + '"); location.reload();';
       return navigator.clipboard.writeText(instructions).then(function () {
         openModal({
           title: 'Impersonation token copied',
@@ -578,8 +689,9 @@
     });
 
     view.innerHTML =
-      '<h1 class="page-title">Users</h1>' +
+      pageTitleRow('Users') +
       '<div class="filter-row"><input class="search-input" id="user-search" placeholder="Search by name or email…" value="' + esc(filterText) + '"></div>' +
+      '<p class="muted">Showing ' + filtered.length + ' user' + (filtered.length === 1 ? '' : 's') + '</p>' +
       '<div class="table-wrap"><table class="data"><thead><tr>' +
         '<th>Name</th><th>Email</th><th>Workspace</th><th>Role</th><th>Created</th><th>Last login</th><th></th>' +
       '</tr></thead><tbody>' +
@@ -659,14 +771,22 @@
     return loadAgents();
   }
 
+  // Bumped on every call and checked when a response lands — typing in
+  // #agent-org now fires one request per keystroke (see the 'input'
+  // listener below), so an earlier, slower response landing after a later,
+  // faster one must not overwrite the screen with stale results.
+  var agentLoadToken = 0;
+
   function loadAgents() {
+    var token = ++agentLoadToken;
     var qs = [];
     if (agentFilters.org) qs.push('org=' + encodeURIComponent(agentFilters.org));
     if (agentFilters.agent) qs.push('agent=' + encodeURIComponent(agentFilters.agent));
     if (agentFilters.outcome) qs.push('outcome=' + encodeURIComponent(agentFilters.outcome));
     return api('/agents' + (qs.length ? '?' + qs.join('&') : '')).then(function (rows) {
+      if (token !== agentLoadToken) return;
       view.innerHTML =
-        '<h1 class="page-title">Agent actions</h1>' +
+        pageTitleRow('Agent actions') +
         '<div class="filter-row">' +
           '<input class="search-input" id="agent-org" placeholder="Filter by org name/id…" value="' + esc(agentFilters.org) + '">' +
           '<select class="filter" id="agent-name-filter">' +
@@ -692,18 +812,47 @@
             '<td>' + esc(r.customer_name || '—') + '</td>' +
             '<td>' + esc(r.action_type) + '</td>' +
             '<td>' + badge(r.outcome === 'success', 'Success', esc(r.outcome)) + '</td>' +
-            '<td>' + timeAgo(r.created_at) + '</td>' +
+            '<td>' + timeAgo(r.created_at) + '<span class="cell-sub mono">' + fmtDate(r.created_at) + '</span></td>' +
             '</tr>';
         }).join('') : '<tr><td colspan="6"><div class="empty">No agent actions match.</div></td></tr>') +
         '</tbody></table></div>';
 
-      document.getElementById('agent-org').addEventListener('change', function (e) { agentFilters.org = e.target.value; loadAgents(); });
+      // Same focus/cursor restore paintWorkspaces/paintUsers already do for
+      // their own live-as-you-type search boxes — every keystroke here now
+      // rebuilds this whole section's innerHTML (including this input), so
+      // without this the field would lose focus after every character.
+      var orgInput = document.getElementById('agent-org');
+      orgInput.focus();
+      orgInput.setSelectionRange(orgInput.value.length, orgInput.value.length);
+
+      orgInput.addEventListener('input', function (e) { agentFilters.org = e.target.value; loadAgents(); });
       document.getElementById('agent-name-filter').addEventListener('change', function (e) { agentFilters.agent = e.target.value; loadAgents(); });
       document.getElementById('agent-outcome-filter').addEventListener('change', function (e) { agentFilters.outcome = e.target.value; loadAgents(); });
     });
   }
 
   // ── Notifications ──────────────────────────────────────────────────────
+  // A failed notification's recipient is a real buyer's phone number or
+  // email, and this table is otherwise plain, unmasked PII sitting in the
+  // admin dashboard for anyone holding ADMIN_SECRET to read — masking it
+  // here keeps "which channel is failing and why" visible (the actual
+  // point of this table) without the full address/number attached to it.
+  function maskRecipient(recipient) {
+    var value = String(recipient || '').trim();
+    if (!value) return '—';
+
+    var atIndex = value.indexOf('@');
+    if (atIndex !== -1) {
+      var local = value.slice(0, atIndex);
+      var domain = value.slice(atIndex); // includes the '@'
+      return local.slice(0, 3) + '***' + domain;
+    }
+
+    var digits = value.replace(/\D/g, '');
+    if (!digits) return '***';
+    return '***' + digits.slice(-4);
+  }
+
   function renderNotifications() {
     return api('/notifications').then(function (d) {
       var byType = Object.keys(d.by_type || {}).map(function (k) {
@@ -711,7 +860,7 @@
       }).join('');
 
       view.innerHTML =
-        '<h1 class="page-title">Notifications</h1>' +
+        pageTitleRow('Notifications') +
         '<div class="kpi-grid">' +
           kpi('Total sent', d.total_sent) +
           kpi('Total failed', d.total_failed) +
@@ -721,7 +870,7 @@
         '<div class="card"><div class="card-head"><h2>Last 100 failed</h2></div>' +
         '<div class="table-wrap"><table class="data"><thead><tr><th>Channel</th><th>Recipient</th><th>Reason</th><th>When</th></tr></thead><tbody>' +
         (d.recent_failures.length ? d.recent_failures.map(function (f) {
-          return '<tr><td>' + esc(f.channel) + '</td><td>' + esc(f.recipient || '—') + '</td>' +
+          return '<tr><td>' + esc(f.channel) + '</td><td class="mono">' + esc(maskRecipient(f.recipient)) + '</td>' +
             '<td>' + esc(f.error || '—') + '</td><td>' + timeAgo(f.created_at) + '</td></tr>';
         }).join('') : '<tr><td colspan="4"><div class="empty">No failures recorded.</div></td></tr>') +
         '</tbody></table></div></div>';
@@ -729,21 +878,49 @@
   }
 
   // ── Health ─────────────────────────────────────────────────────────────
+  var healthCache = null;
+  var migrationSortUnappliedFirst = false;
+
   function renderHealth() {
     return api('/health').then(function (d) {
-      view.innerHTML =
-        '<h1 class="page-title">Health</h1>' +
-        '<div class="kpi-grid">' +
-          kpi('Last cron run', d.last_cron_run ? timeAgo(d.last_cron_run.started_at) : 'never') +
-          kpi('OpenAI calls this month', d.openai_calls_this_month) +
-          kpi('Failed webhooks (7d)', d.failed_webhooks_7d) +
-        '</div>' +
-        '<div class="card"><div class="card-head"><h2>Migrations</h2></div>' +
-        '<div class="table-wrap"><table class="data"><thead><tr><th>File</th><th>Status</th></tr></thead><tbody>' +
-        d.migrations.map(function (m) {
-          return '<tr><td class="mono">' + esc(m.file) + '</td><td>' + badge(m.applied, 'Applied', 'Not applied') + '</td></tr>';
-        }).join('') +
-        '</tbody></table></div></div>';
+      healthCache = d;
+      paintHealth();
+    });
+  }
+
+  function paintHealth() {
+    var d = healthCache;
+    var migrations = d.migrations.slice();
+    if (migrationSortUnappliedFirst) {
+      // Stable sort: not-applied rows float to the top, otherwise the
+      // original (alphabetical, i.e. numeric-by-filename) order holds —
+      // Array.prototype.sort in every browser this dashboard targets is
+      // guaranteed stable, so ties (same `applied` value) keep their
+      // existing relative order rather than being shuffled.
+      migrations.sort(function (a, b) { return (a.applied === b.applied) ? 0 : (a.applied ? 1 : -1); });
+    }
+
+    view.innerHTML =
+      pageTitleRow('Health') +
+      '<div class="kpi-grid">' +
+        kpi('Last cron run', d.last_cron_run ? timeAgo(d.last_cron_run.started_at) : 'never') +
+        kpi('OpenAI calls this month', d.openai_calls_this_month) +
+        kpi('Failed webhooks (7d)', d.failed_webhooks_7d) +
+      '</div>' +
+      '<div class="card"><div class="card-head"><h2>Migrations</h2>' +
+        '<button class="btn sm" id="btn-migration-sort">' +
+          (migrationSortUnappliedFirst ? 'Show alphabetical' : 'Show unapplied first') +
+        '</button>' +
+      '</div>' +
+      '<div class="table-wrap"><table class="data"><thead><tr><th>File</th><th>Status</th></tr></thead><tbody>' +
+      migrations.map(function (m) {
+        return '<tr><td class="mono">' + esc(m.file) + '</td><td>' + badge(m.applied, 'Applied', 'Not applied') + '</td></tr>';
+      }).join('') +
+      '</tbody></table></div></div>';
+
+    document.getElementById('btn-migration-sort').addEventListener('click', function () {
+      migrationSortUnappliedFirst = !migrationSortUnappliedFirst;
+      paintHealth();
     });
   }
 

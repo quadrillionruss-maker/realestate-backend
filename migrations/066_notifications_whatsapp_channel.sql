@@ -24,3 +24,8 @@
 alter table re_notifications drop constraint if exists re_notifications_channel_check;
 alter table re_notifications add constraint re_notifications_channel_check
   check (channel in ('email', 'sms', 'whatsapp'));
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('066_notifications_whatsapp_channel.sql')
+  on conflict (filename) do nothing;

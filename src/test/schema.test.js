@@ -42,7 +42,7 @@ function check(name, cond, detail) {
       // straight after 054 here is safe for THIS file's own purposes even
       // though it does not mirror the real on-disk migration order — see
       // this feature expansion's Section 1 report for the fuller note.
-      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql']) {
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -85,7 +85,7 @@ function check(name, cond, detail) {
       // straight after 054 here is safe for THIS file's own purposes even
       // though it does not mirror the real on-disk migration order — see
       // this feature expansion's Section 1 report for the fuller note.
-      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql']) {
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -2906,6 +2906,32 @@ function check(name, cond, detail) {
   // ── re_org_settings.registration_number (migrations/081) ────────────────
   const orgSettingsCols081 = await colsOf('re_org_settings');
   check('re_org_settings has registration_number', orgSettingsCols081.includes('registration_number'), orgSettingsCols081.join(', '));
+
+  // ── schema_migrations ledger (migrations/082) — replaces the old hand-
+  // maintained MIGRATION_CHECKPOINTS map in adminService.js. Every file in
+  // this test's own apply list above ends with a self-registering insert,
+  // so by this point in the run the ledger should hold exactly one row per
+  // file this harness applied (both passes: the second is a no-op insert
+  // thanks to ON CONFLICT, not a second row). ────────────────────────────
+  const migrationCols = await colsOf('schema_migrations');
+  check('schema_migrations has the columns adminService.migrationStatus selects',
+    ['filename', 'applied_at'].every((c) => migrationCols.includes(c)), migrationCols.join(', '));
+
+  const ledgerRows = await q(`select filename from schema_migrations order by filename`);
+  check('001_phase1_schema.sql registered itself in the ledger',
+    ledgerRows.some((r) => r.filename === '001_phase1_schema.sql'));
+  check('082_schema_migrations_ledger.sql registered itself in the ledger',
+    ledgerRows.some((r) => r.filename === '082_schema_migrations_ledger.sql'));
+
+  const [{ 'count': dupeCount }] = await q(
+    `select count(*)::int from (select filename from schema_migrations group by filename having count(*) > 1) d`);
+  check('re-applying the full set (idempotency pass 2) left no duplicate ledger rows — ON CONFLICT DO NOTHING held',
+    dupeCount === 0);
+
+  const [{ ok: migrationsGrant }] = await q(
+    `select has_table_privilege('service_role', 'public.schema_migrations', 'select')
+        and has_table_privilege('service_role', 'public.schema_migrations', 'insert') as ok`);
+  check('service_role can read and write schema_migrations', migrationsGrant);
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);

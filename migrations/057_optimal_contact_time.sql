@@ -18,3 +18,8 @@ alter table re_customers add column if not exists optimal_contact_day smallint
   check (optimal_contact_day is null or (optimal_contact_day >= 0 and optimal_contact_day <= 6));
 alter table re_customers add column if not exists optimal_contact_hour smallint
   check (optimal_contact_hour is null or (optimal_contact_hour >= 0 and optimal_contact_hour <= 23));
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('057_optimal_contact_time.sql')
+  on conflict (filename) do nothing;

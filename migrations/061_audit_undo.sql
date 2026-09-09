@@ -17,3 +17,8 @@ alter table re_audit_log add column if not exists reversible boolean not null de
 alter table re_audit_log add column if not exists reversed_at timestamptz;
 alter table re_audit_log add column if not exists reversed_by uuid references users(id);
 alter table re_audit_log add column if not exists reversal_data jsonb;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('061_audit_undo.sql')
+  on conflict (filename) do nothing;

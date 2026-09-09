@@ -75,3 +75,8 @@ begin
   revoke all on public.re_attendance from anon, authenticated;
   revoke all on public.re_log_entries from anon, authenticated;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('055_attendance_and_logs.sql')
+  on conflict (filename) do nothing;

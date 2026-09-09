@@ -30,3 +30,8 @@ set commission_rate = rs.commission_rate
 from re_sales_reps rs
 where r.sales_rep_id = rs.id
   and r.commission_rate is null;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('020_commission_rate_snapshot.sql')
+  on conflict (filename) do nothing;

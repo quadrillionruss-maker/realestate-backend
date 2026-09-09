@@ -79,3 +79,8 @@ begin
       check (typical_payment_amount_pattern is null or typical_payment_amount_pattern in ('full', 'partial', 'variable'));
   end if;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('074_behavioral_fingerprint.sql')
+  on conflict (filename) do nothing;

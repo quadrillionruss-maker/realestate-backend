@@ -46,3 +46,8 @@ drop index if exists uniq_re_payments_reallocation_source;
 create unique index if not exists uniq_re_payments_reallocation_source
   on re_payments(reallocated_from_payment_id)
   where reallocated_from_payment_id is not null and voided_at is null;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('008_payment_void.sql')
+  on conflict (filename) do nothing;

@@ -66,3 +66,8 @@ begin
   revoke all on public.re_joint_sales from anon, authenticated;
   revoke all on public.re_joint_sale_parties from anon, authenticated;
 end $$;
+
+-- Self-registers in the migrations ledger (migrations/082) so the Health
+-- tab's "applied" status is a straight lookup, not a hand-maintained map.
+insert into schema_migrations (filename) values ('059_joint_sales.sql')
+  on conflict (filename) do nothing;
