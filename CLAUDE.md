@@ -663,15 +663,61 @@ balance, the dashboard and reports — filters `voided_at is null`. The
 stays visible there, dimmed, next to the correction, because a complete record
 is the point.
 
-## Deliberately NOT in v1 (do not add)
+## V2 — what this product actually is now
 
-Buyer/Seller/Mortgage/Legal/Pricing/Market agents, agent orchestration, MLS,
-multi-country, marketplace, voice, automatic WhatsApp sending. One AI worker
-only: the daily brief plus drafted follow-ups. **Every AI output is a proposal
-a human sends** — the escalation stages set the tone of a draft, they never
-send it, and a buyer at `legal` stage gets no draft at all. See
-`docs/AI_WORKFORCE.md` for the growth path and the gates each future agent
-must clear.
+This used to be a single-AI-worker v1 (the daily brief, plus drafted
+follow-ups, with agents, orchestration and Legal explicitly listed as NOT
+being built). That list is gone because everything on it now exists and is
+production code. **`docs/AI_WORKFORCE.md` is the source of truth for the
+agents architecture** — read it before touching `dealManager.js` or any
+`src/services/*Agent.js` file. In outline:
+
+**The Deal Manager (`src/services/dealManager.js`) orchestrates five
+specialist agents**, run from `src/jobs/daily.js`: Collections Agent
+(escalation ladders, promise-to-pay tracking), Sales Agent (lead nurture,
+site-visit scheduling), Document Agent (allocation letters, signature
+chasing), Finance/Reporting Agent (investor summaries, cash-flow
+projections) and Market Intelligence Agent (price trends, demand signals).
+A sixth, Scheduling Agent, is in `docs/AI_WORKFORCE.md`'s own table but not
+yet built. Every agent output is still a proposal by default, same rule v1
+always had — a workspace opts into an agent actually SENDING by configuring
+WhatsApp under Settings; without that, every agent still runs but only ever
+produces tasks and brief items. `dealManager.clearance()` is what an agent
+checks before acting, every time: WhatsApp configured, buyer hasn't opted
+out, no human already handling this conversation, nothing already sent
+today — checked fresh per action, never cached.
+
+**Beyond the agents, this is now a considerably larger product than the
+original installment-sales core.** Payment pause / hardship requests and
+bank financing are both real buyer-submitted, staff-reviewed request flows
+(see "Roles and permissions" above for exactly who may decide each);
+`restructureService.js` renegotiates a plan directly, no review step of its
+own. `jointSaleService.js` splits a unit's commission across co-selling
+reps. `legalCaseService.js` tracks a case as a human decision, never
+automatic. `campaignService.js` sends bulk email/SMS/WhatsApp to a chosen
+slice of the buyer list with per-recipient delivery tracking.
+`communityService.js` is a buyer forum scoped to one project. Construction
+milestones and rental tenancies (see "Rental tenancies" above) are both
+first-class reservation shapes. `routes/admin.js` is a platform-operator
+dashboard gated by its own shared `ADMIN_SECRET` — entirely separate from a
+workspace's own staff accounts and RBAC.
+
+**An intelligence layer sits on top of all of it.** Archta Intelligence
+(`aiAssistantService.js`) is a conversational assistant answering questions
+over a workspace's own data, buyer identities tokenized before anything
+reaches OpenAI (see that file's own header). The Decision Ledger
+(`decisionLedgerService.js`) compares every AI recommendation against what a
+human actually did and, where a real outcome follows, closes the loop — the
+override rate and its real-world performance are visible for the first
+time. `reconciliationService.js` matches Archta's own payment ledger against
+Paystack's transaction list or an uploaded bank statement.
+`approvalService.js` is a unified queue across the product's sensitive,
+role-gated decisions.
+
+Still true, and still the whole point: **every AI output a human can act on
+remains a proposal, never an autonomous decision.** What changed since v1 is
+how much of the operation now has an agent proposing something at all, not
+who gets to say yes.
 
 ## Frontend gotchas that have already bitten once
 
