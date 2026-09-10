@@ -275,6 +275,10 @@
     if (opts.body && !(opts.body instanceof FormData)) headers['Content-Type'] = 'application/json';
     if (token) headers.Authorization = 'Bearer ' + token;
     if (workspaceId) headers['X-Workspace-Id'] = workspaceId;
+    // AUDIT FIX (FE4) — lets a caller attach its own headers (currently
+    // just offline-queue.js's X-Idempotency-Key) without every other call
+    // site needing to know this exists.
+    if (opts.headers) Object.assign(headers, opts.headers);
 
     var res;
     try {
@@ -316,7 +320,9 @@
 
   // Sugar, because `api('/customers', { method: 'POST', body: JSON.stringify(x) })`
   // appears about forty times across the screens.
-  api.post = function (path, data) { return api(path, { method: 'POST', body: JSON.stringify(data || {}) }); };
+  api.post = function (path, data, headers) {
+    return api(path, { method: 'POST', body: JSON.stringify(data || {}), headers: headers });
+  };
   api.patch = function (path, data) { return api(path, { method: 'PATCH', body: JSON.stringify(data || {}) }); };
   api.put = function (path, data) { return api(path, { method: 'PUT', body: JSON.stringify(data || {}) }); };
   authApi.post = function (path, data) {
@@ -1084,9 +1090,16 @@
       var results = await Promise.all([
         api('/dashboard/at-risk'),
         api('/tasks?status=open'),
+        // PROMPT 8 — Unified Approval/Workflow Engine. Only fetched when the
+        // role can actually see the queue (approvals.view, DIRECTORS) — a
+        // sales_rep/collections/documentation account has no 'approvals'
+        // nav item to begin with (NAV_BY_ROLE below never lists it), and
+        // the route itself would 403 for them anyway.
+        can('approvals.view') ? api('/approvals/pending') : Promise.resolve([]),
       ]);
       setCount('count-risk', results[0].length);
       setCount('count-tasks', results[1].length);
+      setCount('count-approvals', results[2].length);
       // Mobile bottom nav's own badges. The elements exist in the DOM at
       // every width (index.html) — only #bottom-nav's CSS visibility is
       // breakpoint-gated — so updating them unconditionally here is
@@ -1360,6 +1373,17 @@
       var button = el('reg-submit');
       if (button.disabled) return;
       gateError('reg-error', '');
+
+      // AUDIT FIX (L1) — the form carries `novalidate` (every gate form
+      // does, so this file controls exactly what an error looks like), so
+      // the checkbox's own `required` attribute never actually stops a
+      // submit on its own. Checked here instead, before the request goes
+      // out at all.
+      if (!el('reg-accept-terms').checked) {
+        gateError('reg-error', 'Please accept the Terms & Conditions and Privacy Policy to continue.');
+        return;
+      }
+
       button.disabled = true;
       button.classList.add('is-working');
 
@@ -1369,6 +1393,7 @@
           company_name: el('reg-company').value.trim(),
           email: el('reg-email').value.trim(),
           password: el('reg-password').value,
+          accepted_terms: true,
         });
         setToken(result.token);
         el('reg-password').value = '';
@@ -2267,6 +2292,12 @@
   // real boundary.
   var aiChatHistory = []; // [{role: 'user'|'assistant', content, fallback, pending, ts}]
   var aiChatPendingInsight = null;
+  // AUDIT FIX (FE1) — a second call while one is already in flight used to
+  // push a SECOND pending bubble and fire a second request; whichever
+  // response landed second still just popped "the last pending entry",
+  // which could be the WRONG one if the two requests resolved out of
+  // order. One flag, checked at the top of sendAiChatMessage.
+  var aiChatInFlight = false;
 
   // Shown instead of result.answer whenever generated_by is 'fallback', and
   // instead of err.message in the catch below — the fallback text itself is
@@ -2276,6 +2307,10 @@
   // nobody asking a business question needs to see. One calm sentence
   // either way, never the raw text underneath it.
   var AI_UNAVAILABLE_MESSAGE = 'Archta Intelligence is temporarily unavailable. Try again in a moment.';
+  // AUDIT FIX (FE2) — distinct from the message above: a missing API key is
+  // a permanent, admin-fixable state, not something "try again" will ever
+  // resolve for whoever is looking at this chat.
+  var AI_NOT_CONFIGURED_MESSAGE = 'Archta Intelligence is not yet configured. Contact your administrator.';
 
   var AI_ICON_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>';
   var AI_ICON_COPIED = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
@@ -2346,9 +2381,11 @@
         esc(m.content) +
         '<div class="ai-chat-message-meta">' +
           (m.role === 'assistant' ? '<button type="button" class="ai-chat-message-copy" data-copy-index="' + i + '" aria-label="Copy" title="Copy">' + AI_ICON_COPY + '</button>' : '') +
+          (m.role === 'assistant' ? aiFeedbackButtons(m, i) : '') +
           '<span class="ai-chat-message-time">' + aiMessageTime(m.ts) + '</span>' +
         '</div>' +
-      '</div>';
+      '</div>' +
+      (m.role === 'assistant' && m.confidence ? aiEvidenceCard(m.confidence) : '');
     }).join('');
     container.scrollTop = container.scrollHeight;
 
@@ -2366,16 +2403,84 @@
         }).catch(function () { /* clipboard denied — nothing else to do about it here */ });
       });
     });
+
+    qsa('[data-feedback-index]', container).forEach(function (btn) {
+      btn.addEventListener('click', function () { sendAiFeedback(Number(btn.dataset.feedbackIndex), btn.dataset.feedbackValue); });
+    });
+  }
+
+  // Recommendation feedback — two small buttons after every assistant
+  // message. Disabled once this message already has a recorded vote
+  // (m.feedback) rather than allowing a change of mind — POST /ai/feedback
+  // is insert-only, so there is nothing for a second click to update.
+  function aiFeedbackButtons(m, i) {
+    var rated = Boolean(m.feedback);
+    return '<button type="button" class="ai-chat-feedback-btn' + (m.feedback === 'positive' ? ' is-selected' : '') + '"' +
+        ' data-feedback-index="' + i + '" data-feedback-value="positive"' + (rated ? ' disabled' : '') +
+        ' aria-label="Good answer" title="Good answer">👍</button>' +
+      '<button type="button" class="ai-chat-feedback-btn' + (m.feedback === 'negative' ? ' is-selected' : '') + '"' +
+        ' data-feedback-index="' + i + '" data-feedback-value="negative"' + (rated ? ' disabled' : '') +
+        ' aria-label="Poor answer" title="Poor answer">👎</button>';
+  }
+
+  // Confidence/evidence card — item 2's "small evidence block below the
+  // answer... not as part of the answer text", so this is a sibling element
+  // to the message bubble, not appended inside it.
+  function aiEvidenceCard(c) {
+    var parts = [];
+    if (c.sample_size != null) {
+      parts.push('Based on ' + c.sample_size + ' record' + (c.sample_size === 1 ? '' : 's') +
+        (c.date_range ? ' over the last ' + esc(c.date_range) : '') + '.');
+    } else if (c.date_range) {
+      parts.push('Covers the last ' + esc(c.date_range) + '.');
+    }
+    var confidenceLabel = c.confidence
+      ? '<span class="ai-chat-confidence-badge ' + esc(c.confidence) + '">' + esc(c.confidence) + ' confidence</span>'
+      : '';
+    return '<div class="ai-chat-evidence">' +
+      esc(parts.join(' ')) + (confidenceLabel ? ' · ' + confidenceLabel : '') +
+      (c.caveat ? '<div class="ai-chat-evidence-caveat">' + esc(c.caveat) + '</div>' : '') +
+    '</div>';
+  }
+
+  function sendAiFeedback(index, value) {
+    var msg = aiChatHistory[index];
+    if (!msg || msg.feedback) return;
+    // Optimistic — this is a one-way "thanks for the signal" action with
+    // nothing in the UI depending on the server round trip succeeding.
+    msg.feedback = value;
+    renderAiChatMessages();
+    api.post('/ai/feedback', {
+      conversation_id: msg.conversationId || null,
+      message_index: index,
+      feedback: value,
+      question: msg.question || '',
+      answer: msg.content,
+    }).catch(function () { /* best-effort — the vote already shows locally */ });
   }
 
   // Resets the conversation to a fresh state (suggested questions again),
   // wired to both the trash-icon button in the header and a `/clear` typed
   // into the input itself (sendAiChatMessage intercepts that before it ever
   // becomes a question sent to the model).
+  // AUDIT FIX (FE7) — grows the textarea with what's typed instead of
+  // scrolling inside a box fixed at one row tall; capped by the textarea's
+  // own CSS max-height (90px) — a question longer than that still scrolls,
+  // same as before. Resetting to 'auto' first is what lets it SHRINK back
+  // down too (e.g. after Enter clears it, or most of the text is deleted) —
+  // scrollHeight alone never decreases while a taller height is still set.
+  function autoGrowAiChatInput() {
+    var input = el('ai-chat-input');
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = input.scrollHeight + 'px';
+  }
+
   function clearAiChat() {
     aiChatHistory = [];
     var input = el('ai-chat-input');
     if (input) input.value = '';
+    autoGrowAiChatInput();
     renderAiChatMessages();
   }
 
@@ -2387,6 +2492,14 @@
       clearAiChat();
       return;
     }
+
+    // AUDIT FIX (FE1) — ignore a second call outright while one is already
+    // in flight (a double-click, hitting Enter twice before the first
+    // reply lands) rather than queuing or stacking a second question.
+    if (aiChatInFlight) return;
+    aiChatInFlight = true;
+    var sendBtn = el('ai-chat-send');
+    if (sendBtn) sendBtn.disabled = true;
 
     // Last 10 turns BEFORE this one — the question itself is sent
     // separately as `question`, not folded into the history array.
@@ -2401,21 +2514,42 @@
 
     var input = el('ai-chat-input');
     if (input) input.value = '';
+    autoGrowAiChatInput();
 
     try {
       var result = await api.post('/ai/ask', { question: text, conversation_history: historyForServer });
       aiChatHistory.pop();
       var isFallback = result.generated_by === 'fallback';
+      // AUDIT FIX (FE2) — 'not_configured' is permanent (an admin has to
+      // set OPENAI_API_KEY; no retry from this chat will ever fix it),
+      // distinct from every other fallback reason, which really might
+      // resolve on a retry.
+      var fallbackMessage = result.fallback_reason === 'not_configured'
+        ? AI_NOT_CONFIGURED_MESSAGE
+        : AI_UNAVAILABLE_MESSAGE;
       aiChatHistory.push({
         role: 'assistant',
-        content: isFallback ? AI_UNAVAILABLE_MESSAGE : result.answer,
+        content: isFallback ? fallbackMessage : result.answer,
         fallback: isFallback,
         ts: Date.now(),
+        // Recommendation feedback + confidence/evidence — question is this
+        // turn's own text (not the fallback message), conversationId/
+        // confidence are absent (null) on a fallback answer, same as the
+        // server never computes either for one.
+        question: text,
+        conversationId: result.conversation_id || null,
+        confidence: result.confidence || null,
       });
     } catch (err) {
       aiChatHistory.pop();
       aiChatHistory.push({ role: 'assistant', content: AI_UNAVAILABLE_MESSAGE, fallback: true, ts: Date.now() });
     }
+    // AUDIT FIX (FE1) — the guard is lifted only once THIS request's own
+    // response (or failure) has actually landed and its bubble replaced
+    // the pending one above — never earlier, so a reply can never be
+    // ignored because the button was re-enabled too soon.
+    aiChatInFlight = false;
+    if (sendBtn) sendBtn.disabled = false;
     renderAiChatMessages();
   }
 
@@ -2430,6 +2564,7 @@
     if (aiChatPendingInsight) {
       var input = el('ai-chat-input');
       if (input) input.value = aiChatPendingInsight.question;
+      autoGrowAiChatInput();
       var insightId = aiChatPendingInsight.id;
       aiChatPendingInsight = null;
       var dot = el('ai-chat-unread');
@@ -2491,6 +2626,7 @@
         sendAiChatMessage(input.value);
       }
     });
+    input.addEventListener('input', autoGrowAiChatInput);
   }
 
   // ── SECTION 15 — bulk WhatsApp from the brief ────────────────────────────

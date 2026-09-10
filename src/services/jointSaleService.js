@@ -32,15 +32,27 @@ const naira = (amount) => {
 async function getForReservation(orgId, reservationId) {
   const { data: sale, error } = await supabaseAdmin
     .from('re_joint_sales')
-    .select('id, reservation_id, created_at, re_joint_sale_parties(*)')
+    .select('id, reservation_id, created_at')
     .eq('organization_id', orgId)
     .eq('reservation_id', reservationId)
     .maybeSingle();
   if (error) throw error;
   if (!sale) return null;
 
-  const parties = Array.isArray(sale.re_joint_sale_parties) ? sale.re_joint_sale_parties : [sale.re_joint_sale_parties].filter(Boolean);
-  return { id: sale.id, reservation_id: sale.reservation_id, created_at: sale.created_at, parties };
+  // AUDIT FIX (D4) — a separate query rather than the embedded
+  // `re_joint_sale_parties(*)` this used to select: an embedded resource is
+  // not covered by orgContext.js's SOFT_DELETABLE-style auto-filtering (see
+  // that file's own caveat), and replace_joint_sale_parties (migrations/064)
+  // now leaves superseded rows in the table on purpose — the current terms
+  // are the live ones, not every version this joint sale has ever had.
+  const { data: parties, error: partiesErr } = await supabaseAdmin
+    .from('re_joint_sale_parties')
+    .select('*')
+    .eq('joint_sale_id', sale.id)
+    .is('superseded_at', null);
+  if (partiesErr) throw partiesErr;
+
+  return { id: sale.id, reservation_id: sale.reservation_id, created_at: sale.created_at, parties: parties || [] };
 }
 
 function validateParties(parties) {
@@ -124,10 +136,28 @@ async function createOrReplace(req, reservationId, { parties }) {
 // Pure — each party's share of a given commission amount. Exported so this
 // exact math is what both the statement PDF and the commissions-screen
 // display use, rather than two copies that could drift.
+//
+// AUDIT FIX (F11) — rounding each party's share independently (round2 on
+// each) could leave the group's shares summing to a kobo or two off from
+// what the group should collectively total — the exact same drift
+// installmentService.buildSchedule's own remainder correction exists to
+// close for a payment schedule. Floors every share and puts the remainder
+// on the LAST party instead, same "last row absorbs the kobo" pattern
+// buildSchedule uses. Deliberately NOT assumed to sum to commissionAmount
+// itself — `parties` is often a SUBSET (notifyExternalParties passes only
+// the external agents, not the in-house rep), so the correction targets
+// what THIS group's own percentages add up to, not the full commission.
 function splitCommission(commissionAmount, parties) {
-  return parties.map((party) => ({
+  const totalKobo = Math.round(Number(commissionAmount) * 100);
+  const exactSharesKobo = parties.map((party) => totalKobo * (Number(party.commission_split_percentage) / 100));
+  const flooredSharesKobo = exactSharesKobo.map((kobo) => Math.floor(kobo));
+  const flooredSum = flooredSharesKobo.reduce((sum, kobo) => sum + kobo, 0);
+  const exactSum = exactSharesKobo.reduce((sum, kobo) => sum + kobo, 0);
+  const remainderKobo = Math.round(exactSum) - flooredSum;
+
+  return parties.map((party, i) => ({
     ...party,
-    share_amount: round2(Number(commissionAmount) * (Number(party.commission_split_percentage) / 100)),
+    share_amount: (flooredSharesKobo[i] + (i === parties.length - 1 ? remainderKobo : 0)) / 100,
   }));
 }
 
@@ -151,17 +181,41 @@ function statementHtml({ companyName, customerName, unitLabel, party, shareAmoun
   </body></html>`;
 }
 
-// Called from paymentEvents.js after a commission has actually accrued.
-// Never throws — a statement failing to generate must not affect the
-// payment or the commission it describes, same rule every other
-// paymentEvents step follows.
-async function notifyExternalParties(orgId, { reservation, customer, unit, project, payment, commissionAmount, companyName }) {
+// Called from paymentEvents.js for every payment on a reservation that has a
+// joint sale, whether or not a commission actually accrued on it this time
+// — AUDIT FIX (F10): commissionAccrued/accrualReason let this distinguish
+// "nothing to split, as expected" from "nothing to split, and that might be
+// a misconfigured reservation" (see below). Never throws — a statement
+// failing to generate must not affect the payment or the commission it
+// describes, same rule every other paymentEvents step follows.
+async function notifyExternalParties(orgId, {
+  reservation, customer, unit, project, payment, commissionAmount, companyName,
+  commissionAccrued = true, accrualReason = null,
+}) {
   try {
     const joint = await getForReservation(orgId, reservation.id);
     if (!joint) return { notified: 0 };
 
     const externalParties = joint.parties.filter((p) => p.party_type === 'external_agent' && p.agent_email);
     if (!externalParties.length) return { notified: 0 };
+
+    // AUDIT FIX (F10) — an external co-seller's share is a percentage of
+    // THIS SAME commission row (this file's own header: "a DERIVED split of
+    // that same row's amount"); a reservation can have its in-house
+    // commission_rate left at 0% (or no sales rep assigned at all) while
+    // still carrying a joint sale with real external-agent splits — which
+    // used to mean this function was never even called (paymentEvents.js
+    // gated it on commission having accrued), so a co-seller on such a
+    // reservation never heard anything, ever, with no trace of why. Logged
+    // here rather than skipped: a joint sale that never accrues anything is
+    // very likely a misconfigured commission_rate, worth an operator's
+    // attention, not a silent no-op.
+    if (!commissionAccrued) {
+      console.warn(
+        `[joint-sale] reservation ${reservation.id} has ${externalParties.length} external co-seller(s) `
+        + `but no commission accrued on this payment (${accrualReason || 'unknown reason'}) — nothing to split.`
+      );
+    }
 
     const shares = splitCommission(commissionAmount, externalParties);
     const unitLabel = [unit?.unit_number && `Unit ${unit.unit_number}`, project?.name].filter(Boolean).join(' — ');
@@ -202,16 +256,44 @@ async function notifyExternalParties(orgId, { reservation, customer, unit, proje
 // does not change what commissionService.summaryByRep/leaderboard report
 // as this rep's total (see this file's own header on why).
 async function myJointSaleCommissions(orgId, userId) {
+  // AUDIT FIX (D4) — more than one row can now exist per (reservation,
+  // user): replace_joint_sale_parties (migrations/064) supersedes rather
+  // than deletes a split once a commission has accrued against it, so
+  // created_at/superseded_at are needed here to match each commission to
+  // whichever split was actually LIVE when it accrued — not whatever the
+  // split happens to be today, which is what a plain "one row per
+  // reservation" map would silently do again.
   const { data: parties, error: partyErr } = await supabaseAdmin
     .from('re_joint_sale_parties')
-    .select('id, commission_split_percentage, re_joint_sales!inner(reservation_id, organization_id)')
+    .select('id, commission_split_percentage, created_at, superseded_at, re_joint_sales!inner(reservation_id, organization_id)')
     .eq('user_id', userId)
     .eq('re_joint_sales.organization_id', orgId);
   if (partyErr) throw partyErr;
   if (!parties?.length) return [];
 
-  const reservationIds = parties.map((p) => p.re_joint_sales.reservation_id);
-  const pctByReservation = new Map(parties.map((p) => [p.re_joint_sales.reservation_id, Number(p.commission_split_percentage)]));
+  const reservationIds = [...new Set(parties.map((p) => p.re_joint_sales.reservation_id))];
+
+  const versionsByReservation = new Map();
+  for (const p of parties) {
+    const resId = p.re_joint_sales.reservation_id;
+    const list = versionsByReservation.get(resId) || [];
+    list.push({
+      pct: Number(p.commission_split_percentage),
+      from: new Date(p.created_at).getTime(),
+      until: p.superseded_at ? new Date(p.superseded_at).getTime() : null,
+    });
+    versionsByReservation.set(resId, list);
+  }
+  const pctAt = (reservationId, atIso) => {
+    const versions = versionsByReservation.get(reservationId);
+    if (!versions?.length) return 0;
+    const at = new Date(atIso).getTime();
+    const match = versions.find((v) => v.from <= at && (v.until === null || v.until > at));
+    // No version straddles the exact instant (a party row and the commission
+    // it split can both be `now()` writes seconds apart) — fall back to
+    // whichever version is live today rather than reporting a zero share.
+    return (match || versions.find((v) => v.until === null) || versions[versions.length - 1]).pct;
+  };
 
   const { data: commissions, error: commErr } = await supabaseAdmin
     .from('re_commissions')
@@ -222,7 +304,7 @@ async function myJointSaleCommissions(orgId, userId) {
   if (commErr) throw commErr;
 
   return (commissions || []).map((c) => {
-    const pct = pctByReservation.get(c.reservation_id) || 0;
+    const pct = pctAt(c.reservation_id, c.created_at);
     return {
       commission_id: c.id,
       reservation_id: c.reservation_id,

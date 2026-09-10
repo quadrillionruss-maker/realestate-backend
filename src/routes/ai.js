@@ -21,6 +21,20 @@ const askLimiter = rateLimit({
   message: { error: 'Archta Intelligence is limited to 50 questions per day for this workspace. Try again tomorrow.' },
 });
 
+// RECOMMENDATION FEEDBACK — deliberately its own, far more generous budget
+// than askLimiter above: a vote costs no OpenAI tokens at all, so tying it
+// to the same 50/day-per-workspace question cap would mean a busy day of
+// asking Archta things blocks rating any of those answers, on the one metric
+// where a busy day is exactly when the signal matters most.
+const feedbackLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.orgId,
+  message: { error: 'Too many feedback submissions. Wait a few minutes and try again.' },
+});
+
 router.post('/ask', askLimiter, requirePermission('ai.ask'), async (req, res, next) => {
   try {
     const question = String(req.body?.question || '').trim();
@@ -31,6 +45,24 @@ router.post('/ask', askLimiter, requirePermission('ai.ask'), async (req, res, ne
 
     const result = await assistant.askAssistant(req.orgId, req.userId, question, history);
     res.json(result);
+  } catch (e) { next(e); }
+});
+
+// RECOMMENDATION FEEDBACK — thumbs up/down under an answer. Same permission
+// as asking a question in the first place: anyone who can ask Archta
+// Intelligence something can rate its answer.
+router.post('/feedback', feedbackLimiter, requirePermission('ai.ask'), async (req, res, next) => {
+  try {
+    const { conversation_id: conversationId, question, answer, feedback } = req.body || {};
+    if (!['positive', 'negative'].includes(feedback)) {
+      return res.status(400).json({ error: 'feedback must be positive or negative' });
+    }
+    if (!String(question || '').trim() || !String(answer || '').trim()) {
+      return res.status(400).json({ error: 'question and answer are required' });
+    }
+
+    const result = await assistant.submitFeedback(req.orgId, req.userId, { conversationId, question, answer, feedback });
+    res.status(201).json(result);
   } catch (e) { next(e); }
 });
 

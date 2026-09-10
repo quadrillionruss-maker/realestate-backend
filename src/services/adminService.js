@@ -13,9 +13,10 @@
 
 const crypto = require('crypto');
 const { supabaseAdmin: db, supabaseRaw } = require('../middleware/orgContext');
-const { hashPassword, issueToken, MIN_PASSWORD_LENGTH } = require('./authService');
+const { hashPassword, issueToken, MIN_PASSWORD_LENGTH, activeOrgIdsFor } = require('./authService');
 const { auditSystem } = require('./auditService');
 const featureUsageService = require('./featureUsageService');
+const notify = require('./notificationService');
 
 const notFound = (message) => Object.assign(new Error(message), { statusCode: 404 });
 const badRequest = (message) => Object.assign(new Error(message), { statusCode: 400 });
@@ -245,20 +246,10 @@ async function listUsers() {
   }).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 }
 
-// Every workspace this user currently belongs to as an active member, or
-// their own id (a solo account's own organization_id) if none. Shared by
-// resetUserPassword and hardDeleteUser — both need to write an audit entry
-// into every workspace an action about this user actually affects.
-async function activeOrgIdsFor(userId) {
-  const { data: memberships, error } = await supabaseRaw
-    .from('team_members')
-    .select('team_id, status')
-    .eq('user_id', userId);
-  if (error) throw error;
-
-  const activeTeamIds = (memberships || []).filter((m) => m.status === 'active').map((m) => m.team_id);
-  return activeTeamIds.length ? activeTeamIds : [userId];
-}
+// activeOrgIdsFor (which workspace(s) an audit entry about this user
+// belongs in) now lives in authService.js — AUDIT FIX (C4) reuses the exact
+// same resolution for a person's own security actions in routes/auth.js,
+// rather than a second, drifting copy of this query.
 
 // Generates a real random password rather than a guessable pattern — this is
 // handed back once, in the response, for the admin to relay to whoever
@@ -461,6 +452,36 @@ async function impersonateWorkspace(orgId) {
   });
   console.log(`[admin] impersonation token issued for workspace ${orgId} (owner ${ownerId})`);
 
+  // AUDIT FIX (AD14) — the audit log entry just above is passive: the owner
+  // only ever sees it if they go looking. Someone with ADMIN_SECRET holding
+  // a token "indistinguishable from the real owner's own session" (this
+  // function's own header, above) is exactly the kind of account access a
+  // person should be told about as it happens, not something they might
+  // never think to check for. Never lets a failed/unconfigured send turn
+  // into a failed impersonation — sendEmail itself already never throws
+  // (notificationService.js's own rule), so this is not wrapped further.
+  const accessedAt = new Date().toLocaleString('en-GB', {
+    day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Lagos',
+  });
+  await notify.sendEmail({
+    orgId,
+    to: owner.email,
+    subject: 'Your Archta account was accessed by an administrator',
+    html: notify.emailShell({
+      heading: 'Administrator access notice',
+      intro: `Your account was accessed by an Archta administrator at ${accessedAt} (Africa/Lagos time). `
+        + 'This is a routine support action and does not change your password or any of your data. '
+        + 'If you were not expecting this, contact support.',
+      // Overrides emailShell's default footer ("...on behalf of your
+      // property developer") — backwards for this one email: the
+      // administrator here is Archta's own platform operator, not this
+      // workspace's own staff.
+      footer: 'Sent by Archta, the platform operator — not a message from your own workspace or staff.',
+    }),
+    relatedType: 'organization',
+    relatedId: orgId,
+  });
+
   return { token, user_email: owner.email, expires_in_seconds: IMPERSONATE_TTL_SECONDS };
 }
 
@@ -499,6 +520,16 @@ async function sendTestBrief(orgId) {
 // otherwise sit stale until tomorrow regardless of the underlying numbers
 // having already changed.
 async function resetBriefCache(orgId) {
+  // AUDIT FIX (S3) — same existence check sendTestBrief above already makes.
+  // Without it, a typo'd or stale orgId still writes an audit row claiming a
+  // cache reset happened for a workspace that was never touched (the delete
+  // above simply matches zero rows).
+  const [{ data: team }, { data: soloUser }] = await Promise.all([
+    supabaseRaw.from('teams').select('id').eq('id', orgId).maybeSingle(),
+    supabaseRaw.from('users').select('id').eq('id', orgId).maybeSingle(),
+  ]);
+  if (!team && !soloUser) throw notFound('Workspace not found.');
+
   const { lagosToday } = require('./overdueService');
   const { error, count } = await supabaseRaw
     .from('re_ai_briefs')
@@ -652,6 +683,24 @@ async function migrationStatus() {
   return files.map((file) => ({ file, applied: applied.has(file) }));
 }
 
+// AUDIT FIX (AD7) — a real build identifier in the sidebar instead of a
+// static "Archta Admin" label. process.env.npm_package_version is what npm
+// sets when a script is launched via `npm start`/`npm run` (true for local
+// dev — CLAUDE.md's own `npm start`) — but render.yaml's startCommand is
+// `node server.js` directly, which npm never wraps, so that variable is
+// unset in the one environment this label most needs to be right in.
+// Falling back to reading package.json's own "version" field directly means
+// the sidebar shows a real number either way, not a blank.
+function version() {
+  let pkgVersion = null;
+  try {
+    pkgVersion = require('../../package.json').version || null;
+  } catch {
+    pkgVersion = null;
+  }
+  return { version: process.env.npm_package_version || pkgVersion || 'unknown' };
+}
+
 // ── SECTION 21 — Archta's own subscription revenue ──────────────────────────
 // NOT developer customer revenue — that is the rest of this product
 // (re_payments, collected installments). This is what a WORKSPACE pays
@@ -716,9 +765,15 @@ async function revenue() {
     churn_rate: activeCountStartOfMonth
       ? round2(((endedThisMonth || []).length / activeCountStartOfMonth) * 100)
       : 0,
+    // AUDIT FIX (AD8) — null, not 0, when there was no MRR at the start of
+    // this month (the platform's first month, or any month it happened to
+    // start with zero paying customers) — 0 reads as "flat, no growth from
+    // a real baseline", which is a different, false claim from "there is no
+    // baseline to compare against yet". The frontend shows "First month" for
+    // null rather than a misleading "+0%"/"0%".
     monthly_growth_rate: mrrStartOfMonth
       ? round2(((mrr - mrrStartOfMonth) / mrrStartOfMonth) * 100)
-      : 0,
+      : null,
     mrr_by_plan: mrrByPlan,
     monthly_mrr_last_12: monthlyMrr,
   };
@@ -793,6 +848,7 @@ module.exports = {
   migrationStatus,
   revenue,
   featureUsage,
+  version,
   MIN_PASSWORD_LENGTH,
   badRequest,
   notFound,

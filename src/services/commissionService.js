@@ -29,6 +29,11 @@
 
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { auditSystem } = require('./auditService');
+// AUDIT FIX (F7) — leaderboard's own "contracted" figure now reads contract
+// value the same way restructureService.js itself defines it, rather than a
+// restructured plan's raw total_amount (which is only the remaining
+// BALANCE — see that file's own header).
+const { contractValue } = require('./restructureService');
 
 const round2 = (value) => Math.round(Number(value) * 100) / 100;
 
@@ -168,7 +173,7 @@ async function repPerformance(orgId) {
         id, sales_rep_id, status, created_at,
         re_units(list_price),
         re_installment_plans(
-          total_amount,
+          status, total_amount,
           re_installment_schedule(status, amount_due)
         )`)
       .eq('organization_id', orgId),
@@ -196,9 +201,18 @@ async function repPerformance(orgId) {
     const buyersAtRisk = new Set();
 
     for (const reservation of mine) {
-      const plan = Array.isArray(reservation.re_installment_plans)
-        ? reservation.re_installment_plans[0]
-        : reservation.re_installment_plans;
+      // AUDIT FIX (F6) — a restructured reservation has more than one
+      // re_installment_plans row (the old one, superseded, plus the new
+      // active one); [0] picked whichever happened to sort first rather
+      // than the one that's actually still owed, silently mixing a paid-off
+      // OLD plan's figures into "what this rep's book currently looks
+      // like". Explicitly the active plan, or none if this reservation
+      // hasn't been given one yet (falls back to the unit's list price
+      // below, same as before).
+      const plans = Array.isArray(reservation.re_installment_plans)
+        ? reservation.re_installment_plans
+        : [reservation.re_installment_plans].filter(Boolean);
+      const plan = plans.find((p) => p?.status === 'active') || null;
 
       portfolioValue += Number(plan?.total_amount || reservation.re_units?.list_price || 0);
 
@@ -262,7 +276,7 @@ async function leaderboard(orgId, { from = null, to = null } = {}) {
       id, sales_rep_id, created_at,
       re_units(list_price),
       re_installment_plans(
-        status, total_amount,
+        status, total_amount, original_total_amount,
         re_installment_schedule(status, amount_due)
       )`)
     .eq('organization_id', orgId)
@@ -311,12 +325,23 @@ async function leaderboard(orgId, { from = null, to = null } = {}) {
       const plans = Array.isArray(reservation.re_installment_plans)
         ? reservation.re_installment_plans
         : [reservation.re_installment_plans].filter(Boolean);
-      const plan = plans.find((p) => p.status === 'active') || plans[0];
-      portfolioValue += Number(plan?.total_amount || reservation.re_units?.list_price || 0);
+      const activePlan = plans.find((p) => p.status === 'active') || plans[0];
 
-      for (const row of plan?.re_installment_schedule || []) {
-        if (row.status === 'paid') { collected += Number(row.amount_due || 0); dueEvents += 1; }
-        else if (row.status === 'overdue') { dueEvents += 1; overdueEvents += 1; }
+      // AUDIT FIX (F7) — contractValue() reads original_total_amount first,
+      // so a restructured deal's true contract value is used here, not the
+      // active plan's total_amount, which is only what's left to pay.
+      portfolioValue += activePlan ? contractValue(activePlan) : Number(reservation.re_units?.list_price || 0);
+
+      // AUDIT FIX (F7) — every plan this reservation has ever had, not just
+      // the current one: a restructure supersedes the OLD plan but its paid
+      // rows stay exactly as they happened (restructureService.js's own
+      // header), and this rep's "collected"/default-rate figures were
+      // silently dropping every installment paid before the restructure.
+      for (const plan of plans) {
+        for (const row of plan?.re_installment_schedule || []) {
+          if (row.status === 'paid') { collected += Number(row.amount_due || 0); dueEvents += 1; }
+          else if (row.status === 'overdue') { dueEvents += 1; overdueEvents += 1; }
+        }
       }
     }
 

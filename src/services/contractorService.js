@@ -6,6 +6,7 @@
 // commission — a contractor payment is a developer's own outflow, entirely
 // separate from a buyer's installment plan.
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { mapWithConcurrency } = require('../utils/concurrency');
 const { audit, auditSystem } = require('./auditService');
 
 const CONTRACTOR_TYPES = ['foundation', 'roofing', 'finishing', 'electrical', 'plumbing', 'landscaping', 'other'];
@@ -224,11 +225,14 @@ async function sweepOverdueContractorPayments() {
     .lt('due_date', today);
   if (error) throw error;
 
+  // AUDIT FIX (P7) — platform-wide, an update plus a team lookup plus a task
+  // insert per row, serially. mapWithConcurrency(4) matches every other
+  // correctly-implemented sweep in this codebase.
   let flagged = 0;
-  for (const payment of overdue || []) {
+  await mapWithConcurrency(overdue || [], 4, async (payment) => {
     const { error: updateErr } = await supabaseAdmin
       .from('re_contractor_payments').update({ status: 'overdue' }).eq('id', payment.id).eq('status', 'pending');
-    if (updateErr) { console.warn('[contractors] could not mark overdue:', updateErr.message); continue; }
+    if (updateErr) { console.warn('[contractors] could not mark overdue:', updateErr.message); return; }
 
     flagged += 1;
     const { data: team } = await supabaseAdmin
@@ -250,7 +254,7 @@ async function sweepOverdueContractorPayments() {
       entityId: payment.id,
       summary: `${payment.re_contractors?.name || 'Contractor'} payment overdue since ${payment.due_date}`,
     });
-  }
+  });
 
   return { flagged };
 }

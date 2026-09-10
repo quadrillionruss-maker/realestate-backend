@@ -5,6 +5,7 @@
 // feature expansion. See migrations/076's own header for why this is
 // stored rather than computed per-request the way Section 1/3's routes are.
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { mapWithConcurrency } = require('../utils/concurrency');
 const { STAGES } = require('./escalationService');
 const { PAID_OUTCOME_TYPES, MIN_SAMPLE_SIZE } = require('./outcomeService');
 
@@ -99,15 +100,17 @@ async function recomputeForAllOrgs() {
   const { data: orgRows, error } = await supabaseAdmin.rpc('distinct_action_outcome_org_ids');
   if (error) throw error;
 
+  // AUDIT FIX (P6) — same fix as developerDnaService.recomputeForAllOrgs,
+  // its own sibling Monday sweep.
   let computed = 0;
-  for (const row of orgRows || []) {
+  await mapWithConcurrency(orgRows || [], 4, async (row) => {
     try {
       await computePlaybook(row.organization_id);
       computed += 1;
     } catch (err) {
       console.warn(`[recovery-playbook] could not compute for org ${row.organization_id}:`, err.message);
     }
-  }
+  });
   return { computed };
 }
 

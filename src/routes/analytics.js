@@ -9,6 +9,7 @@ const { requirePermission } = require('../middleware/rbac');
 const outcomes = require('../services/outcomeService');
 const recoveryPlaybook = require('../services/recoveryPlaybookService');
 const developerDna = require('../services/developerDnaService');
+const decisionLedger = require('../services/decisionLedgerService');
 const router = express.Router();
 
 router.get('/outcomes', requirePermission('analytics.outcomes'), async (req, res, next) => {
@@ -51,6 +52,15 @@ router.get('/developer-dna', requirePermission('analytics.developerDna'), async 
       developerDna.getPeerBenchmark(req.orgId),
     ]);
     res.json({ dna, peer_benchmark: benchmark });
+  } catch (e) { next(e); }
+});
+
+// Decision Ledger — override rate, outcome comparison, top override
+// patterns. Same owner-only tier as developer-dna above.
+router.get('/decision-ledger', requirePermission('analytics.decisionLedger'), async (req, res, next) => {
+  try {
+    const result = await decisionLedger.getAnalytics(req.orgId);
+    res.json(result);
   } catch (e) { next(e); }
 });
 

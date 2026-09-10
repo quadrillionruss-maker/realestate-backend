@@ -80,6 +80,16 @@ router.get('/template/:kind', requirePermission('imports.write'), (req, res) => 
 
 const quote = (value) => /[",\n]/.test(String(value)) ? `"${String(value).replace(/"/g, '""')}"` : String(value);
 
+// AUDIT FIX (N4) — parseAmount now correctly refuses a cell holding ONLY
+// currency notation ("₦", "N", "NGN") with no digits at all (csv.js's own
+// header on why that used to silently read as a real zero). This catches
+// what's left: a cell that genuinely parsed to the literal number 0 — a
+// typo, a formula that evaluated wrong, a stray "-" someone meant as "none"
+// that got coerced — which is worth a developer's eyes on it (0 is a valid
+// list_price/total_amount at the database level, migrations/001's own
+// check constraint allows it, so this warns rather than rejects the row).
+const suspiciousZero = (raw, parsed) => parsed === 0 && String(raw ?? '').trim() !== '';
+
 // ── Units, into a default project unless a row names its own ───────────────
 // project_id (the dropdown in the import modal) is REQUIRED and is the
 // default every row gets — but a row carrying its own "project" column
@@ -109,6 +119,7 @@ router.post('/units', importLimiter, requirePermission('imports.write'), async (
 
     const rows = [];
     const errors = [];
+    const warnings = [];
     // Keyed by project too, not just unit_number — two different projects can
     // legitimately share a unit number ("A1" in both Lekki Gardens and Ikeja
     // Heights), which a plain unit_number Set would have wrongly flagged as a
@@ -121,6 +132,9 @@ router.post('/units', importLimiter, requirePermission('imports.write'), async (
 
       if (!unitNumber) { errors.push({ row: record.__row, error: 'unit_number is required' }); continue; }
       if (price == null || price < 0) { errors.push({ row: record.__row, error: 'list_price must be a number' }); continue; }
+      if (suspiciousZero(record.list_price, price)) {
+        warnings.push({ row: record.__row, warning: `list_price parsed as ₦0 from "${record.list_price}" — check this row` });
+      }
 
       const projectName = (record.project || '').trim();
       let project = defaultProject;
@@ -160,7 +174,7 @@ router.post('/units', importLimiter, requirePermission('imports.write'), async (
         count,
       }));
 
-    if (dry_run) return res.json({ dry_run: true, would_create: rows.length, errors, by_project: byProject, sample: rows.slice(0, 5) });
+    if (dry_run) return res.json({ dry_run: true, would_create: rows.length, errors, warnings, by_project: byProject, sample: rows.slice(0, 5) });
     if (!rows.length) return res.status(400).json({ error: 'Nothing valid to import.', errors });
 
     const { data, error } = await supabaseAdmin.from('re_units').insert(rows).select();
@@ -180,7 +194,7 @@ router.post('/units', importLimiter, requirePermission('imports.write'), async (
     });
 
     featureUsage.track(req.orgId, 'import_used');
-    res.status(201).json({ created: data.length, errors, by_project: byProject, units: data });
+    res.status(201).json({ created: data.length, errors, warnings, by_project: byProject, units: data });
   } catch (e) { next(e); }
 });
 
@@ -312,6 +326,18 @@ router.post('/customers', importLimiter, requirePermission('imports.write'), asy
       const startDate = parseDate(record.start_date);
 
       if (total || count || startDate) {
+        // AUDIT FIX (N4) — a plainer, more specific message than "needs
+        // total_amount" for the one case that message actively misleads: a
+        // value WAS given, it just parsed to ₦0 (a typo, a formula gone
+        // wrong) — installmentService.buildSchedule requires a positive
+        // total_amount either way, so this stays a hard error, not a
+        // silent, non-blocking warning the way list_price's own zero-check
+        // above is (a unit really can have a ₦0 list price at the database
+        // level; a plan cannot have a ₦0 total).
+        if (suspiciousZero(record.total_amount, total)) {
+          errors.push({ row: record.__row, error: `total_amount parsed as ₦0 from "${record.total_amount}" — check this value` });
+          continue;
+        }
         if (!total || !count || !startDate) {
           errors.push({ row: record.__row, error: 'a payment plan needs total_amount, number_of_installments AND start_date' });
           continue;

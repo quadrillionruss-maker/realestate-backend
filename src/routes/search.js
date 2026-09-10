@@ -13,6 +13,7 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
+const { canAccess } = require('../services/permissions');
 const { sanitizeSearchTerm } = require('../utils/searchFilter');
 const router = express.Router();
 
@@ -88,10 +89,19 @@ router.get('/', requirePermission('search.read'), async (req, res, next) => {
       if (result.error) throw result.error;
     }
 
+    // AUDIT FIX (R1) — same boundary permissions.js's financial.view draws
+    // everywhere else ("Documentation never sees a naira figure",
+    // CLAUDE.md): a unit's list_price is exactly the kind of figure that
+    // gate exists for, and the search box was a side door around it —
+    // routes/customers.js already strips the equivalent field the same way.
+    const unitRows = canAccess(req.orgRole, 'financial.view')
+      ? (units.data || [])
+      : (units.data || []).map((u) => ({ ...u, list_price: null }));
+
     res.json({
       query: raw,
       customers: customers.data || [],
-      units: units.data || [],
+      units: unitRows,
       projects: projects.data || [],
       reservations: reservations.data || [],
     });

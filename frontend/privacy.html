@@ -84,14 +84,36 @@
         contact details and payment amounts needed to complete a transaction.</li>
       <li><strong>Resend</strong> (transactional email) — sends receipts, reminders and portal links.</li>
       <li><strong>Termii</strong> (SMS) — sends text-message reminders and alerts, where configured.</li>
+      <li><strong>Meta Platforms, Inc.</strong> (WhatsApp Business Platform) — sends automated collection
+        reminders and powers the buyer-facing WhatsApp mini app (balance checks, promise-to-pay and other
+        self-service replies), where a workspace has WhatsApp configured. Receives the Buyer's phone number and
+        the content of messages sent and received through WhatsApp. Processed on the basis of our and the
+        Workspace User's legitimate interest in operating this collections and self-service channel; governed by
+        <a href="https://www.facebook.com/privacy/policy/" target="_blank" rel="noopener">Meta's Privacy
+          Policy</a>.</li>
       <li><strong>OpenAI</strong> (optional) — where a workspace's AI daily brief feature is active, summarizes
         operational data (payment status, overdue amounts) to draft internal follow-up notes. Not used to make
         automated decisions about a Buyer, and every draft it produces is reviewed by a human before it is sent.</li>
       <li><strong>Google</strong> — if "Sign in with Google" is enabled for a workspace, Google processes the
         sign-in on our behalf. Loading our fonts from Google Fonts also causes your browser to make a request to
         Google's servers, which necessarily includes your IP address; see Section 7.</li>
+      <li><strong>Browser push notification relays</strong> (Google, Mozilla, Apple, Microsoft or another
+        browser vendor, depending entirely on which browser the Workspace User has enabled notifications in) —
+        Workspace User-facing only, not used for Buyer communications. If a Workspace User turns on browser
+        notifications for the in-app bell, each notification is routed through that browser's own push service to
+        reach their device when the app is not open. The relay sees only delivery metadata (which device endpoint
+        to deliver to); the notification content itself is encrypted before it leaves us and unreadable to the
+        relay in transit.</li>
     </ul>
     <p>We do not permit any subprocessor to use this data for its own purposes.</p>
+    <p><strong>Currency conversion (not a subprocessor of personal data):</strong> where a Buyer's portal shows an
+      estimated USD/GBP/EUR/CAD figure alongside a naira amount, that conversion is calculated using publicly
+      published rates from <strong>ExchangeRate-API</strong> (exchangerate-api.com), refreshed periodically and
+      cached for up to six hours. No personal or Buyer-specific data is sent to ExchangeRate-API — only the naira
+      base currency is requested, the same public rate lookup for every Buyer. These figures are indicative only:
+      Nigerian Naira is the only currency Archta ever actually charges or records a payment in, so the amount
+      Paystack collects can differ slightly from a displayed foreign-currency estimate if the rate has moved since
+      the page loaded.</p>
 
     <h2>5. How long we keep it</h2>
     <p>Financial and transactional records (payments, receipts, allocation letters, the audit log) are retained

@@ -19,6 +19,7 @@
 
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { lagosToday, lagosParts } = require('./overdueService');
+const { mapWithConcurrency } = require('../utils/concurrency');
 
 // The awaiting-payment window. The commissioning spec's own body text said
 // "close open outcomes older than 7 days with no_response" in one place and
@@ -285,8 +286,11 @@ async function sweepUnresolvedOutcomes(orgId = null) {
   if (error) throw error;
   if (!data?.length) return { closed: 0 };
 
+  // AUDIT FIX (P5) — this runs platform-wide (jobs/daily.js calls it with no
+  // orgId), one database round trip per row, serially. mapWithConcurrency(4)
+  // matches every other correctly-implemented sweep in this codebase.
   let closed = 0;
-  for (const row of data) {
+  await mapWithConcurrency(data, 4, async (row) => {
     try {
       await closeRow(row.organization_id, row, {
         outcomeType: 'no_response', attributionMethod: 'sweep_closure',
@@ -295,7 +299,7 @@ async function sweepUnresolvedOutcomes(orgId = null) {
     } catch (err) {
       console.warn('[outcome-service] could not sweep-close a row:', err.message);
     }
-  }
+  });
   return { closed };
 }
 

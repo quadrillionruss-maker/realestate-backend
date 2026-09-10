@@ -13,6 +13,7 @@
 // mini-app intent classifier runs — a reply to a collections message means
 // something specific here that "check my balance" etc. does not.
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { mapWithConcurrency } = require('../utils/concurrency');
 const dealManager = require('./dealManager');
 const { logPromise } = require('./promiseService');
 const { STAGES, describeStage } = require('./escalationService');
@@ -21,8 +22,20 @@ const { lagosToday } = require('./overdueService');
 const { nextOccurrenceUTC } = require('./contactTimingService');
 const scheduledMessages = require('./scheduledMessageService');
 const outcomes = require('./outcomeService');
+const decisionLedger = require('./decisionLedgerService');
 
 const AGENT_NAME = 'collections_agent';
+// Decision Ledger — dealManager.js's own HUMAN_HANDLING_WINDOW_MS is not
+// exported (only isWhatsAppConfigured/isHumanHandling/sentToday/clearance/
+// logAction/sendWithClearance are), so this duplicates the literal with
+// dealManager.js named as the source of truth — same pattern this file
+// already uses for NO_RESPONSE_WINDOW_DAYS-style borrowed constants.
+const HUMAN_HANDLING_WINDOW_MS = 24 * 60 * 60 * 1000;
+// Which re_activities.activity_type values represent an actual contact
+// channel a human chose, as opposed to 'note' (a record ABOUT the buyer,
+// not a channel used to reach them) — the only types worth comparing
+// against the agent's own whatsapp plan.
+const CONTACT_ACTIVITY_TYPES = ['call', 'whatsapp', 'email', 'visit', 'site_visit'];
 // FEATURE — dynamic reminder timing. If a buyer's own optimal send time is
 // within this many minutes of right now, send in this same sweep rather
 // than creating a scheduled-message row for a moment that has, for all
@@ -37,6 +50,12 @@ const IMMEDIATE_WINDOW_MINUTES = 60;
 // this five-stage sequence as "every stage except none and legal".
 const SENDABLE_STAGE_INDEXES = [1, 2, 3];
 const STOP_STAGE_KEY = 'legal';
+// AUDIT FIX (A6/P2) — same concurrency this codebase already uses for the
+// daily job's own per-org loop (jobs/daily.js's ORG_CONCURRENCY) and every
+// other correctly-implemented sweep: a WhatsApp send or a database round
+// trip per buyer, run one at a time, turned a large org's morning sweep into
+// minutes of serial network waiting that could have overlapped.
+const BUYER_CONCURRENCY = 4;
 
 // ── Outbound sweep ───────────────────────────────────────────────────────────
 async function run(orgId) {
@@ -49,8 +68,12 @@ async function run(orgId) {
   const followUps = brief?.payload?.follow_ups || [];
 
   let sent = 0;
-  for (const followUp of followUps) {
-    if (!followUp.reservation_id || !followUp.whatsapp_draft) continue;
+  // AUDIT FIX (A6/P2) — this used to be a plain `for...of`, one buyer's
+  // database reads and WhatsApp send waited on before the next buyer's even
+  // started. BUYER_CONCURRENCY lanes pulling from the same list, same
+  // pattern as jobs/daily.js's own per-org loop.
+  await mapWithConcurrency(followUps, BUYER_CONCURRENCY, async (followUp) => {
+    if (!followUp.reservation_id || !followUp.whatsapp_draft) return;
 
     const { data: reservation } = await supabaseAdmin
       .from('re_reservations')
@@ -58,17 +81,17 @@ async function run(orgId) {
       .eq('id', followUp.reservation_id)
       .eq('organization_id', orgId)
       .maybeSingle();
-    if (!reservation || reservation.status === 'cancelled') continue;
+    if (!reservation || reservation.status === 'cancelled') return;
 
     const stageIndex = STAGES.findIndex((s) => s.key === (reservation.escalation_stage || 'none'));
-    if (!SENDABLE_STAGE_INDEXES.includes(stageIndex)) continue;
+    if (!SENDABLE_STAGE_INDEXES.includes(stageIndex)) return;
 
     const { data: customer } = await supabaseAdmin
       .from('re_customers')
       .select('id, full_name, phone, whatsapp_opt_out, optimal_contact_day, optimal_contact_hour')
       .eq('id', reservation.customer_id)
       .maybeSingle();
-    if (!customer) continue;
+    if (!customer) return;
 
     // FEATURE — dynamic reminder timing. No pattern yet (fewer than 3
     // payments — contactTimingService's own threshold) falls back to
@@ -118,8 +141,14 @@ async function run(orgId) {
       } catch (err) {
         console.warn('[collections-agent] could not schedule optimal-time follow-up:', err.message);
       }
-      continue;
+      return;
     }
+
+    // Decision Ledger — checked BEFORE sendWithClearance, which will
+    // independently re-check clearance (including this same human-handling
+    // condition) and skip silently if it applies. This is one extra read
+    // plus a conditional write, not a change to the send path itself.
+    await maybeRecordChannelOverride(orgId, customer, reservation, nextSlot);
 
     const result = await dealManager.sendWithClearance(orgId, AGENT_NAME, customer, {
       template: 'collections_agent_followup',
@@ -137,11 +166,54 @@ async function run(orgId) {
         .eq('id', reservation.id);
       sent += 1;
     }
-  }
+  });
 
   const legalTasksFiled = await fileLegalStageTasks(orgId);
 
   return { sent, legal_tasks_filed: legalTasksFiled };
+}
+
+// Decision Ledger — the agent was about to contact this buyer by WhatsApp;
+// if a human already has (dealManager.isHumanHandling), that is the human
+// choosing a different channel/timing than the one Archta was about to act
+// on, worth recording as an override. Only fires when a genuine CONTACT
+// activity (not a plain note) explains the human-handling signal — that
+// signal also covers non-contact actions (editing the buyer's record,
+// changing a reservation) which have no channel to compare against.
+async function maybeRecordChannelOverride(orgId, customer, reservation, nextSlot) {
+  try {
+    const humanHandling = await dealManager.isHumanHandling(orgId, customer.id, [reservation.id]);
+    if (!humanHandling) return;
+
+    const since = new Date(Date.now() - HUMAN_HANDLING_WINDOW_MS).toISOString();
+    const { data: activities } = await supabaseAdmin
+      .from('re_activities')
+      .select('activity_type, created_at, logged_by_user_id')
+      .eq('organization_id', orgId)
+      .eq('customer_id', customer.id)
+      .in('activity_type', CONTACT_ACTIVITY_TYPES)
+      .gte('created_at', since)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    const activity = activities?.[0];
+    if (!activity) return; // human-handling was some other action — no channel decision to compare
+
+    await decisionLedger.recordDecision(orgId, {
+      customerId: customer.id,
+      reservationId: reservation.id,
+      recommendationType: 'channel_choice',
+      archtaRecommendation: {
+        action: 'contact_buyer', channel: 'whatsapp', timing: nextSlot || 'immediate',
+      },
+      humanDecision: {
+        action: 'contacted_buyer', channel: activity.activity_type,
+        timing: activity.created_at, user_id: activity.logged_by_user_id,
+      },
+      wasOverride: activity.activity_type !== 'whatsapp',
+    });
+  } catch (err) {
+    console.warn('[collections-agent] could not record channel-override decision:', err.message);
+  }
 }
 
 // Stage 5 (legal, per the product spec's numbering) — the agent stops
@@ -158,7 +230,8 @@ async function fileLegalStageTasks(orgId) {
     .neq('status', 'cancelled');
 
   let filed = 0;
-  for (const reservation of reservations || []) {
+  // AUDIT FIX (A6/P2) — same fix as run()'s own followUps loop above.
+  await mapWithConcurrency(reservations || [], BUYER_CONCURRENCY, async (reservation) => {
     const title = `Legal-stage arrears — review ${reservation.re_customers?.full_name || 'this buyer'} for legal action`;
     const { error } = await supabaseAdmin.from('re_tasks').insert({
       organization_id: orgId,
@@ -172,7 +245,7 @@ async function fileLegalStageTasks(orgId) {
     } else if (error.code !== '23505') {
       console.warn('[collections-agent] could not file legal-stage task:', error.message);
     }
-  }
+  });
   return filed;
 }
 
@@ -291,6 +364,13 @@ async function escalateToNextStage(orgId, reservation, customerId) {
   // recently open for this buyer gets closed as 'escalated'.
   if (customerId) {
     await outcomes.closeMostRecentOpen(orgId, customerId, { outcomeType: 'escalated' });
+    // Decision Ledger — this is the SECOND of two sites that close
+    // 'escalated' outcomes (the other is escalationService.sweepEscalations'
+    // own sweep); this one covers an escalation reached via an inbound
+    // WhatsApp reply rather than the nightly sweep. Missing either site
+    // leaves that path's ledger rows open until the 30-day sweep wrongly
+    // marks them 'ignored'.
+    await decisionLedger.closeOutcome(orgId, customerId, { outcomeType: 'escalated' });
   }
 }
 

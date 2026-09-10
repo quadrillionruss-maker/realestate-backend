@@ -9,6 +9,7 @@
 // those three types). A signed_at check only means anything for a document
 // that can HAVE one.
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { mapWithConcurrency } = require('../utils/concurrency');
 const dealManager = require('./dealManager');
 const documents = require('./documentService');
 const { lagosToday } = require('./overdueService');
@@ -57,9 +58,12 @@ async function run(orgId) {
   let remindersSent = 0;
   const highPriority = [];
 
-  for (const doc of docs || []) {
+  // AUDIT FIX (P7) — a database round trip (daysSinceLastReminder) plus a
+  // WhatsApp send per unsigned document, run one at a time. mapWithConcurrency(4)
+  // matches every other correctly-implemented sweep in this codebase.
+  await mapWithConcurrency(docs || [], 4, async (doc) => {
     const customer = doc.re_reservations?.re_customers;
-    if (!customer || !doc.generated_at) continue;
+    if (!customer || !doc.generated_at) return;
 
     const ageDays = daysSince(doc.generated_at);
     if (ageDays >= HIGH_PRIORITY_AFTER_DAYS) {
@@ -69,10 +73,10 @@ async function run(orgId) {
       });
     }
 
-    if ((await daysSinceLastReminder(orgId, doc.id)) < REMINDER_INTERVAL_DAYS) continue;
+    if ((await daysSinceLastReminder(orgId, doc.id)) < REMINDER_INTERVAL_DAYS) return;
 
     const signingUrl = documents.issueSigningUrl({ id: doc.id, organization_id: orgId });
-    if (!signingUrl) continue; // no APP_URL configured — nothing usable to send
+    if (!signingUrl) return; // no APP_URL configured — nothing usable to send
 
     const label = doc.doc_type.replace(/_/g, ' ');
     const body = `Hi ${customer.full_name}, a friendly reminder — your ${label} is still waiting for your signature: ${signingUrl}`;
@@ -85,7 +89,7 @@ async function run(orgId) {
       relatedId: doc.id,
     });
     if (result?.status === 'sent') remindersSent += 1;
-  }
+  });
 
   // "Flag in the brief as high priority" — that day's re_ai_briefs row
   // already exists by the time this agent runs (jobs/daily.js generates it

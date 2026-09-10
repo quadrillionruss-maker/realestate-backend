@@ -28,14 +28,32 @@
 -- Safe to re-run.
 -- ============================================================
 
+-- AUDIT FIX (D4) — a commission split is a historical fact, not just a
+-- current setting, the moment a real payment has been attributed against it:
+-- re_commissions accrues one row per payment (commissionService.js), and
+-- jointSaleService.myJointSaleCommissions/notifyExternalParties both derive
+-- a co-seller's earned share from re_joint_sale_parties. replace_joint_sale_
+-- parties below used to delete every existing party row outright on every
+-- save — editing the split for the NEXT deal silently rewrote what an
+-- external agent's already-sent commission statement said they'd earned on
+-- every PAST payment too, with nothing left in the database to show what the
+-- split actually was when that money was paid. superseded_at marks an old
+-- row as no longer live without erasing it — "nothing is ever deleted"
+-- (CLAUDE.md) applies to a commission split the same as to a payment once
+-- money has moved on the strength of it.
+alter table re_joint_sale_parties add column if not exists superseded_at timestamptz;
+
 create or replace function check_joint_sale_percentage_sum() returns trigger as $$
 declare
   v_joint_sale_id uuid;
   v_total numeric;
 begin
   v_joint_sale_id := coalesce(new.joint_sale_id, old.joint_sale_id);
+  -- Only LIVE rows must sum to 100 — a superseded row is deliberately left
+  -- in place (see this file's header) and must not be double-counted
+  -- alongside the new split that replaced it.
   select coalesce(sum(commission_split_percentage), 0) into v_total
-    from re_joint_sale_parties where joint_sale_id = v_joint_sale_id;
+    from re_joint_sale_parties where joint_sale_id = v_joint_sale_id and superseded_at is null;
 
   -- Zero parties (nothing to validate a sum over — e.g. a joint sale row
   -- that has just been created and not yet given its parties within the
@@ -66,13 +84,29 @@ set search_path = public
 as $$
 declare
   v_sale_id uuid;
+  v_has_accrued boolean;
 begin
   insert into re_joint_sales (organization_id, reservation_id)
   values (p_org_id, p_reservation_id)
   on conflict (reservation_id) do update set reservation_id = excluded.reservation_id
   returning id into v_sale_id;
 
-  delete from re_joint_sale_parties where joint_sale_id = v_sale_id;
+  -- AUDIT FIX (D4) — a joint sale nobody has been paid against yet has no
+  -- history worth preserving: hard-delete stays exactly as it was so a
+  -- typo fixed before the first payment doesn't leave a dead row behind
+  -- forever. Once a real commission has accrued on this reservation, the
+  -- existing LIVE parties are superseded instead — see this file's header.
+  select exists(
+    select 1 from re_commissions where reservation_id = p_reservation_id and status != 'void'
+  ) into v_has_accrued;
+
+  if v_has_accrued then
+    update re_joint_sale_parties
+      set superseded_at = now()
+      where joint_sale_id = v_sale_id and superseded_at is null;
+  else
+    delete from re_joint_sale_parties where joint_sale_id = v_sale_id;
+  end if;
 
   return query
   insert into re_joint_sale_parties (

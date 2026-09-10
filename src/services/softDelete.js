@@ -45,19 +45,46 @@ const DELETABLE = new Set([
 // which means a failure part-way through leaves children deleted under a live
 // parent (recoverable and visible) rather than a live child under a deleted
 // parent (invisible and orphaned).
+// AUDIT FIX (D1) — the tables added below (migrations/083) are real children
+// of a project, a buyer, a reservation or a joint sale that shipped after
+// this map was first written and were never added to it: deleting the
+// parent left them live forever, visible through every screen and export
+// that reads them directly (src/routes/reports.js's community CSV export was
+// a live example — see orgContext.js's SOFT_DELETABLE comment). Deliberately
+// NOT extended to re_attendance, re_log_entries, re_campaigns,
+// re_email_templates, re_receipt_templates, re_push_subscriptions,
+// re_sessions, re_recovery_playbook, re_developer_dna, re_feature_events or
+// re_ai_conversations — none of them are children of a project, a buyer or a
+// reservation (they key off organization_id or user_id alone), so there is
+// no parent delete here for them to cascade from; re_ai_conversations is
+// additionally documented (migrations/078) as a permanent record, same
+// reasoning as re_audit_log.
 const CHILDREN = {
-  re_projects: [['re_units', 'project_id']],
+  re_projects: [['re_units', 'project_id'], ['re_community_posts', 'project_id']],
   re_units: [['re_reservations', 'unit_id']],
-  re_customers: [['re_reservations', 'customer_id'], ['re_payment_promises', 'customer_id']],
+  re_customers: [
+    ['re_reservations', 'customer_id'], ['re_payment_promises', 'customer_id'],
+    ['re_legal_cases', 'customer_id'], ['re_financing_requests', 'customer_id'],
+    ['re_hardship_requests', 'customer_id'], ['re_messages', 'customer_id'],
+    ['re_scheduled_messages', 'customer_id'], ['re_community_posts', 'customer_id'],
+    ['re_customer_referrals', 'referring_customer_id'], ['re_customer_referrals', 'referred_customer_id'],
+  ],
   re_reservations: [
     ['re_installment_plans', 'reservation_id'],
     ['re_documents', 'reservation_id'],
     ['re_commissions', 'reservation_id'],
     ['re_tasks', 'related_reservation_id'],
+    ['re_legal_cases', 'reservation_id'],
+    ['re_financing_requests', 'reservation_id'],
+    ['re_hardship_requests', 'reservation_id'],
+    ['re_satisfaction_surveys', 'reservation_id'],
+    ['re_joint_sales', 'reservation_id'],
   ],
   re_installment_plans: [['re_installment_schedule', 'plan_id']],
   re_installment_schedule: [['re_payments', 'schedule_id'], ['re_payment_promises', 'schedule_id']],
   re_payments: [['re_commissions', 'payment_id']],
+  re_joint_sales: [['re_joint_sale_parties', 'joint_sale_id']],
+  re_community_posts: [['re_community_replies', 'post_id']],
 };
 
 // Applies the live filter. Use it on every read of a deletable table:

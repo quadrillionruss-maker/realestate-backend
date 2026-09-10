@@ -22,6 +22,17 @@ create table if not exists re_processed_whatsapp_messages (
   created_at timestamptz not null default now()
 );
 
+-- BUG FIX — every other table in this schema enables RLS even with no
+-- policy (deny-by-default, migrations/001's own convention; re_sentiment_cache,
+-- migrations/062, is the closest sibling: also no organization_id, also
+-- enables RLS anyway). This table was missed when it shipped — the anon/
+-- authenticated revokes below still stood between it and the anon key, but
+-- RLS being off here was a second, redundant lock never actually put in
+-- place, not a live hole through service_role's own service-role-key access
+-- (which bypasses RLS regardless).
+alter table re_processed_whatsapp_messages enable row level security;
+drop policy if exists "org members access re_processed_whatsapp_messages" on re_processed_whatsapp_messages;
+
 do $$
 begin
   if not exists (select 1 from pg_roles where rolname = 'service_role') then

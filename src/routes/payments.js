@@ -6,6 +6,7 @@ const { onPaymentRecorded } = require('../services/paymentEvents');
 const { generateReceipt } = require('../services/receiptService');
 const { getDownloadUrl } = require('../services/documentService');
 const { audit } = require('../services/auditService');
+const approvals = require('../services/approvalService');
 const router = express.Router();
 
 const PAYMENT_METHODS = ['paystack', 'bank_transfer', 'cash', 'pos'];
@@ -231,8 +232,14 @@ router.post('/:scheduleId/record', requirePermission('payments.record'), async (
       });
     }
 
+    // AUDIT FIX (FE4) — set by the frontend (offline-queue.js's buildEntry,
+    // and every direct submitter of this form) at the moment the buyer's
+    // payment form is submitted, and replayed verbatim on any retry —
+    // recordManualPayment rejects a second insert carrying the same key.
+    const idempotencyKey = String(req.headers['x-idempotency-key'] || '').trim().slice(0, 100) || null;
+
     const payment = await recordManualPayment(req.orgId, req.params.scheduleId, {
-      amount, method, reference, payerName: payer_name,
+      amount, method, reference, payerName: payer_name, idempotencyKey,
     });
 
     // Receipt, commission, buyer notification, promise resolution and the
@@ -322,37 +329,39 @@ router.post('/:paymentId/void', requirePermission('payments.void'), async (req, 
     const reason = String(req.body?.reason || '').trim();
     if (!reason) return res.status(400).json({ error: 'A reason is required.' });
 
-    const payment = await voidPayment(req.orgId, req.params.paymentId, reason);
-
-    // The commission this payment earned, if any, was money that turns out
-    // never to have arrived — void it too, rather than leaving a rep paid
-    // (or owed) on a transfer that didn't happen.
-    const { data: commission, error: commissionErr } = await supabaseAdmin
+    // AUDIT FIX (F1) — captured BEFORE voidPayment() runs. voidPayment
+    // (via paystackService.voidDownstreamEffects) already voids this
+    // payment's commission internally; re-running that same UPDATE here
+    // afterward matched zero rows (already 'void'), so `commission` was
+    // always null and reversalData.commission_id below was always null too
+    // — Undo could never restore the rep's commission. This is a SELECT,
+    // not an UPDATE: voiding it is voidPayment's job, not this route's.
+    const { data: commission, error: commissionLookupErr } = await supabaseAdmin
       .from('re_commissions')
-      .update({ status: 'void' })
-      .eq('payment_id', payment.id)
+      .select('id, amount')
+      .eq('payment_id', req.params.paymentId)
       .eq('organization_id', req.orgId)
       .neq('status', 'void')
-      .select('id, amount')
       .maybeSingle();
+    if (commissionLookupErr) throw commissionLookupErr;
 
+    const payment = await voidPayment(req.orgId, req.params.paymentId, reason);
+
+    // Verify voidPayment's internal commission void actually took, rather
+    // than repeating the write ourselves (that duplicate write is what
+    // broke reversalData in the first place — see the comment above).
     let commissionVoidFailed = false;
-    if (commissionErr) {
-      // The payment itself is already voided at this point — that must not
-      // be undone by a commission-side failure, but silently reporting
-      // success when the commission is still live would leave a rep paid
-      // (or owed) on a transfer that turns out never to have happened.
-      // Re-verify what actually happened rather than trusting the failed
-      // update's absent row.
-      console.error('[payments] failed to void the commission for voided payment', payment.id, ':', commissionErr.message);
+    if (commission) {
       const { data: stillLive } = await supabaseAdmin
         .from('re_commissions')
-        .select('id, amount')
-        .eq('payment_id', payment.id)
-        .eq('organization_id', req.orgId)
+        .select('id')
+        .eq('id', commission.id)
         .neq('status', 'void')
         .maybeSingle();
-      if (stillLive) commissionVoidFailed = true;
+      if (stillLive) {
+        console.error('[payments] commission still live after voidPayment for payment', payment.id, ':', commission.id);
+        commissionVoidFailed = true;
+      }
     }
 
     // A receipt already handed out for this payment must stop being served —
@@ -529,14 +538,27 @@ router.post('/bulk-waive-next-overdue', requirePermission('payments.waive'), asy
       });
     }
 
-    for (const r of rows) {
-      const { error: waiveErr } = await supabaseAdmin
-        .from('re_installment_schedule')
-        .update({ status: 'waived' })
-        .eq('id', r.scheduleId)
-        .eq('organization_id', req.orgId);
-      if (waiveErr) throw waiveErr;
+    // AUDIT FIX (P8) — one UPDATE ... WHERE id IN (...) rather than N
+    // sequential single-row UPDATEs, one per buyer in the selection. The
+    // extra .eq('status', 'overdue') guard (redundant with the SELECT above
+    // filtering to 'overdue' already, absent from the old per-row loop too)
+    // means .select('id') hands back exactly which rows this statement
+    // actually touched, so a row that raced to some other status between
+    // the SELECT and this UPDATE is not logged as waived when it was not.
+    const scheduleIds = rows.map((r) => r.scheduleId);
+    const { data: waivedRows, error: waiveErr } = await supabaseAdmin
+      .from('re_installment_schedule')
+      .update({ status: 'waived' })
+      .in('id', scheduleIds)
+      .eq('organization_id', req.orgId)
+      .eq('status', 'overdue')
+      .select('id');
+    if (waiveErr) throw waiveErr;
 
+    const waivedIds = new Set((waivedRows || []).map((w) => w.id));
+    const waived = rows.filter((r) => waivedIds.has(r.scheduleId));
+
+    for (const r of waived) {
       audit(req, {
         action: 'installment.waived',
         entityType: 're_installment_schedule',
@@ -549,9 +571,23 @@ router.post('/bulk-waive-next-overdue', requirePermission('payments.waive'), asy
         reversible: true,
         reversalData: { previous_status: 'overdue' },
       });
+
+      // PROMPT 8 — Unified Approval/Workflow Engine. One row per waived
+      // installment, same granularity as the audit() call just above — a
+      // bulk waive has no separate request/decide step (routes/payments.js's
+      // own header comment above this route), so this is written already
+      // resolved. Fire-and-forget like audit() itself: recordResolved never
+      // throws.
+      approvals.recordResolved(req.orgId, {
+        requestType: 'bulk_waive', entityType: 're_installment_schedule', entityId: r.scheduleId, actorUserId: req.userId,
+      });
     }
 
-    res.json({ waived_count: rows.length, total_amount: totalAmount, skipped_count: skippedCount });
+    res.json({
+      waived_count: waived.length,
+      total_amount: waived.reduce((sum, r) => sum + r.amount, 0),
+      skipped_count: skippedCount + (rows.length - waived.length),
+    });
   } catch (e) { next(e); }
 });
 

@@ -22,13 +22,14 @@ const { generateDailyBrief, isMonday } = require('../services/aiBrief');
 const { sweepBrokenPromises } = require('../services/promiseService');
 const { sweepEscalations } = require('../services/escalationService');
 const { sweepUnresolvedOutcomes } = require('../services/outcomeService');
+const { sweepStaleEntries: sweepStaleDecisionLedgerEntries } = require('../services/decisionLedgerService');
 const { recomputeForAllOrgs: recomputeRecoveryPlaybook } = require('../services/recoveryPlaybookService');
 const { recomputeForAllOrgs: recomputeDeveloperDna } = require('../services/developerDnaService');
 const aiAssistant = require('../services/aiAssistantService');
 const { notifyOverdue, remindUpcoming } = require('../services/overdueAlerts');
 const { checkTenancyRenewals } = require('../services/rentalService');
 const { sweepOverdueContractorPayments } = require('../services/contractorService');
-const { computeAndStoreForAllProjects } = require('../services/projectHealthService');
+const { computeAndStoreForOrg } = require('../services/projectHealthService');
 const { sweepExpiredDocuments } = require('../services/documentService');
 const { checkScheduledMessages } = require('../services/scheduledMessageService');
 const { sendDueScheduledCampaigns } = require('../services/campaignService');
@@ -104,7 +105,16 @@ async function runAgent(orgId, name, fn) {
 // Running the brief before the sweeps would have it describe yesterday's state
 // in this morning's email, which is the one thing it must never do.
 async function runDailyJob() {
-  const flipped = await markOverdue();
+  // AUDIT FIX (A1) — every sibling step below already fails soft with its
+  // own .catch(); this one didn't, so a single markOverdue() failure (a
+  // transient database error, same class of thing every step here guards
+  // against) used to throw straight out of runDailyJob() and skip every
+  // later step — the promise sweep, the escalation sweep, the brief, the
+  // whole rest of the platform-wide job — for EVERY org, not just this one.
+  const flipped = await markOverdue().catch((err) => {
+    console.error('[re-daily] markOverdue failed:', err.message);
+    return 0;
+  });
   console.log(`[re-daily] marked ${flipped} installment(s) overdue`);
 
   const promises = await sweepBrokenPromises().catch((err) => {
@@ -136,6 +146,18 @@ async function runDailyJob() {
   });
   if (outcomeSweep.closed) {
     console.log(`[re-daily] closed ${outcomeSweep.closed} unresolved outcome row(s) as no_response`);
+  }
+
+  // Decision Ledger — same shape as the outcome sweep just above: closes any
+  // still-open ledger row past NO_RESPONSE_WINDOW_DAYS as 'ignored'.
+  // Platform-wide, idempotent by construction (see decisionLedgerService.
+  // sweepStaleEntries' own comment).
+  const decisionLedgerSweep = await sweepStaleDecisionLedgerEntries().catch((err) => {
+    console.error('[re-daily] decision ledger sweep failed:', err.message);
+    return { closed: 0 };
+  });
+  if (decisionLedgerSweep.closed) {
+    console.log(`[re-daily] closed ${decisionLedgerSweep.closed} stale decision ledger row(s) as ignored`);
   }
 
   // SECTION 4 (feature expansion) — recovery playbook. Monday only, same
@@ -190,19 +212,6 @@ async function runDailyJob() {
     console.log(`[re-daily] flagged ${contractorSweep.flagged} contractor payment(s) overdue`);
   }
 
-  // SECTION 15 — one health score per project per day, platform-wide (the
-  // function itself walks every org's projects, same shape as the
-  // contractor sweep above). Runs BEFORE the per-org brief loop below so a
-  // Monday brief can read today's just-computed figures, not yesterday's.
-  const health = await computeAndStoreForAllProjects().catch((err) => {
-    console.error('[re-daily] project health sweep failed:', err.message);
-    return { computed: 0, warningTasksFiled: 0 };
-  });
-  if (health.computed) {
-    console.log(`[re-daily] computed health for ${health.computed} project(s), `
-      + `${health.warningTasksFiled} new warning task(s) filed`);
-  }
-
   // Brief every org that has at least one RESERVATION.
   //
   // "Has a project" was the old bar and it was too low: an account that created
@@ -221,13 +230,27 @@ async function runDailyJob() {
   // non-cancelled reservation platform-wide just to de-duplicate it in Node
   // is a read that grows forever to answer a question whose real answer is a
   // short list of ids (migrations/010).
-  const { data: orgRows, error } = await supabaseAdmin.rpc('distinct_reservation_org_ids');
-  if (error) throw error;
+  // AUDIT FIX (A2) — unguarded, a single failure of this RPC (the same
+  // transient-database-error class every step above and below it already
+  // guards against) used to throw straight out of runDailyJob() before the
+  // per-org loop even started — skipping every org's alerts, reminders and
+  // brief for the whole platform on what should have been a log line and a
+  // brief with zero orgs processed, not a total outage of the morning job.
+  let orgRows = [];
+  try {
+    const { data, error } = await supabaseAdmin.rpc('distinct_reservation_org_ids');
+    if (error) throw error;
+    orgRows = data || [];
+  } catch (err) {
+    console.error('[re-daily] could not enumerate organizations for the brief:', err.message);
+  }
 
-  const orgIds = (orgRows || []).map((r) => r.organization_id);
+  const orgIds = orgRows.map((r) => r.organization_id);
   let succeeded = 0;
   let alerted = 0;
   let reminded = 0;
+  let healthComputed = 0;
+  let warningTasksFiled = 0;
 
   await mapWithConcurrency(orgIds, ORG_CONCURRENCY, async (orgId) => {
     // Alerts first: a rep should hear that their buyer missed a payment even
@@ -248,6 +271,20 @@ async function runDailyJob() {
       reminded += result.sent;
     } catch (err) {
       console.error(`[re-daily] buyer reminders failed for org ${orgId}:`, err.message);
+    }
+
+    // SECTION 15 — one health score per project per day, this org's projects
+    // only (AUDIT FIX P1 — projectHealthService.js's own header on why this
+    // moved from a single platform-wide call before this loop to here).
+    // Deliberately BEFORE generateDailyBrief below, in this same org's own
+    // turn, so a Monday brief reads today's just-computed figures, not
+    // yesterday's.
+    try {
+      const health = await computeAndStoreForOrg(orgId);
+      healthComputed += health.computed;
+      warningTasksFiled += health.warningTasksFiled;
+    } catch (err) {
+      console.error(`[re-daily] project health sweep failed for org ${orgId}:`, err.message);
     }
 
     try {
@@ -286,7 +323,8 @@ async function runDailyJob() {
   });
 
   console.log(`[re-daily] briefed ${succeeded}/${orgIds.length} org(s), ${alerted} alert(s), ${reminded} reminder(s), `
-    + `${renewals.filed} renewal flag(s)`);
+    + `${renewals.filed} renewal flag(s), health computed for ${healthComputed} project(s) `
+    + `(${warningTasksFiled} new warning task(s) filed)`);
 
   // SECTION 9 — deliberately AFTER every org's brief above, not alongside
   // the other platform-wide sweeps near the top of this function: an
@@ -303,7 +341,10 @@ async function runDailyJob() {
     console.log(`[re-daily] flagged ${expiry.filed} expired unsigned document(s)`);
   }
 
-  return { flipped, promises, escalations, renewals, expiry, orgs: orgIds.length, succeeded, alerted, reminded };
+  return {
+    flipped, promises, escalations, renewals, expiry, orgs: orgIds.length, succeeded, alerted, reminded,
+    healthComputed, warningTasksFiled,
+  };
 }
 
 // The evening sweep. Installments are due by 18:00 Africa/Lagos
@@ -317,7 +358,14 @@ async function runDailyJob() {
 const EVENING_SCHEDULE = env.cron.eveningSchedule;
 
 async function runEveningSweep() {
-  const flipped = await markOverdue();
+  // AUDIT FIX (A1) — same fix as runDailyJob's own markOverdue() call
+  // above: unguarded, a single failure here used to throw straight out of
+  // runEveningSweep() and skip the promise/escalation sweeps below it too,
+  // for every org, not just this one.
+  const flipped = await markOverdue().catch((err) => {
+    console.error('[re-evening] markOverdue failed:', err.message);
+    return 0;
+  });
   const promises = await sweepBrokenPromises().catch((err) => {
     console.error('[re-evening] promise sweep failed:', err.message);
     return { broken: 0, kept: 0 };

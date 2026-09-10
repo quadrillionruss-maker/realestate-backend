@@ -22,7 +22,18 @@ const emptyTotals = () => ({
 });
 
 // projectId is optional — omit it for the whole org's book, same as before.
-async function getInvestorReport(orgId, projectId = null) {
+// AUDIT FIX (P9) — from/to are optional too, same shape and reasoning as
+// commissionService.leaderboard's own from/to (routes/commissions.js's
+// GET /summary): omitted, this behaves EXACTLY as it always has —
+// collected_total etc. are genuinely lifetime figures ("how much of this
+// project has been collected to date"), and an investor report silently
+// turning that into a rolling window by default would misstate the one
+// number this whole report exists to state correctly. What from/to add is
+// the ABILITY to ask for a bounded period instead of always re-aggregating
+// every payment this org has ever recorded — a workspace years into
+// operation with this report open on a dashboard, refreshed routinely,
+// otherwise re-fetches its entire payment history on every single view.
+async function getInvestorReport(orgId, projectId = null, { from = null, to = null } = {}) {
   const today = lagosToday();
 
   let projectQuery = supabaseAdmin
@@ -60,12 +71,15 @@ async function getInvestorReport(orgId, projectId = null) {
     .in('re_units.project_id', projectIds);
   if (resErr) throw resErr;
 
-  const { data: payments, error: payErr } = await supabaseAdmin
+  let paymentsQuery = supabaseAdmin
     .from('re_payments')
     .select('amount, vat_amount, paid_at, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(property_type, re_units!inner(project_id))))')
     .eq('organization_id', orgId)
     .in('re_installment_schedule.re_installment_plans.re_reservations.re_units.project_id', projectIds)
     .is('voided_at', null);
+  if (from) paymentsQuery = paymentsQuery.gte('paid_at', from);
+  if (to) paymentsQuery = paymentsQuery.lte('paid_at', to);
+  const { data: payments, error: payErr } = await paymentsQuery;
   if (payErr) throw payErr;
 
   const paymentsByProject = new Map();
@@ -174,6 +188,11 @@ async function getInvestorReport(orgId, projectId = null) {
   return {
     generated_at: new Date().toISOString(),
     period_end: today,
+    // AUDIT FIX (P9) — null unless a caller actually asked for a window,
+    // so a report showing lifetime figures (the default, unchanged) is
+    // visibly distinct from one scoped to a period.
+    period_start: from || null,
+    period_to: to || null,
     scope: projectId ? 'project' : 'all',
     projects: rows,
     totals: rows.reduce((totals, row) => ({

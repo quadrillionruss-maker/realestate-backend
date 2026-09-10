@@ -3115,11 +3115,15 @@
         api('/customers/' + id + '/activities'),
         canSeeMessages ? api('/customers/' + id + '/messages') : Promise.resolve([]),
         canScheduleMessages ? api('/scheduled-messages?customer_id=' + id) : Promise.resolve([]),
+        // Decision Ledger — every buyer can see their own drawer's history,
+        // same tier as the Activity section right above (customers.read).
+        api('/customers/' + id + '/decisions'),
       ]);
       var c = results[0];
       var activities = results[1];
       var thread = results[2];
       var scheduledMessages = results[3];
+      var decisions = results[4];
       var reservations = c.re_reservations || [];
 
       panel.root.querySelector('.page-title').textContent = c.full_name;
@@ -3335,6 +3339,17 @@
             ? '<div class="mt-1">' + activities.map(activityRow).join('') + '</div>'
             : '<p class="page-sub mt-1">No calls, visits or notes logged yet.</p>') +
         '</div>' +
+
+        // Decision Ledger — shown only once there is something to show, same
+        // convention as every other conditional section on this drawer.
+        // Makes the learning loop visible per buyer: what Archta suggested,
+        // what the team actually did, and (once known) how it turned out.
+        (decisions.length
+          ? '<div class="drawer-section">' +
+              '<b>Decision History</b>' +
+              '<div class="mt-1">' + decisions.map(decisionRow).join('') + '</div>' +
+            '</div>'
+          : '') +
 
         // SECTION 16 — shown only once there is something to show, same
         // convention as every other conditional section on this drawer.
@@ -3617,6 +3632,37 @@
       '<div class="mt-1">' + esc(a.notes) + '</div>' +
       '<div class="page-sub mt-1">' + esc((a.users && (a.users.full_name || a.users.email)) || 'Someone') +
         (canDelete ? ' · <button class="btn-quiet" data-delete-activity="' + esc(a.id) + '">Delete</button>' : '') +
+      '</div>' +
+    '</div>';
+  }
+
+  // Decision Ledger — one row per recommendation-vs-decision comparison.
+  // archta_recommendation/human_decision shapes vary by recommendation_type
+  // (a channel choice looks nothing like a hardship review), so this reads
+  // whichever `reason`/descriptive field each shape actually carries rather
+  // than assuming one fixed layout.
+  function describeDecision(d) {
+    var rec = d.archta_recommendation || {};
+    var human = d.human_decision || {};
+    if (rec.reason) return rec.reason;
+    if (rec.title) return rec.title;
+    if (rec.channel || human.channel) {
+      return 'Archta suggested ' + (rec.channel || 'a contact') + '; logged as ' + (human.channel || human.action || 'handled') + '.';
+    }
+    return d.was_override ? 'Team chose a different action than Archta suggested.' : "Team followed Archta's suggestion.";
+  }
+
+  function decisionRow(d) {
+    return '<div class="activity-row">' +
+      '<div class="flex-row justify-between gap-10">' +
+        '<span>' + badge(d.recommendation_type) + ' ' + badge(d.was_override ? 'override' : 'followed') + '</span>' +
+        '<span class="page-sub nowrap">' + esc(R.fmtRelative(d.created_at)) + '</span>' +
+      '</div>' +
+      '<div class="mt-1">' + esc(describeDecision(d)) + '</div>' +
+      '<div class="page-sub mt-1">' +
+        (d.outcome_type
+          ? badge(d.outcome_type) + (d.days_to_outcome != null ? ' · ' + d.days_to_outcome + ' day(s)' : '')
+          : 'Outcome pending') +
       '</div>' +
     '</div>';
   }
@@ -6313,9 +6359,220 @@
   ];
   var CUSTOM_REPORT_DEFAULT_FIELDS = CUSTOM_REPORT_FIELD_OPTIONS.map(function (f) { return f[0]; });
 
+  // PROMPT 7 — Financial Reconciliation. Not a literal tab (this screen has
+  // no tab system at all — see the Reports render() below, one continuous
+  // scroll of card() sections gated by permission, same as every report
+  // beside it), so this is a card in that same scroll rather than a new UI
+  // pattern introduced for one feature.
+  function reconciliationItemsTable(items) {
+    return table(
+      [{ label: 'Reference' }, { label: 'Archta amount', num: true }, { label: 'Provider amount', num: true },
+        { label: 'Status' }, { label: 'Notes' }],
+      items || [],
+      function (item) {
+        return '<tr>' +
+          '<td class="mono">' + esc(item.provider_reference || '—') + '</td>' +
+          '<td class="num">' + (item.archta_amount != null ? naira(item.archta_amount) : '—') + '</td>' +
+          '<td class="num">' + (item.provider_amount != null ? naira(item.provider_amount) : '—') + '</td>' +
+          '<td>' + badge(item.status) + '</td>' +
+          '<td class="muted">' + esc(item.notes || '') + '</td>' +
+        '</tr>';
+      },
+      { emptyTitle: 'No items on this run' }
+    );
+  }
+
+  async function viewReconciliationRunModal(runId) {
+    var run = await api('/reports/reconciliation/runs/' + runId);
+    R.modal({
+      title: (run.provider === 'paystack' ? 'Paystack' : 'Bank transfer') + ' reconciliation — '
+        + fmtDate(run.period_start) + ' to ' + fmtDate(run.period_end),
+      wide: true,
+      body:
+        '<div class="grid cols-3 mb-2">' +
+          stat('Status', run.status === 'clean' ? 'Clean' : 'Discrepancies', { tone: run.status === 'clean' ? 'moss' : 'clay' }) +
+          stat('Archta total', naira(run.archta_total)) +
+          stat('Provider total', naira(run.provider_total)) +
+        '</div>' +
+        reconciliationItemsTable(run.items),
+      // No submitLabel/onSubmit — read-only, so the modal's built-in
+      // Cancel-only behavior (relabelled) is exactly right: nothing to
+      // submit, just a way to close it.
+      cancelLabel: 'Close',
+    });
+  }
+
+  function reconciliationRunsTable(runs) {
+    if (!runs || !runs.length) return '<p class="page-sub">No reconciliation has been run yet.</p>';
+    return table(
+      [{ label: 'Date' }, { label: 'Provider' }, { label: 'Period' }, { label: 'Matched', num: true },
+        { label: 'Unmatched', num: true }, { label: 'Status' }, { label: '' }],
+      runs,
+      function (r) {
+        return '<tr>' +
+          '<td class="muted">' + esc(fmtDate(r.created_at)) + '</td>' +
+          '<td>' + esc(r.provider === 'paystack' ? 'Paystack' : 'Bank transfer') + '</td>' +
+          '<td class="muted">' + esc(fmtDate(r.period_start)) + ' – ' + esc(fmtDate(r.period_end)) + '</td>' +
+          '<td class="num">' + r.matched_count + '</td>' +
+          '<td class="num">' + r.unmatched_count + '</td>' +
+          '<td>' + badge(r.status) + '</td>' +
+          '<td class="right"><button class="btn-quiet" data-view-reconciliation="' + esc(r.id) + '">View</button></td>' +
+        '</tr>';
+      },
+      { emptyTitle: 'No reconciliation runs yet' }
+    );
+  }
+
+  function reconciliationCard(runs, defaultFrom, defaultTo) {
+    return card('Reconciliation',
+      '<p class="page-sub mb-2">Match Archta\'s own payment ledger against what actually settled — Paystack\'s ' +
+        'own transaction list, or an uploaded bank statement.</p>' +
+      '<div class="flex-row gap-10 align-end flex-wrap mb-2">' +
+        '<div class="field mb-0"><label for="recon-from">From</label>' +
+          '<input class="input" type="date" id="recon-from" value="' + esc(defaultFrom) + '"></div>' +
+        '<div class="field mb-0"><label for="recon-to">To</label>' +
+          '<input class="input" type="date" id="recon-to" value="' + esc(defaultTo) + '"></div>' +
+        '<button class="btn primary" id="btn-run-paystack-reconciliation">Run Paystack reconciliation</button>' +
+        '<button class="btn" id="btn-upload-bank-statement">Upload bank statement (CSV)</button>' +
+      '</div>' +
+      reconciliationRunsTable(runs),
+      { flush: true }
+    );
+  }
+
+  function uploadBankStatementModal() {
+    R.modal({
+      title: 'Upload bank statement',
+      wide: true,
+      body:
+        '<p class="muted mb-2">Matched by amount and date, within 2 days — a bank statement carries no ' +
+          'reference Archta ever generated. Columns: <code>reference</code> (optional), <code>amount</code>, ' +
+          '<code>date</code>.</p>' +
+        '<div class="field"><label for="recon-file">CSV file</label>' +
+          '<input class="input" id="recon-file" type="file" accept=".csv,text/csv"></div>' +
+        '<div class="field"><label for="recon-csv">…or paste it</label>' +
+          '<textarea class="textarea mono-input" id="recon-csv" name="csv" rows="7" ' +
+            'placeholder="reference,amount,date&#10;TRF-0091,500000,2026-09-03"></textarea></div>',
+      submitLabel: 'Reconcile',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        if (!v.csv) throw new Error('Paste the statement or choose a file.');
+        var run = await api.post('/reports/reconciliation/bank-transfer', { csv: v.csv });
+        close();
+        toast(run.matched_count + ' matched, ' + run.unmatched_count + ' unmatched.', run.status === 'clean' ? 'ok' : 'err');
+        R.reload();
+      },
+    });
+
+    R.el('recon-file').addEventListener('change', function (e) {
+      var file = e.target.files[0];
+      if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () { R.el('recon-csv').value = reader.result; };
+      reader.readAsText(file);
+    });
+  }
+
+  /* ══ APPROVALS ══════════════════════════════════════════════════════════
+   * PROMPT 8 — Unified Approval/Workflow Engine. One queue across every
+   * pending request the product currently has (hardship, financing) —
+   * restructure and bulk-waive never show up here since they have no
+   * separate request/decide step (approvalService.js's own header) and are
+   * recorded already resolved, purely for the shared history a specific
+   * request's own flow can still show in full (routes/hardshipRequests.js,
+   * routes/financingRequests.js) — this screen is deliberately a thin
+   * queue, not a second copy of either screen's own rich detail.
+   */
+  var APPROVAL_TYPE_PERMISSION = {
+    hardship: 'hardship.review',
+    financing: 'financing.manage',
+    restructure: 'reservations.restructure',
+    bulk_waive: 'payments.waive',
+  };
+  var APPROVAL_TYPE_LABELS = {
+    hardship: 'Payment pause', financing: 'Bank financing', restructure: 'Plan restructure',
+    bulk_waive: 'Bulk waive', payment_plan_modification: 'Payment plan modification',
+    joint_sale: 'Joint sale', undo_action: 'Undo action',
+  };
+  var APPROVER_ROLE_LABELS = { owner: 'Owner', sales_director: 'Sales Director' };
+
+  async function rejectApprovalModal(row) {
+    var m = R.modal({
+      title: 'Reject ' + (APPROVAL_TYPE_LABELS[row.request_type] || row.request_type).toLowerCase(),
+      body:
+        '<div class="field"><label for="ar-reason">Reason (optional)</label>' +
+          '<textarea class="textarea" id="ar-reason" name="rejection_reason" rows="3" ' +
+            'placeholder="Shared with the buyer where this flow tells them why."></textarea></div>',
+      submitLabel: 'Reject',
+      onSubmit: async function (form, close) {
+        var v = R.values(form);
+        await api.post('/approvals/' + row.id + '/reject', { rejection_reason: v.rejection_reason || '' });
+        close();
+        toast('Rejected.', 'ok');
+        R.reload();
+      },
+    });
+    // modal() itself has no 'danger' option (only confirmDialog's own thin
+    // wrapper applies one) — swapped by hand here, same two lines
+    // confirmDialog uses internally.
+    var submit = m.root.querySelector('[type="submit"]');
+    if (submit) { submit.classList.remove('primary'); submit.classList.add('danger'); }
+  }
+
+  R.screens.approvals = {
+    render: async function (view, params, query) {
+      var pending = await api('/approvals/pending');
+
+      view.innerHTML =
+        head('Approvals', 'Every pending request across the product, in one queue.') +
+        card(null, table(
+          [{ label: 'Type' }, { label: 'Requested' }, { label: 'Waiting on' }, { label: '' }],
+          pending,
+          function (r) {
+            var canDecide = R.can(APPROVAL_TYPE_PERMISSION[r.request_type]);
+            return '<tr>' +
+              '<td class="cell-primary">' + esc(APPROVAL_TYPE_LABELS[r.request_type] || r.request_type) + '</td>' +
+              '<td class="muted">' + esc(fmtDate(r.requested_at)) + '</td>' +
+              '<td>' + esc(APPROVER_ROLE_LABELS[r.current_approver_role] || r.current_approver_role) + '</td>' +
+              '<td class="right">' + (canDecide
+                ? '<button class="btn-quiet" data-reject-approval="' + esc(r.id) + '">Reject</button>' +
+                  '<button class="btn sm primary" data-approve-approval="' + esc(r.id) + '">Approve</button>'
+                : '<span class="page-sub">Needs ' + esc(APPROVER_ROLE_LABELS[r.current_approver_role] || r.current_approver_role) + '</span>') +
+              '</td>' +
+            '</tr>';
+          },
+          { emptyTitle: 'All clear — nothing is waiting on a decision right now.' }
+        ), { flush: true });
+
+      var pendingById = {};
+      pending.forEach(function (r) { pendingById[r.id] = r; });
+
+      R.onClick(view, '[data-approve-approval]', async function (button) {
+        var row = pendingById[button.dataset.approveApproval];
+        var ok = await R.confirm({
+          title: 'Approve ' + (APPROVAL_TYPE_LABELS[row.request_type] || row.request_type).toLowerCase(),
+          message: 'This carries out the underlying action immediately — same as approving it from its own screen.',
+          confirmLabel: 'Approve',
+        });
+        if (!ok) return;
+        try {
+          await api.post('/approvals/' + row.id + '/approve', {});
+          toast('Approved.', 'ok');
+          R.reload();
+        } catch (err) { toast(err.message, 'err'); }
+      });
+
+      R.onClick(view, '[data-reject-approval]', function (button) {
+        rejectApprovalModal(pendingById[button.dataset.rejectApproval]);
+      });
+    },
+  };
+
   R.screens.reports = {
     render: async function (view, params, query) {
       var scope = query.project ? '?project_id=' + encodeURIComponent(query.project) : '';
+      var today = localDateStr(new Date());
+      var monthStart = today.slice(0, 7) + '-01';
 
       // 'reports.investor' is owner-only (CLAUDE.md: "only the chairman sees
       // the investor's view"); 'reports.collections'/'reports.rental' are
@@ -6353,6 +6610,9 @@
       // owner-only tier as reports.forecast beside it — both are a
       // workspace-wide operating pattern, not any one director's own book.
       var canCommEffectiveness = R.can('analytics.outcomes');
+      // PROMPT 7 — Financial Reconciliation. Owner-only (permissions.js),
+      // same tier as reports.investor/reports.forecast beside it.
+      var canReconciliation = R.can('reports.reconciliation');
       var leaderboardPeriod = LEADERBOARD_PERIODS.indexOf(query.period) >= 0 ? query.period : 'all_time';
 
       var results = await Promise.all([
@@ -6376,6 +6636,10 @@
         // permission (analytics.developerDna) — a different data domain
         // than the outcome-database routes above, same owner-only tier.
         R.can('analytics.developerDna') ? api('/analytics/developer-dna') : Promise.resolve(null),
+        // PROMPT 7 — Financial Reconciliation. Summary rows only (no items —
+        // see reconciliationService.listRuns's own comment); a specific
+        // run's items are fetched on demand when its "View" is clicked.
+        canReconciliation ? api('/reports/reconciliation/runs') : Promise.resolve(null),
       ]);
       var report = results[0], collections = results[1], rental = results[2], referralStats = results[3], forecast = results[4];
       var legalSummary = results[5], legalCases = results[6], financingRequests = results[7];
@@ -6384,6 +6648,7 @@
       var commEffectiveness = results[12];
       var recoveryPlaybook = results[13];
       var developerDna = results[14];
+      var reconciliationRuns = results[15];
       var t = report && report.totals;
       // Only a developer who actually runs a rental portfolio sees this
       // section — nothing to report on is nothing to show.
@@ -6761,6 +7026,13 @@
               },
               { emptyTitle: 'No financing requests yet' }
             ), { flush: true })
+          : '') +
+
+        // PROMPT 7 — Financial Reconciliation. Owner-only, at the bottom of
+        // the same permission-gated scroll every other report on this
+        // screen already uses.
+        (canReconciliation
+          ? reconciliationCard(reconciliationRuns, monthStart, today)
           : '');
 
       // Collections bars carry their height as data-h (a CSP with no
@@ -6797,6 +7069,28 @@
         await api('/reports/forecast?regenerate=true');
         toast('Forecast regenerated.', 'ok');
         R.reload();
+      });
+
+      // PROMPT 7 — Financial Reconciliation.
+      R.onClick(view, '#btn-run-paystack-reconciliation', async function (button) {
+        var from = R.el('recon-from').value, to = R.el('recon-to').value;
+        button.disabled = true;
+        button.textContent = 'Running…';
+        try {
+          var run = await api.post('/reports/reconciliation/run', { period_start: from, period_end: to });
+          toast(run.matched_count + ' matched, ' + run.unmatched_count + ' unmatched.', run.status === 'clean' ? 'ok' : 'err');
+          R.reload();
+        } catch (err) {
+          toast(err.message, 'err');
+          button.disabled = false;
+          button.textContent = 'Run Paystack reconciliation';
+        }
+      });
+
+      R.onClick(view, '#btn-upload-bank-statement', function () { uploadBankStatementModal(); });
+
+      R.onClick(view, '[data-view-reconciliation]', async function (button) {
+        await viewReconciliationRunModal(button.dataset.viewReconciliation);
       });
 
       // Your data, in a file you keep. Also the only backup a developer

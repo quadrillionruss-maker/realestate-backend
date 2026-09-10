@@ -49,5 +49,6 @@ router.use('/logs', require('./logs'));
 router.use('/campaigns', require('./campaigns'));
 router.use('/analytics', require('./analytics'));
 router.use('/ai', require('./ai'));
+router.use('/approvals', require('./approvals'));
 
 module.exports = router;

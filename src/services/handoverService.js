@@ -21,8 +21,11 @@ const TEMPLATE_PATH = path.join(__dirname, '../templates/handover_certificate.ht
 const CHECKLIST_STATUSES = ['pending', 'inspection_done', 'issues_raised', 'resolved', 'signed_off'];
 const SNAG_STATUSES = ['open', 'acknowledged', 'fixed', 'disputed'];
 
+// AUDIT FIX (N2) — timeZone pinned to Africa/Lagos, not the server's own
+// (UTC on Render). Without it, a certificate generated in the 23:00-23:59
+// UTC window — already past midnight in Lagos — printed yesterday's date.
 const formatDate = (value) =>
-  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Africa/Lagos' });
 
 // ── Checklist ──────────────────────────────────────────────────────────
 async function createChecklist(req, reservationId, { handoverDate, keysHanded, meterReadings, documentsProvided }) {

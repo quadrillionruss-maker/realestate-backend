@@ -75,9 +75,24 @@ function parseCsvToObjects(text) {
 
 // "₦2,500,000.00" → 2500000. Developers paste amounts straight out of their
 // own spreadsheets, currency symbol and thousands separators included.
+// AUDIT FIX (N4) — a Nigerian spreadsheet often writes an amount with the
+// letter prefix a keyboard can actually type ("N45,000,000", "NGN45,000,000")
+// rather than the ₦ glyph itself, which this used to leave unstripped —
+// "N45000000" is not a number, so the whole row failed to parse. Stripped as
+// a leading PREFIX only (never every "N" in the string), so a genuine digit
+// sequence is never touched.
+//
+// `cleaned === ''` guards a second, sharper-edged case this same prefix
+// stripping would otherwise open up: a cell containing ONLY currency
+// notation ("₦", "N", "NGN") with no digits at all strips down to nothing,
+// and `Number('')` is 0 in JavaScript — a stray currency symbol would
+// otherwise silently read as a real, valid zero amount instead of "not a
+// number".
 function parseAmount(value) {
   if (value == null || value === '') return null;
-  const cleaned = String(value).replace(/[₦$,\s]/g, '');
+  const withoutPrefix = String(value).trim().replace(/^(NGN|N|₦|\$)\s*/i, '');
+  const cleaned = withoutPrefix.replace(/[₦$,\s]/g, '');
+  if (cleaned === '') return null;
   const number = Number(cleaned);
   return Number.isFinite(number) ? number : null;
 }

@@ -19,9 +19,30 @@ const notify = require('./notificationService');
 const pushService = require('./pushService');
 const portalNotifications = require('./portalNotificationService');
 const featureUsage = require('./featureUsageService');
+const decisionLedger = require('./decisionLedgerService');
+const approvals = require('./approvalService');
 
 const MIN_REASON_LENGTH = 20;
 const PAUSE_MONTHS_MAX = 3;
+
+// Decision Ledger — this product has no AI-driven hardship-approval step;
+// every request is human-submitted and human-decided (see this file's own
+// top comment). This is a small, deterministic, explainable rule — same
+// "rules, not a model call" style aiBrief.js's own fallback brief uses — so
+// was_override carries real meaning instead of always reading false.
+// Reuses creditScoreService.tier()'s existing bands (80/60/40) rather than
+// inventing a second scale. Param named `score`, not `creditScore` — that
+// name is already this file's own import of the creditScoreService module.
+function computeHardshipRecommendation({ score, pauseMonths }) {
+  const band = creditScore.tier(score ?? 0).key;
+  if (band === 'excellent' || band === 'good') {
+    return { action: 'approve', reason: `Buyer credit tier is ${band}.` };
+  }
+  if (band === 'fair' && pauseMonths <= 1) {
+    return { action: 'approve', reason: 'Fair credit tier, short pause requested.' };
+  }
+  return { action: 'review', reason: `Buyer credit tier is ${band}; a ${pauseMonths}-month pause carries more risk.` };
+}
 
 // ── Portal: submit a request ────────────────────────────────────────────
 async function requestPause(customer, reservationId, { reason, pauseMonths }) {
@@ -83,6 +104,13 @@ async function requestPause(customer, reservationId, { reason, pauseMonths }) {
     metadata: { reservation_id: reservationId, pause_months: months },
   });
 
+  // PROMPT 8 — Unified Approval/Workflow Engine. Submitted from the portal
+  // by the buyer, not a staff user — requestedBy stays null; the real
+  // requester is already this row's own customer_id.
+  await approvals.recordRequest(customer.organization_id, {
+    requestType: 'hardship', entityType: 're_hardship_requests', entityId: data.id,
+  });
+
   featureUsage.track(customer.organization_id, 'hardship_requested');
 
   // SECTION 1 — push, owner only. requestPause is the buyer portal's only
@@ -136,6 +164,30 @@ async function reviewRequest(req, hardshipId, decision) {
 
   const now = new Date().toISOString();
   const customer = request.re_customers;
+
+  // Decision Ledger — computed and recorded once, here, before the branch:
+  // wasOverride is a pure comparison between the computed recommendation and
+  // `decision` (already known — it's this function's own parameter), not
+  // something that depends on which branch's side effects run below.
+  const recommendation = computeHardshipRecommendation({ score: customer?.credit_score, pauseMonths: request.pause_months });
+  await decisionLedger.recordDecision(req.orgId, {
+    customerId: request.customer_id,
+    reservationId: request.reservation_id,
+    recommendationType: 'hardship',
+    archtaRecommendation: { action: recommendation.action, reason: recommendation.reason },
+    humanDecision: { action: decision, user_id: req.userId },
+    wasOverride: (recommendation.action === 'approve') !== (decision === 'approved'),
+  });
+
+  // PROMPT 8 — closes whatever pending re_approval_requests row this
+  // request opened, regardless of whether this PATCH or the unified
+  // POST /approvals/:id/approve|reject is what actually got called (see
+  // approvalService.closeForEntity's own comment). 'denied' here maps to
+  // this table's own 'rejected', matching re_approval_requests' status enum.
+  await approvals.closeForEntity(req.orgId, 're_hardship_requests', hardshipId, {
+    status: decision === 'approved' ? 'approved' : 'rejected',
+    userId: req.userId,
+  });
 
   if (decision === 'approved') {
     await applyPause(req.orgId, request.reservation_id, request.pause_months);
@@ -283,4 +335,6 @@ module.exports = {
   listRequests,
   reviewRequest,
   applyPause,
+  // Exported for logic.test.js — pure, no database, directly unit-testable.
+  computeHardshipRecommendation,
 };

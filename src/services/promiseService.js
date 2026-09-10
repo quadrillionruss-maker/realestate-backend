@@ -23,6 +23,7 @@ const { auditSystem } = require('./auditService');
 const { mapWithConcurrency } = require('../utils/concurrency');
 const creditScore = require('./creditScoreService');
 const outcomes = require('./outcomeService');
+const decisionLedger = require('./decisionLedgerService');
 const behavioralFingerprint = require('./behavioralFingerprintService');
 
 const AUDIT_CONCURRENCY = 8;
@@ -109,6 +110,11 @@ async function logPromise(orgId, { scheduleId, promisedDate, promisedAmount, spo
       customerId, reservationId, actionType: 'promise_recorded',
       sourceEntityType: 're_payment_promises', sourceEntityId: data.id,
     });
+    // Decision Ledger — a promise is a real response to whatever
+    // recommendation is still open for this buyer (a collections contact, a
+    // restructure); closes it as 'promised' rather than leaving it open
+    // until the 30-day sweep wrongly marks it 'ignored'.
+    await decisionLedger.closeOutcome(orgId, customerId, { outcomeType: 'promised' });
   }
 
   return { promise: data, superseded: superseded?.length || 0 };

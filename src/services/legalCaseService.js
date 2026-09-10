@@ -25,8 +25,11 @@ const naira = (amount) => {
   const n = Number(amount || 0);
   return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
 };
+// AUDIT FIX (N2) — timeZone pinned to Africa/Lagos, not the server's own
+// (UTC on Render). Without it, a demand letter generated in the 23:00-23:59
+// UTC window — already past midnight in Lagos — printed yesterday's date.
 const formatDate = (value) =>
-  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Africa/Lagos' });
 const asArray = (value) => (Array.isArray(value) ? value : value ? [value] : []);
 
 // What the demand letter's own figures are built from — the identical shape

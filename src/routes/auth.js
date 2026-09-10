@@ -20,8 +20,34 @@ const invites = require('../services/inviteService');
 const { uploadUserAvatar } = require('../services/documentStorage');
 const { ROLE_LABELS, actionsFor, normalizeRole } = require('../services/permissions');
 const { getGroupsOwnedBy } = require('../services/groupService');
+const { auditSystem } = require('../services/auditService');
 
 const router = express.Router();
+
+// AUDIT FIX (C4) — every consequential action in this file (email change,
+// password change, 2FA enable/disable, backup code use, avatar update) used
+// to leave no audit trail at all: routes/auth.js never called audit() or
+// auditSystem() anywhere. auditSystem() rather than the more common
+// audit(req, ...) helper, because that one reads req.orgId, which nothing
+// upstream of this router ever sets (this router runs BEFORE
+// orgContext.js — CLAUDE.md's own "Request pipeline" section) — and because
+// a security event on this ACCOUNT belongs in every workspace it's an
+// active member of, not just whichever one happens to be selected in the
+// browser right now (see authService.activeOrgIdsFor's own header).
+async function auditAccountAction(user, { action, summary, metadata = {} }) {
+  for (const orgId of await auth.activeOrgIdsFor(user.id)) {
+    auditSystem({
+      orgId,
+      actorKind: 'user',
+      actorEmail: user.email,
+      action,
+      entityType: 'users',
+      entityId: user.id,
+      summary,
+      metadata,
+    });
+  }
+}
 
 // Credential endpoints get their own budget. The global limiter (600 per 15
 // minutes) is generous enough to be useless against password guessing.
@@ -73,8 +99,8 @@ router.get('/config', (_req, res) => {
 
 router.post('/register', credentialLimiter, async (req, res, next) => {
   try {
-    const { email, password, full_name, company_name } = req.body || {};
-    const result = await auth.register({ email, password, full_name, company_name });
+    const { email, password, full_name, company_name, accepted_terms: acceptedTerms } = req.body || {};
+    const result = await auth.register({ email, password, full_name, company_name, acceptedTerms });
 
     // A brand new account is a solo workspace (organization_id = user id), so
     // its settings row can be seeded now and the Settings screen is never empty.
@@ -117,7 +143,19 @@ router.post('/login/2fa', credentialLimiter, async (req, res, next) => {
     if (!partialToken || !code) {
       return res.status(400).json({ error: 'partial_token and code are required.' });
     }
-    res.json(await auth.loginWithTotp({ partialToken, code }));
+    const result = await auth.loginWithTotp({ partialToken, code });
+    if (result.used_backup_code) {
+      // AUDIT FIX (C4) — a backup code is single-use and burned the moment
+      // it's used (authService.loginWithTotp's own comment); the account
+      // owner should be able to see in the audit trail that one was spent
+      // and, from the remaining count shown in Settings, when they're
+      // running low.
+      await auditAccountAction(result.user, {
+        action: 'user.backup_code_used',
+        summary: `${result.user.email} signed in using a 2FA backup code.`,
+      });
+    }
+    res.json(result);
   } catch (e) { next(e); }
 });
 
@@ -148,6 +186,10 @@ router.post('/2fa/verify', authenticate, credentialLimiter, async (req, res, nex
   try {
     if (!requireOwnerForTwoFactor(req, res)) return;
     const result = await auth.verifyTotpSetup(req.user.id, req.body?.code);
+    await auditAccountAction(req.user, {
+      action: 'user.2fa_enabled',
+      summary: `${req.user.email} enabled two-factor authentication.`,
+    });
     res.json(result);
   } catch (e) { next(e); }
 });
@@ -158,6 +200,10 @@ router.post('/2fa/disable', authenticate, credentialLimiter, async (req, res, ne
     await auth.disableTotp(req.user.id, {
       currentPassword: req.body?.current_password,
       code: req.body?.code,
+    });
+    await auditAccountAction(req.user, {
+      action: 'user.2fa_disabled',
+      summary: `${req.user.email} disabled two-factor authentication.`,
     });
     res.status(204).end();
   } catch (e) { next(e); }
@@ -300,6 +346,27 @@ router.post('/invite/accept', authenticate, async (req, res, next) => {
       userId: req.user.id,
       userEmail: req.user.email,
     });
+
+    // AUDIT FIX (C5) — routes/settings.js's POST /team/invite already logs
+    // 'team.invited' the moment an invite is sent; nothing logged the other
+    // half of that story — someone actually joining. Written straight into
+    // the invited team's own audit log (auditSystem, not audit(req, ...) —
+    // this router has no req.orgId to read, see auditAccountAction's own
+    // header above), and skipped on an idempotent re-click of the same
+    // link (already_member: true) — that click did not just add a new
+    // member to log.
+    if (!result.already_member) {
+      await auditSystem({
+        orgId: result.team_id,
+        actorKind: 'user',
+        actorEmail: req.user.email,
+        action: 'team.invite_accepted',
+        entityType: 'team_members',
+        summary: `${req.user.email} accepted their invite and joined as ${ROLE_LABELS[result.role] || result.role}`,
+        metadata: { role: result.role },
+      });
+    }
+
     res.json(result);
   } catch (e) { next(e); }
 });
@@ -368,6 +435,23 @@ router.patch('/me', authenticate, async (req, res, next) => {
     if (error) throw error;
     if (!data) return res.status(404).json({ error: 'User not found' });
 
+    // AUDIT FIX (C4) — logged separately (both can change in one request):
+    // an account takeover attempt looks exactly like a legitimate change of
+    // either right up until someone checks the trail for it.
+    if (wantsEmailChange) {
+      await auditAccountAction(req.user, {
+        action: 'user.email_changed',
+        summary: `Sign-in email changed from ${req.user.email} to ${data.email}.`,
+        metadata: { previous_email: req.user.email, new_email: data.email },
+      });
+    }
+    if (wantsPasswordChange) {
+      await auditAccountAction(req.user, {
+        action: 'user.password_changed',
+        summary: `${data.email} changed their password.`,
+      });
+    }
+
     // Changing the sign-in email or password ends every other session.
     // Somebody who changes either because they think a device is compromised
     // expects exactly that, and without it the old token keeps working for
@@ -391,11 +475,21 @@ router.patch('/me', authenticate, async (req, res, next) => {
 // Base64 in a JSON body rather than multipart, same tradeoff as a team logo
 // (routes/settings.js POST /logo) and unit media: no upload middleware, no
 // new dependency, for an image someone changes a handful of times a year.
+// AUDIT FIX (S5) — checked here, at the route boundary, in addition to
+// documentStorage.uploadUserAvatar's own LOGO_TYPES/magic-byte check below:
+// an explicit allow-list rejects an SVG (or anything else) with a clear 400
+// before a base64 payload is even decoded, rather than relying solely on the
+// storage layer to catch it.
+const ALLOWED_AVATAR_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+
 router.post('/me/avatar', authenticate, avatarLimiter, async (req, res, next) => {
   try {
     const { content, content_type } = req.body || {};
     if (!content || !content_type) {
       return res.status(400).json({ error: 'content (base64) and content_type are required' });
+    }
+    if (!ALLOWED_AVATAR_TYPES.has(content_type)) {
+      return res.status(400).json({ error: 'Unsupported image type. Use JPEG, PNG or WebP.' });
     }
 
     const base64 = String(content).replace(/^data:[^;]+;base64,/, '');
@@ -411,6 +505,11 @@ router.post('/me/avatar', authenticate, avatarLimiter, async (req, res, next) =>
       .select('avatar_url')
       .single();
     if (error) throw error;
+
+    await auditAccountAction(req.user, {
+      action: 'user.avatar_updated',
+      summary: `${req.user.email} updated their profile photo.`,
+    });
 
     res.json({ avatar_url: data.avatar_url });
   } catch (e) { next(e); }

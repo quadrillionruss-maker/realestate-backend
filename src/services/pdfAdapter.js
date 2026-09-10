@@ -94,12 +94,9 @@ async function launchFullBrowser() {
   return puppeteer.launch({ headless: true, args });
 }
 
-async function renderHtmlToPdf(html) {
-  const engine = resolveEngine();
-  const browser = engine === 'core' ? await launchCoreBrowser() : await launchFullBrowser();
-
+async function renderOnePage(browser, html) {
+  const page = await browser.newPage();
   try {
-    const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'networkidle0' });
     return await page.pdf({
       format: 'A4',
@@ -107,10 +104,97 @@ async function renderHtmlToPdf(html) {
       margin: { top: '0', right: '0', bottom: '0', left: '0' },
     });
   } finally {
+    await page.close().catch(() => {});
+  }
+}
+
+// AUDIT FIX (P4) — `pool` is optional and this default (single-shot) path is
+// unchanged: launch a browser, render one PDF, close the browser. Correct
+// and simple for every call site that renders exactly one document — every
+// caller except routes/documents.js's own bulk-generate endpoint.
+async function renderHtmlToPdf(html, { pool } = {}) {
+  if (pool) return pool.render(html);
+
+  const engine = resolveEngine();
+  const browser = engine === 'core' ? await launchCoreBrowser() : await launchFullBrowser();
+
+  try {
+    return await renderOnePage(browser, html);
+  } finally {
     // Always close, or a failed render leaks a Chromium process per attempt
     // until the container runs out of memory.
     await browser.close();
   }
 }
 
-module.exports = { renderHtmlToPdf, resolveEngine, LAUNCH_ARGS: CONTAINER_ARGS };
+// AUDIT FIX (P4) — a pool of ONE reused Chromium process for a whole batch
+// of renders, instead of the plain renderHtmlToPdf() path's one process per
+// document. routes/documents.js's /bulk-generate used to be sequential for
+// exactly this reason (its own comment said so): launching a fresh browser
+// PROCESS per document and running several of those at once risked the host
+// running out of memory. A PAGE inside an already-running browser is cheap
+// by comparison — what actually needed bounding was how many pages render
+// at once against that one shared process, which is what POOL_CONCURRENCY
+// does here, in the pool itself, regardless of how many callers call
+// render() concurrently or whether the caller's own loop is bounded too.
+//
+// Scoped to the caller's own lifetime (typically one HTTP request generating
+// several documents) rather than a module-level singleton kept alive
+// indefinitely: createPdfPool()/close() are the caller's to pair, same as
+// launch()/browser.close() always were for the single-shot path above.
+const POOL_CONCURRENCY = 3;
+
+class PdfPool {
+  constructor() {
+    this._browserPromise = null;
+    this._active = 0;
+    this._queue = [];
+  }
+
+  async _getBrowser() {
+    if (!this._browserPromise) {
+      const engine = resolveEngine();
+      this._browserPromise = (engine === 'core' ? launchCoreBrowser() : launchFullBrowser())
+        .catch((err) => { this._browserPromise = null; throw err; });
+    }
+    return this._browserPromise;
+  }
+
+  async _acquire() {
+    if (this._active < POOL_CONCURRENCY) { this._active += 1; return; }
+    await new Promise((resolve) => this._queue.push(resolve));
+    this._active += 1;
+  }
+
+  _release() {
+    this._active -= 1;
+    const next = this._queue.shift();
+    if (next) next();
+  }
+
+  async render(html) {
+    await this._acquire();
+    try {
+      const browser = await this._getBrowser();
+      return await renderOnePage(browser, html);
+    } finally {
+      this._release();
+    }
+  }
+
+  // Closes the one underlying browser process this pool ever launched.
+  // Never launched at all if render() was never called — an empty batch
+  // opens no browser. Safe to call more than once.
+  async close() {
+    if (!this._browserPromise) return;
+    const browser = await this._browserPromise.catch(() => null);
+    this._browserPromise = null;
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
+function createPdfPool() {
+  return new PdfPool();
+}
+
+module.exports = { renderHtmlToPdf, createPdfPool, resolveEngine, LAUNCH_ARGS: CONTAINER_ARGS };

@@ -48,6 +48,13 @@ var APP_SHELL = [
   './portal.js',
   './sign.html',
   './sign.js',
+  // AUDIT FIX (FE5) — same reasoning as TASK 2.17 above: these three are
+  // reachable with no sign-in at all (linked from the sign-in gate and the
+  // portal footer), so a cold cache miss with no signal 404'd them exactly
+  // where every other shell page already worked offline.
+  './privacy.html',
+  './terms.html',
+  './refund-policy.html',
 ];
 
 // Only a Sales Executive's own three lists (CLAUDE.md's role model: "THEIR

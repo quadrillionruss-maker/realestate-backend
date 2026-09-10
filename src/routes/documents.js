@@ -3,6 +3,8 @@ const rateLimit = require('express-rate-limit');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission, isOwnRecordsOnly, salesRepIdsFor, MATCHES_NOTHING } = require('../middleware/rbac');
 const { generateDocument, getDownloadUrl, SIGNABLE_DOC_TYPES, getLegalTemplateHtml } = require('../services/documentService');
+const { createPdfPool } = require('../services/pdfAdapter');
+const { mapWithConcurrency } = require('../utils/concurrency');
 const { audit } = require('../services/auditService');
 const router = express.Router();
 
@@ -136,13 +138,17 @@ router.post('/', requirePermission('documents.create'), async (req, res, next) =
 // POST / then POST /:id/generate already do one at a time. Owner +
 // documentation officer only (permissions.js's documents.bulkGenerate).
 //
-// Sequential, not concurrent — generateDocument renders through a real
-// headless Chromium per call (see generateLimiter's own comment above);
-// running several at once on a constrained host risks the whole request
-// timing out instead of finishing slower but reliably. generateLimiter
+// AUDIT FIX (P4) — used to run strictly sequentially because
+// generateDocument renders through a real headless Chromium PROCESS per
+// call, and running several of those at once risked the whole host running
+// out of memory. A pdfAdapter.js pool (createPdfPool) now reuses ONE browser
+// process for the whole batch — every render here opens a PAGE against it
+// instead of a fresh process — so up to 3 documents (the pool's own
+// concurrency cap) render at once instead of one at a time. generateLimiter
 // itself (40/15min) still applies, so this cannot be used to hammer the
 // renderer either.
 router.post('/bulk-generate', generateLimiter, requirePermission('documents.bulkGenerate'), async (req, res, next) => {
+  const pdfPool = createPdfPool();
   try {
     const projectId = req.body?.project_id;
     const docType = req.body?.doc_type || 'allocation_letter';
@@ -181,8 +187,8 @@ router.post('/bulk-generate', generateLimiter, requirePermission('documents.bulk
     let skipped = 0;
     const failures = [];
 
-    for (const reservation of reservations) {
-      if (alreadyHas.has(reservation.id)) { skipped += 1; continue; }
+    await mapWithConcurrency(reservations, 3, async (reservation) => {
+      if (alreadyHas.has(reservation.id)) { skipped += 1; return; }
 
       try {
         const { data: doc, error: createErr } = await supabaseAdmin
@@ -192,7 +198,7 @@ router.post('/bulk-generate', generateLimiter, requirePermission('documents.bulk
           .single();
         if (createErr) throw createErr;
 
-        const result = await generateDocument(req.orgId, doc.id);
+        const result = await generateDocument(req.orgId, doc.id, { pdfPool });
         if (result.unsupported) throw new Error(`No template for "${docType}" yet.`);
 
         audit(req, {
@@ -206,10 +212,12 @@ router.post('/bulk-generate', generateLimiter, requirePermission('documents.bulk
       } catch (err) {
         failures.push({ reservation_id: reservation.id, reason: err.message });
       }
-    }
+    });
 
     res.json({ generated, skipped, failed: failures.length, failures });
-  } catch (e) { next(e); }
+  } catch (e) { next(e); } finally {
+    await pdfPool.close();
+  }
 });
 
 // Render the allocation letter to PDF, store it in a private Storage bucket,

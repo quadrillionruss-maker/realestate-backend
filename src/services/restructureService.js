@@ -36,10 +36,27 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { createPlanWithSchedule, buildSchedule } = require('./installmentService');
 const { audit } = require('./auditService');
 const outcomes = require('./outcomeService');
+const decisionLedger = require('./decisionLedgerService');
 const projectTimeline = require('./projectTimelineService');
+const approvals = require('./approvalService');
 
 const toKobo = (naira) => Math.round(Number(naira || 0) * 100);
 const toNaira = (kobo) => kobo / 100;
+
+// Decision Ledger — restructuring here is atomic (offer and completion in
+// one call, this file's own SECTION 1 comment below); there is no separate
+// "propose, buyer/owner accepts or declines" step to compare a recommendation
+// against. Rather than skip the trigger or always record was_override:false,
+// this asks a narrower, honest question instead: was the payment history
+// actually calling for a restructure at the moment a human did one? A small,
+// deterministic rule — same "explainable rules, no model call" style
+// aiBrief.js's own fallback brief uses.
+function computeRestructureRecommendation(overdueCount) {
+  if (overdueCount >= 2) {
+    return { action: 'restructure', reason: `${overdueCount} overdue installments on the current plan.` };
+  }
+  return { action: 'hold', reason: 'Fewer than 2 overdue installments — the payment history does not obviously call for a restructure.' };
+}
 
 // The contract value of a plan, restructured or not. One helper so reporting
 // never has to branch on it.
@@ -157,6 +174,23 @@ async function restructure(req, reservationId, {
   if (state.reservation.status === 'cancelled') {
     throw Object.assign(
       new Error('This reservation is cancelled. Reinstate it before restructuring the plan.'),
+      { statusCode: 409 }
+    );
+  }
+  // AUDIT FIX (F2) — an outright reservation always has a one-row plan due
+  // immediately (paymentEvents.js: "An outright reservation always has a
+  // one-row plan due immediately"), and full payment of that single row
+  // triggers completeOutrightSale — reservation -> 'completed', unit ->
+  // 'sold', allocation letter generated — all in the same request the
+  // payment lands in. Restructuring that single row into an installment
+  // plan mid-flight lets a lump-sum sale be spread out after the fact with
+  // no path back: the unit can already be 'sold' by the time this runs, and
+  // there is no rental-style renewal counterpart for "undo an outright
+  // completion that shouldn't have happened yet." Blocked entirely, same as
+  // rentals below.
+  if (state.reservation.property_type === 'outright') {
+    throw Object.assign(
+      new Error('This is an outright sale. It cannot be restructured into an installment plan.'),
       { statusCode: 409 }
     );
   }
@@ -344,7 +378,32 @@ async function restructure(req, reservationId, {
         { outcomeType: 'restructured' }
       );
     }
+
+    // Decision Ledger — see computeRestructureRecommendation's own header
+    // for why this asks "was the data calling for a restructure" rather than
+    // literal propose-then-decline, which this product does not have.
+    // state.schedule is the OLD plan's own schedule, fetched by assess()
+    // before it was superseded above.
+    const overdueCount = state.schedule.filter((row) => row.status === 'overdue').length;
+    const recommendation = computeRestructureRecommendation(overdueCount);
+    await decisionLedger.recordDecision(orgId, {
+      customerId: state.reservation.re_customers.id,
+      reservationId,
+      projectId: state.reservation.re_units?.project_id || null,
+      recommendationType: 'restructure',
+      archtaRecommendation: { action: recommendation.action, reason: recommendation.reason, overdue_count: overdueCount },
+      humanDecision: { action: 'restructured', user_id: req.userId },
+      wasOverride: recommendation.action !== 'restructure',
+    });
   }
+
+  // PROMPT 8 — Unified Approval/Workflow Engine. Restructure has no
+  // separate request/decide step (this file's own computeRestructureRecommendation
+  // comment above, and migrations/092's header) — written already resolved,
+  // the acting director/owner recorded as both requester and approver.
+  await approvals.recordResolved(orgId, {
+    requestType: 'restructure', entityType: 're_reservations', entityId: reservationId, actorUserId: req.userId,
+  });
 
   return {
     plan: linked,
@@ -356,4 +415,8 @@ async function restructure(req, reservationId, {
   };
 }
 
-module.exports = { assess, preview, restructure, contractValue };
+module.exports = {
+  assess, preview, restructure, contractValue,
+  // Exported for logic.test.js — pure, no database, directly unit-testable.
+  computeRestructureRecommendation,
+};

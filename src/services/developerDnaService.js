@@ -8,6 +8,7 @@
 // anywhere in this product to compare "actual" against, so this reads as
 // this workspace's own trailing-12-month coefficient of variation instead).
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { mapWithConcurrency } = require('../utils/concurrency');
 const commissions = require('./commissionService');
 
 const MIN_PEER_ORGS = 5;
@@ -233,15 +234,18 @@ async function recomputeForAllOrgs() {
   const { data: orgRows, error } = await supabaseAdmin.rpc('distinct_reservation_org_ids');
   if (error) throw error;
 
+  // AUDIT FIX (P6) — platform-wide, one org's worth of aggregation queries
+  // at a time, serially. mapWithConcurrency(4) matches every other
+  // correctly-implemented sweep in this codebase.
   let computed = 0;
-  for (const row of orgRows || []) {
+  await mapWithConcurrency(orgRows || [], 4, async (row) => {
     try {
       await recomputeForOrg(row.organization_id);
       computed += 1;
     } catch (err) {
       console.warn(`[developer-dna] could not compute for org ${row.organization_id}:`, err.message);
     }
-  }
+  });
   return { computed };
 }
 

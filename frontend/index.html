@@ -211,9 +211,12 @@
 
         <p class="field-error hidden" id="reg-error" role="alert"></p>
 
-        <p class="field-hint gate-legal">By creating an account, you agree to Archta's
-          <a href="/terms.html" target="_blank" rel="noopener">Terms &amp; Conditions</a> and
-          <a href="/privacy.html" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+        <label class="gate-consent" for="reg-accept-terms">
+          <input type="checkbox" id="reg-accept-terms" required>
+          <span>I agree to Archta's
+            <a href="/terms.html" target="_blank" rel="noopener">Terms &amp; Conditions</a> and
+            <a href="/privacy.html" target="_blank" rel="noopener">Privacy Policy</a>.</span>
+        </label>
 
         <button class="btn primary block lg mt-1" type="submit" id="reg-submit">Create account</button>
 
@@ -313,6 +316,7 @@
         <a class="nav-item" href="#/dashboard" data-nav="dashboard"><span class="ico">◈</span> Command Center</a>
         <a class="nav-item" href="#/at-risk" data-nav="at-risk"><span class="ico">▲</span> At risk <span class="nav-count is-alert hidden" id="count-risk"></span></a>
         <a class="nav-item" href="#/tasks" data-nav="tasks"><span class="ico">✓</span> Tasks <span class="nav-count hidden" id="count-tasks"></span></a>
+        <a class="nav-item" href="#/approvals" data-nav="approvals"><span class="ico">✔</span> Approvals <span class="nav-count is-alert hidden" id="count-approvals"></span></a>
         <a class="nav-item" href="#/logs" data-nav="logs"><span class="ico">☰</span> Log Book</a>
       </div>
 

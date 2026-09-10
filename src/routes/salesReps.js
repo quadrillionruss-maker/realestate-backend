@@ -1,8 +1,17 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
 const { requirePermission } = require('../middleware/rbac');
+const { canAccess } = require('../services/permissions');
 const { audit } = require('../services/auditService');
 const router = express.Router();
+
+// AUDIT FIX (R2/R3) — salesReps.read is deliberately open to documentation
+// too (they need to know who to route a document to), but commission_rate
+// is exactly the kind of figure permissions.js's financial.view exists to
+// hide from that role ("Documentation never sees a naira figure",
+// CLAUDE.md) — same pattern routes/customers.js and routes/search.js
+// already use for their own financial fields.
+const stripCommissionRate = (req, rep) => (canAccess(req.orgRole, 'financial.view') ? rep : { ...rep, commission_rate: null });
 
 // A sales rep is a platform user tagged for this product, joined here to their
 // profile so the UI can show a name rather than a UUID.
@@ -18,7 +27,7 @@ router.get('/', requirePermission('salesReps.read'), async (req, res, next) => {
 
     const { data, error } = await query;
     if (error) throw error;
-    res.json(data);
+    res.json((data || []).map((rep) => stripCommissionRate(req, rep)));
   } catch (e) { next(e); }
 });
 
@@ -153,20 +162,23 @@ router.get('/:id/summary', requirePermission('salesReps.read'), async (req, res,
       .eq('active', true)
       .neq('id', rep.id);
 
+    // AUDIT FIX (R2/R3) — same commission_rate boundary as the list above.
+    const canSeeFinancials = canAccess(req.orgRole, 'financial.view');
+
     res.json({
       rep: {
         id: rep.id,
         name: rep.users?.full_name || rep.users?.email || 'Unnamed rep',
         email: rep.users?.email || null,
         active: rep.active,
-        commission_rate: Number(rep.commission_rate || 0),
+        commission_rate: canSeeFinancials ? Number(rep.commission_rate || 0) : null,
       },
       total_reservations: rows.length,
       active_reservations: rows.filter((r) => ['reserved', 'confirmed'].includes(r.status)).length,
       other_reps: (others || []).map((r) => ({
         id: r.id,
         name: r.users?.full_name || r.users?.email || 'Unnamed rep',
-        commission_rate: Number(r.commission_rate || 0),
+        commission_rate: canSeeFinancials ? Number(r.commission_rate || 0) : null,
       })),
     });
   } catch (e) { next(e); }

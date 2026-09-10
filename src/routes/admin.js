@@ -16,6 +16,7 @@ const env = require('../config/env');
 const adminService = require('../services/adminService');
 const onboarding = require('../services/onboardingService');
 const clientErrors = require('../services/clientErrorService');
+const aiEvaluation = require('../services/aiEvaluationService');
 
 const router = express.Router();
 
@@ -148,8 +149,26 @@ router.get('/health', wrap(async (req, res) => {
   res.json(await adminService.health());
 }));
 
+// AUDIT FIX (AD7) — the sidebar used to show a static "Archta Admin" label
+// with nothing distinguishing one deploy from the next, so "did my change
+// actually ship" had no answer short of checking Render directly.
+router.get('/version', wrap(async (req, res) => {
+  res.json(adminService.version());
+}));
+
 router.get('/migrations', wrap(async (req, res) => {
   res.json(await adminService.migrationStatus());
+}));
+
+// AI Evaluation System — runs tests/ai-evaluation/cases.js against a
+// reserved, synthetic eval workspace (aiEvaluationService.js's own header
+// explains why a GET here is safe despite writing rows) and reports
+// pass/fail per case with the actual answer produced. Rarely called —
+// gated behind an explicit "Run AI evaluation" button in the admin
+// dashboard's Health tab, not fetched on every tab load, since each run
+// costs real OpenAI calls.
+router.get('/ai-evaluation', wrap(async (req, res) => {
+  res.json(await aiEvaluation.runEvaluation());
 }));
 
 router.get('/revenue', wrap(async (req, res) => {
@@ -173,10 +192,23 @@ router.get('/client-errors', wrap(async (req, res) => {
 // JWT / org context here to attach (adminAuth is a single shared secret,
 // not a session), so orgId/userId are simply omitted; migrations/054 makes
 // both columns nullable for exactly this case.
+// AUDIT FIX (AD10) — admin.js no longer sends `screen` separately; it is the
+// fragment of `url` (everything from '#' on), so it is derived here instead
+// of carrying the same value twice over the wire. Malformed/relative `url`
+// values fail `new URL()` — caught rather than 400ing a report over the one
+// field that is least essential to it.
+function screenFromUrl(url) {
+  try {
+    return new URL(url).hash || null;
+  } catch {
+    return null;
+  }
+}
+
 router.post('/client-errors', wrap(async (req, res) => {
-  const { message, stack, screen, url, user_agent } = req.body || {};
+  const { message, stack, url, user_agent } = req.body || {};
   if (!message) return res.status(400).json({ error: 'message is required' });
-  await clientErrors.report({ app: 'admin', message, stack, screen, url, userAgent: user_agent });
+  await clientErrors.report({ app: 'admin', message, stack, screen: screenFromUrl(url), url, userAgent: user_agent });
   res.status(201).json({ reported: true });
 }));
 

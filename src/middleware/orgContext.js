@@ -74,6 +74,27 @@ const SOFT_DELETABLE = new Set([
   // there is no delete-a-campaign route or UI to reach it through, and
   // building one is a separate feature, not a defensive-consistency fix.
   're_campaigns',
+  // AUDIT FIX (D1) — the rest of the cascade-gap tables (migrations/083):
+  // real children of a buyer, a reservation or a joint sale that shipped
+  // after migrations/005 with no deleted_at at all. re_community_posts and
+  // re_community_replies already had the column (migrations/037) but were
+  // never added here either — src/routes/reports.js's community CSV export
+  // is a live example of the "hundred-and-fiftieth site" this set exists to
+  // cover: it selects re_community_posts directly with no hand-written
+  // filter, so a deleted post used to still print in the export.
+  're_legal_cases', 're_financing_requests', 're_hardship_requests', 're_messages',
+  're_scheduled_messages', 're_satisfaction_surveys', 're_customer_referrals',
+  're_joint_sales', 're_joint_sale_parties', 're_community_posts', 're_community_replies',
+  // AUDIT FIX (D5) — re_activities has carried deleted_at since its very
+  // first migration (029) but was never added here, so every read site
+  // (routes/customers.js, aiBrief.js, contactTimingService.js,
+  // defaultRiskService.js, projectHealthService.js) had to remember to add
+  // `.is('deleted_at', null)` by hand — and backupService.js's workspace
+  // export didn't, so a deleted activity note still printed in a backup.
+  // Same "hundred-and-fiftieth site" gap D1 closed for re_campaigns and
+  // re_community_posts above; the existing hand-written filters at the
+  // other call sites are now redundant but harmless.
+  're_activities',
 ]);
 
 const supabaseAdmin = Object.create(supabaseRaw);

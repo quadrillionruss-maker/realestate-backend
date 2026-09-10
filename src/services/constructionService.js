@@ -5,6 +5,7 @@
 // ensureMilestones() — so this works uniformly for a project created before
 // this feature existed and one created after, with no backfill migration.
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { mapWithConcurrency } = require('../utils/concurrency');
 const { uploadMedia, MAX_MEDIA_BYTES } = require('./documentStorage');
 const { sendEmail } = require('./notificationService');
 const { audit } = require('./auditService');
@@ -256,9 +257,14 @@ async function notifyBuyersOfMilestone(orgId, projectId, milestone) {
   const seen = new Set();
   let sent = 0;
 
-  for (const reservation of reservations || []) {
+  // AUDIT FIX (P7) — an email per buyer on the project, run one at a time;
+  // a large project's whole buyer list waited on this serially.
+  // mapWithConcurrency(4) matches every other correctly-implemented sweep
+  // in this codebase. seen/sent are safe to share across workers — both are
+  // only ever touched by synchronous statements with no await in between.
+  await mapWithConcurrency(reservations || [], 4, async (reservation) => {
     const customer = reservation.re_customers;
-    if (!customer || !customer.email || seen.has(customer.id)) continue;
+    if (!customer || !customer.email || seen.has(customer.id)) return;
     seen.add(customer.id);
 
     const greeting = `Good news — your development has reached ${milestone.name}. `
@@ -275,7 +281,7 @@ async function notifyBuyersOfMilestone(orgId, projectId, milestone) {
       relatedId: milestone.id,
     });
     sent += 1;
-  }
+  });
 
   await supabaseAdmin
     .from('re_construction_milestones')

@@ -42,6 +42,21 @@
   // bundler, and this product deliberately has none (CLAUDE.md).
   var CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
+  // AUDIT FIX (FE4) — one idempotency key per queued submission, generated
+  // ONCE at queue time and reused for every attempt (the first, live one in
+  // submitOrQueue AND every later replay in syncQueue) — never regenerated
+  // per attempt, or a retry would just look like a brand new submission to
+  // the server and defeat the whole point. Not a security token — just
+  // needs to be practically unique — so crypto.randomUUID() with a
+  // Math.random fallback (same reasoning buildEntry's own `id` below
+  // already uses one for) rather than requiring a feature not every
+  // in-field device's browser has yet.
+  function newIdempotencyKey() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+    return 'k-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
+      + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
   // ── Pure: building and reading the queue ─────────────────────────────
   function buildEntry(type, path, payload) {
     return {
@@ -49,6 +64,7 @@
       type: type, // 'new_buyer' | 'new_reservation' | 'log_activity'
       path: path, // the api() path to POST to once back online
       payload: payload,
+      idempotencyKey: newIdempotencyKey(),
       status: 'pending', // 'pending' | 'syncing' | 'failed'
       queued_at: new Date().toISOString(),
       attempts: 0,
@@ -144,15 +160,25 @@
   // (400 validation, 403, a duplicate) must reach the caller normally, or a
   // rep would see "saved" for a submission the server actually refused.
   async function submitOrQueue(type, path, payload) {
+    // AUDIT FIX (FE4) — the key is generated before the FIRST attempt (not
+    // only once an entry is actually queued), so if this live call reaches
+    // the server and succeeds there but the response never makes it back
+    // (the connection drops mid-response — indistinguishable from the
+    // request never arriving at all, from here), the entry queued below
+    // carries the SAME key and the eventual replay is caught server-side
+    // as a duplicate rather than creating a second row.
+    var idempotencyKey = newIdempotencyKey();
+
     if (!R.state.user || R.state.user.role !== 'sales_rep') {
-      return { queued: false, data: await R.api.post(path, payload) };
+      return { queued: false, data: await R.api.post(path, payload, { 'X-Idempotency-Key': idempotencyKey }) };
     }
     try {
-      var data = await R.api.post(path, payload);
+      var data = await R.api.post(path, payload, { 'X-Idempotency-Key': idempotencyKey });
       return { queued: false, data: data };
     } catch (err) {
       if (err.status !== 0) throw err;
       var entry = buildEntry(type, path, payload);
+      entry.idempotencyKey = idempotencyKey;
       await add(entry);
       refreshSyncBadge();
       return { queued: true, entry: entry };
@@ -174,7 +200,11 @@
         await updateEntry(entry.id, { status: 'syncing' });
         refreshSyncBadge();
         try {
-          await R.api.post(entry.path, entry.payload);
+          // AUDIT FIX (FE4) — the SAME key this entry was queued with
+          // (buildEntry/submitOrQueue), not a fresh one, so a retry of a
+          // submission that actually landed the first time is recognised
+          // as one by the backend rather than creating a second row.
+          await R.api.post(entry.path, entry.payload, { 'X-Idempotency-Key': entry.idempotencyKey });
           await remove(entry.id);
           if (onSynced) onSynced(entry);
         } catch (err) {

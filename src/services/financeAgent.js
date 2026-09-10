@@ -52,7 +52,10 @@ function buildInvestorReportHtml(report, branding) {
     .replace(/{{TOTAL_COLLECTED}}/g, escapeHtml(naira(report.totals.collected_total)))
     .replace(/{{TOTAL_OVERDUE}}/g, escapeHtml(naira(report.totals.receivables_overdue)))
     .replace(/{{ROWS_BLOCK}}/g, rows || '<tr><td colspan="6">No projects on record.</td></tr>')
-    .replace(/{{GENERATED_AT}}/g, escapeHtml(new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })));
+    // AUDIT FIX (N2) — timeZone pinned to Africa/Lagos, not the server's own
+    // (UTC on Render). Without it, a report generated in the 23:00-23:59 UTC
+    // window — already past midnight in Lagos — printed yesterday's date.
+    .replace(/{{GENERATED_AT}}/g, escapeHtml(new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Africa/Lagos' })));
 }
 
 // investor_emails is a comma-separated free-text column (migrations/028) —

@@ -41,6 +41,21 @@ create table if not exists re_recovery_playbook (
   constraint re_recovery_playbook_org_stage_unique unique (organization_id, escalation_stage)
 );
 
+-- AUDIT FIX (D7) — recovery_rate is a fraction (numeric(5,4) tops out at
+-- 9.9999, so 1.0000 is "100%"), computed by dividing a paid count by a
+-- sample_size count elsewhere (recoveryPlaybookService.js). Nothing at the
+-- database level stopped a division bug or a bad backfill from writing
+-- something outside 0..1 and having every screen that reads this table
+-- quietly display a nonsense percentage.
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 're_recovery_playbook_recovery_rate_check') then
+    alter table re_recovery_playbook
+      add constraint re_recovery_playbook_recovery_rate_check
+      check (recovery_rate is null or (recovery_rate >= 0 and recovery_rate <= 1));
+  end if;
+end $$;
+
 alter table re_recovery_playbook enable row level security;
 drop policy if exists "org members access re_recovery_playbook" on re_recovery_playbook;
 

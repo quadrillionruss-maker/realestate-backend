@@ -34,6 +34,24 @@
     return '₦' + n.toLocaleString('en-NG', { maximumFractionDigits: 0 });
   }
 
+  // AUDIT FIX (AD13) — same staleness guard loadAgents() already applies by
+  // hand (agentLoadToken, further down) generalized for reuse across every
+  // other section. Two overlapping requests for the SAME section — two
+  // quick clicks on the refresh button, or a fast navigate-away-and-back —
+  // can resolve out of order; without this, a slower earlier response
+  // landing after a faster later one silently overwrites the screen with
+  // outdated data. start() is called right before firing the request,
+  // isStale(mine) once its response lands — true means a newer call for
+  // this same section has already started, so this response must be
+  // dropped rather than painted.
+  function staleGuard() {
+    var token = 0;
+    return {
+      start: function () { return ++token; },
+      isStale: function (mine) { return mine !== token; },
+    };
+  }
+
   function fmtDate(value) {
     if (!value) return '—';
     var d = new Date(value);
@@ -88,6 +106,50 @@
     });
   }
 
+  // ── Global error capture ─────────────────────────────────────────────
+  // AUDIT FIX (FE3) — same pattern realestate.js's own reportClientError
+  // uses, posting to the admin-specific endpoint (routes/admin.js's own
+  // POST /client-errors) that already existed and tags reports app:'admin'
+  // — this page just never called it. Fire-and-forget and self-contained:
+  // a reporter that itself threw would recurse through the very 'error'
+  // listener it's registered on, so the whole body is wrapped.
+  function reportClientError(message, stack) {
+    try {
+      if (!sessionStorage.getItem(SECRET_KEY)) return; // not signed in yet — nothing to attach the report to
+      api('/client-errors', {
+        method: 'POST',
+        body: {
+          message: String(message || '(no message)'),
+          stack: stack || null,
+          // AUDIT FIX (AD10) — window.location.hash is already a substring of
+          // window.location.href below (the fragment after '#'); sending both
+          // duplicated the same value under two keys. The server derives
+          // `screen` from `url` instead (routes/admin.js), so grouping by
+          // screen in the Errors tab is unchanged.
+          url: window.location.href,
+          user_agent: navigator.userAgent,
+        },
+      }).catch(function () { /* nothing to do if even the report fails */ });
+    } catch (e) { /* the reporter must never itself throw */ }
+  }
+
+  try {
+    window.addEventListener('error', function (event) {
+      reportClientError(
+        event.error ? event.error.message : event.message,
+        event.error ? event.error.stack : null
+      );
+    });
+
+    window.addEventListener('unhandledrejection', function (event) {
+      var reason = event.reason;
+      reportClientError(
+        reason instanceof Error ? reason.message : String(reason),
+        reason instanceof Error ? reason.stack : null
+      );
+    });
+  } catch (e) { /* no-op outside a real browser */ }
+
   // ── Login ──────────────────────────────────────────────────────────────
   var loginScreen = document.getElementById('login-screen');
   var appShell = document.getElementById('app-shell');
@@ -106,12 +168,38 @@
     // matters at all.
     var hashSection = String(window.location.hash || '').replace(/^#/, '');
     goToSection(SECTIONS[hashSection] ? hashSection : 'overview');
+
+    // AUDIT FIX (AD7) — a real build identifier instead of the static
+    // "Archta Admin" label the sidebar always showed. Best-effort: this is
+    // cosmetic, so a failed fetch just leaves the static label in place
+    // rather than doing anything a signed-in admin would notice or care about.
+    api('/version').then(function (result) {
+      var el = document.querySelector('.sidebar-version');
+      if (el && result.version) el.textContent = 'v' + result.version;
+    }).catch(function () {});
   }
 
   document.getElementById('btn-sign-out').addEventListener('click', function () {
     sessionStorage.removeItem(SECRET_KEY);
     window.location.reload();
   });
+
+  // AUDIT FIX (AD2/AD3) — same 401-redirect + Errors-tab-report pattern
+  // goToSection's own catch (below) already applies to a full section
+  // load, factored out for callers that fire from content ALREADY on
+  // screen — a filter change, a manual refresh — where wiping the whole
+  // view the way goToSection does would throw away what's already
+  // rendered for no reason. A toast instead.
+  function handleActionError(err) {
+    if (err.status === 401) {
+      sessionStorage.removeItem(SECRET_KEY);
+      loginScreen.hidden = false;
+      appShell.hidden = true;
+      return;
+    }
+    if (typeof err.status !== 'number') reportClientError(err.message, err.stack);
+    toast(err.message, 'err');
+  }
 
   loginForm.addEventListener('submit', function (e) {
     e.preventDefault();
@@ -152,7 +240,17 @@
   function startOverviewAutoRefresh() {
     stopOverviewAutoRefresh();
     overviewAutoRefreshTimer = setInterval(function () {
-      if (currentSection === 'overview') renderOverview().catch(function () {});
+      // AUDIT FIX (AD11) — the .catch() below only guards a REJECTED
+      // promise; a synchronous throw before renderOverview() even returns
+      // one would otherwise escape this callback uncaught, and (depending on
+      // the environment) a tick that throws can be the last one that ever
+      // fires. try/catch guarantees one bad tick never stops the schedule —
+      // startOverviewAutoRefresh only re-arms on a SUCCESSFUL render
+      // (see renderOverview), so this interval is what keeps retrying
+      // through a run of transient failures.
+      try {
+        if (currentSection === 'overview') renderOverview().catch(function () {});
+      } catch (e) { /* transient failure — the next tick tries again */ }
     }, 5 * 60 * 1000);
   }
 
@@ -190,8 +288,13 @@
     var btn = e.target.closest('#btn-section-refresh');
     if (!btn || !currentSection) return;
     btn.classList.add('is-spinning');
+    // AUDIT FIX (AD3) — used to just blank the whole section with the raw
+    // error text, with no 401 handling and nothing reaching the Errors
+    // tab. A refresh failing leaves whatever was already on screen alone
+    // (removing the spin so the button does not stay stuck) and toasts.
     SECTIONS[currentSection]().catch(function (err) {
-      view.innerHTML = '<div class="empty">' + esc(err.message) + '</div>';
+      btn.classList.remove('is-spinning');
+      handleActionError(err);
     });
   });
 
@@ -227,8 +330,11 @@
   }
 
   // ── Overview ───────────────────────────────────────────────────────────
+  var overviewGuard = staleGuard();
   function renderOverview() {
+    var mine = overviewGuard.start();
     return api('/overview').then(function (d) {
+      if (overviewGuard.isStale(mine)) return;
       overviewLastRefreshedAt = new Date();
       view.innerHTML =
         pageTitleRow('Overview') +
@@ -264,8 +370,11 @@
   var MRR_BAR_HEIGHT_CLASSES = ['h0', 'h10', 'h20', 'h30', 'h40', 'h50', 'h60', 'h70', 'h80', 'h90', 'h100'];
   var MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+  var revenueGuard = staleGuard();
   function renderRevenue() {
+    var mine = revenueGuard.start();
     return api('/revenue').then(function (d) {
+      if (revenueGuard.isStale(mine)) return;
       var peak = Math.max.apply(null, d.monthly_mrr_last_12.map(function (m) { return m.mrr; }).concat([1]));
 
       view.innerHTML =
@@ -275,7 +384,14 @@
           kpi('Paying customers', d.total_paying_customers) +
           kpi('Avg revenue / customer', naira(d.average_revenue_per_customer)) +
           kpi('Churn rate (this month)', d.churn_rate + '%') +
-          kpi('Monthly growth rate', (d.monthly_growth_rate > 0 ? '+' : '') + d.monthly_growth_rate + '%') +
+          // AUDIT FIX (AD8) — adminService.revenue() sends null, not 0, when
+          // there was no MRR at the start of this month to grow from (the
+          // platform's first month) — "+0%"/"0%" reads as real flat growth,
+          // a different and false claim from "there is nothing to compare
+          // against yet".
+          kpi('Monthly growth rate', d.monthly_growth_rate == null
+            ? 'First month'
+            : (d.monthly_growth_rate > 0 ? '+' : '') + d.monthly_growth_rate + '%') +
           kpi('Plans represented', Object.keys(d.mrr_by_plan).length) +
         '</div>' +
 
@@ -331,8 +447,11 @@
     return USAGE_HEAT_CLASSES[bucket];
   }
 
+  var usageGuard = staleGuard();
   function renderUsage() {
+    var mine = usageGuard.start();
     return api('/feature-usage').then(function (d) {
+      if (usageGuard.isStale(mine)) return;
       var features = d.features || Object.keys(USAGE_FEATURE_LABEL);
       var sortedFeatures = features.slice().sort(function (a, b) { return (d.by_feature[b] || 0) - (d.by_feature[a] || 0); });
 
@@ -366,8 +485,14 @@
                 return '<tr><td>' + esc(w.name) + '</td>' +
                   features.map(function (f) {
                     var count = w.features[f] || 0;
+                    // AUDIT FIX (AD9) — the one cell in this file whose
+                    // content landed in markup with no esc() call at all
+                    // (the title attribute right above it already had one).
+                    // count is always a number today, so this was never
+                    // exploitable, but it's the one interpolation with no
+                    // escaping path if that ever stops being true.
                     return '<td class="usage-cell ' + usageHeatClass(count, maxCell) + '" title="' + esc((USAGE_FEATURE_LABEL[f] || f) + ': ' + count) + '">' +
-                      (count || '') + '</td>';
+                      esc(count || '') + '</td>';
                   }).join('') +
                 '</tr>';
               }).join('') +
@@ -386,10 +511,30 @@
   var clientErrorsCache = [];
   var openErrorGroupKey = null;
 
+  // AUDIT FIX (AD4) — two occurrences of the same bug rarely produce
+  // byte-identical text: a line:column reference shifts with every deploy,
+  // a memory address is different every process, and an id or amount
+  // embedded in the message (a customer id, a status code, a count) is
+  // different every time by definition — none of that changes WHICH bug
+  // this is. Grouping on the raw message scattered one recurring bug
+  // across dozens of one-row "groups", each reading as an isolated
+  // one-off. Used only to build the grouping key below — the displayed
+  // message (g.message) stays the real, original text of the row grouped
+  // into it, so an admin reading a group still sees a concrete example,
+  // not a genericized placeholder.
+  function normalizeErrorMessage(message) {
+    return String(message || '')
+      .replace(/0x[0-9a-f]+/gi, '0xN')
+      .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, '<uuid>')
+      .replace(/:\d+:\d+\)?/g, ':N:N')
+      .replace(/\bline \d+\b/gi, 'line N')
+      .replace(/\b\d+\b/g, 'N');
+  }
+
   function groupClientErrors(rows) {
     var byKey = new Map();
     rows.forEach(function (r) {
-      var key = r.app + '|' + (r.screen || '') + '|' + r.message;
+      var key = r.app + '|' + (r.screen || '') + '|' + normalizeErrorMessage(r.message);
       if (!byKey.has(key)) {
         byKey.set(key, {
           key: key, app: r.app, screen: r.screen, message: r.message,
@@ -410,8 +555,11 @@
     });
   }
 
+  var clientErrorsGuard = staleGuard();
   function renderClientErrors() {
+    var mine = clientErrorsGuard.start();
     return api('/client-errors').then(function (rows) {
+      if (clientErrorsGuard.isStale(mine)) return;
       clientErrorsCache = rows;
       paintClientErrors();
     });
@@ -489,14 +637,25 @@
   var onboardingCache = {}; // SECTION 23 — org id -> checklist response, fetched lazily on row expand
   var PROGRESS_WIDTH_CLASSES = ['w0', 'w10', 'w20', 'w30', 'w40', 'w50', 'w60', 'w70', 'w80', 'w90', 'w100'];
 
+  var workspacesGuard = staleGuard();
   function renderWorkspaces() {
+    var mine = workspacesGuard.start();
     return api('/workspaces').then(function (rows) {
+      if (workspacesGuard.isStale(mine)) return;
       workspacesCache = rows;
       paintWorkspaces('');
     });
   }
 
-  function paintWorkspaces(filterText) {
+  // AUDIT FIX (AD12) — focusSearch defaults true (initial load from
+  // renderWorkspaces, and every keystroke in the box itself, both need the
+  // rebuilt input refocused with its cursor restored — see AD12's own note
+  // at the row-click handler below for why a plain re-render would
+  // otherwise make typing impossible). The three row-click-triggered
+  // repaints below pass false: expanding or collapsing a row is not a
+  // reason to yank focus back to a search box the admin was not using.
+  function paintWorkspaces(filterText, focusSearch) {
+    if (focusSearch === undefined) focusSearch = true;
     var filtered = workspacesCache.filter(function (w) {
       if (!filterText) return true;
       var hay = (w.name + ' ' + (w.owner_email || '')).toLowerCase();
@@ -514,8 +673,10 @@
 
     var wsSearchInput = document.getElementById('ws-search');
     wsSearchInput.addEventListener('input', function (e) { paintWorkspaces(e.target.value); });
-    wsSearchInput.focus();
-    wsSearchInput.setSelectionRange(wsSearchInput.value.length, wsSearchInput.value.length);
+    if (focusSearch) {
+      wsSearchInput.focus();
+      wsSearchInput.setSelectionRange(wsSearchInput.value.length, wsSearchInput.value.length);
+    }
 
     Array.prototype.forEach.call(document.querySelectorAll('tr[data-ws-row]'), function (tr) {
       tr.addEventListener('click', function (e) {
@@ -523,15 +684,15 @@
         var id = tr.dataset.wsRow;
         if (openWorkspaceId === id) {
           openWorkspaceId = null;
-          paintWorkspaces(filterText);
+          paintWorkspaces(filterText, false);
           return;
         }
         openWorkspaceId = id;
-        paintWorkspaces(filterText);
+        paintWorkspaces(filterText, false);
         if (!onboardingCache[id]) {
           api('/workspaces/' + id + '/onboarding').then(function (data) {
             onboardingCache[id] = data;
-            if (openWorkspaceId === id) paintWorkspaces(filterText);
+            if (openWorkspaceId === id) paintWorkspaces(filterText, false);
           }).catch(function () { /* best-effort — the rest of the detail panel still works */ });
         }
       });
@@ -674,8 +835,11 @@
   // ── Users ──────────────────────────────────────────────────────────────
   var usersCache = [];
 
+  var usersGuard = staleGuard();
   function renderUsers() {
+    var mine = usersGuard.start();
     return api('/users').then(function (rows) {
+      if (usersGuard.isStale(mine)) return;
       usersCache = rows;
       paintUsers('');
     });
@@ -811,7 +975,11 @@
             '<td>' + esc(r.org_name) + '</td>' +
             '<td>' + esc(r.customer_name || '—') + '</td>' +
             '<td>' + esc(r.action_type) + '</td>' +
-            '<td>' + badge(r.outcome === 'success', 'Success', esc(r.outcome)) + '</td>' +
+            // AUDIT FIX (AD5) — badge() already runs its label through esc()
+            // internally; wrapping r.outcome in esc() here too double-escaped
+            // it (an outcome value carrying an '&' or similar printed as the
+            // literal entity "&amp;" instead of the character itself).
+            '<td>' + badge(r.outcome === 'success', 'Success', r.outcome) + '</td>' +
             '<td>' + timeAgo(r.created_at) + '<span class="cell-sub mono">' + fmtDate(r.created_at) + '</span></td>' +
             '</tr>';
         }).join('') : '<tr><td colspan="6"><div class="empty">No agent actions match.</div></td></tr>') +
@@ -825,9 +993,22 @@
       orgInput.focus();
       orgInput.setSelectionRange(orgInput.value.length, orgInput.value.length);
 
-      orgInput.addEventListener('input', function (e) { agentFilters.org = e.target.value; loadAgents(); });
-      document.getElementById('agent-name-filter').addEventListener('change', function (e) { agentFilters.agent = e.target.value; loadAgents(); });
-      document.getElementById('agent-outcome-filter').addEventListener('change', function (e) { agentFilters.outcome = e.target.value; loadAgents(); });
+      // AUDIT FIX (AD2) — loadAgents() returns the api() promise with
+      // nothing attached to it here; a failure (a 401, a dropped
+      // connection) used to become an unhandled rejection with no 401
+      // redirect, no toast, and nothing reaching the Errors tab.
+      orgInput.addEventListener('input', function (e) {
+        agentFilters.org = e.target.value;
+        loadAgents().catch(handleActionError);
+      });
+      document.getElementById('agent-name-filter').addEventListener('change', function (e) {
+        agentFilters.agent = e.target.value;
+        loadAgents().catch(handleActionError);
+      });
+      document.getElementById('agent-outcome-filter').addEventListener('change', function (e) {
+        agentFilters.outcome = e.target.value;
+        loadAgents().catch(handleActionError);
+      });
     });
   }
 
@@ -853,8 +1034,11 @@
     return '***' + digits.slice(-4);
   }
 
+  var notificationsGuard = staleGuard();
   function renderNotifications() {
+    var mine = notificationsGuard.start();
     return api('/notifications').then(function (d) {
+      if (notificationsGuard.isStale(mine)) return;
       var byType = Object.keys(d.by_type || {}).map(function (k) {
         return kpi(k, d.by_type[k]);
       }).join('');
@@ -881,11 +1065,59 @@
   var healthCache = null;
   var migrationSortUnappliedFirst = false;
 
+  var healthGuard = staleGuard();
   function renderHealth() {
+    var mine = healthGuard.start();
     return api('/health').then(function (d) {
+      if (healthGuard.isStale(mine)) return;
       healthCache = d;
       paintHealth();
     });
+  }
+
+  // AI EVALUATION SYSTEM — "AI Accuracy". Not fetched automatically with the
+  // rest of Health: GET /ai-evaluation reseeds a synthetic workspace and
+  // asks Archta Intelligence every case in tests/ai-evaluation/cases.js for
+  // real, so every run costs actual OpenAI calls. aiEvalCache stays null
+  // until an admin explicitly clicks "Run AI evaluation" below, and holds
+  // the last run's results (not re-fetched on every Health repaint) until
+  // they click it again.
+  var aiEvalCache = null;
+  var aiEvalRunning = false;
+
+  function aiAccuracyCard() {
+    var body;
+    if (aiEvalRunning) {
+      body = '<p class="muted">Running evaluation cases against a synthetic workspace — this calls OpenAI for real and can take a little while…</p>';
+    } else if (!aiEvalCache) {
+      body = '<p class="muted">Not run yet this session. Each run reseeds a small synthetic workspace and asks Archta Intelligence real questions against it.</p>';
+    } else {
+      body =
+        '<div class="kpi-grid">' +
+          kpi('Passed', aiEvalCache.pass_count + ' / ' + aiEvalCache.total) +
+          kpi('Last run', fmtDate(aiEvalCache.ran_at)) +
+        '</div>' +
+        '<div class="table-wrap"><table class="data"><thead><tr>' +
+          '<th>Case</th><th>Result</th><th>Answer produced</th><th>Expected reasoning</th>' +
+        '</tr></thead><tbody>' +
+        aiEvalCache.results.map(function (r) {
+          return '<tr><td>' + esc(r.question) +
+            (r.missing_data_keys.length ? '<div class="muted">Missing context: ' + esc(r.missing_data_keys.join(', ')) + '</div>' : '') +
+            (r.matched_forbidden_claims.length ? '<div class="muted">Forbidden phrase found: ' + esc(r.matched_forbidden_claims.join(', ')) + '</div>' : '') +
+            '</td>' +
+            '<td>' + badge(r.passed, 'Pass', 'Fail') + '<div class="muted">' + esc(r.generated_by) + '</div></td>' +
+            '<td>' + esc(r.actual_answer) + '</td>' +
+            '<td class="muted">' + esc(r.expected_reasoning) + '</td>' +
+            '</tr>';
+        }).join('') +
+        '</tbody></table></div>';
+    }
+
+    return '<div class="card"><div class="card-head"><h2>AI Accuracy</h2>' +
+        '<button class="btn sm" id="btn-run-ai-eval"' + (aiEvalRunning ? ' disabled' : '') + '>' +
+          (aiEvalRunning ? 'Running…' : 'Run AI evaluation') +
+        '</button>' +
+      '</div>' + body + '</div>';
   }
 
   function paintHealth() {
@@ -916,11 +1148,27 @@
       migrations.map(function (m) {
         return '<tr><td class="mono">' + esc(m.file) + '</td><td>' + badge(m.applied, 'Applied', 'Not applied') + '</td></tr>';
       }).join('') +
-      '</tbody></table></div></div>';
+      '</tbody></table></div></div>' +
+      aiAccuracyCard();
 
     document.getElementById('btn-migration-sort').addEventListener('click', function () {
       migrationSortUnappliedFirst = !migrationSortUnappliedFirst;
       paintHealth();
+    });
+
+    document.getElementById('btn-run-ai-eval').addEventListener('click', function () {
+      if (aiEvalRunning) return;
+      aiEvalRunning = true;
+      paintHealth();
+      api('/ai-evaluation').then(function (result) {
+        aiEvalCache = result;
+        aiEvalRunning = false;
+        paintHealth();
+      }).catch(function (err) {
+        aiEvalRunning = false;
+        paintHealth();
+        toast(err.message, 'err');
+      });
     });
   }
 

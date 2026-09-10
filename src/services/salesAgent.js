@@ -12,6 +12,7 @@
 // than silently reinterpreted, the same way documentAgent.js notes its own
 // "allocation letter" → SIGNABLE_DOC_TYPES mapping.
 const { supabaseAdmin } = require('../middleware/orgContext');
+const { mapWithConcurrency } = require('../utils/concurrency');
 const dealManager = require('./dealManager');
 
 const AGENT_NAME = 'sales_agent';
@@ -21,6 +22,18 @@ const TEMPLATES = {
   followup: 'sales_agent_followup',
   checkin: 'sales_agent_checkin',
 };
+// AUDIT FIX (A7/P3) — run() used to fetch every re_customers row this org
+// has ever had, unfiltered and unlimited, in one request — a read that
+// grows forever as an org's total buyer count grows, the same class of
+// problem migrations/010's distinct_reservation_org_ids() was written to
+// fix for the org-enumeration side of this same daily job. LEAD_PAGE_SIZE
+// pages through it instead.
+const LEAD_PAGE_SIZE = 500;
+// Same concurrency jobs/daily.js's own per-org loop and collectionsAgent.js
+// use — a WhatsApp send or a database round trip per lead, run one at a
+// time, turned a large org's morning sweep into minutes of serial network
+// waiting that could have overlapped.
+const LEAD_CONCURRENCY = 4;
 
 const naira = (amount) => {
   const n = Number(amount || 0);
@@ -65,15 +78,31 @@ function bucketFor(ageDays) {
   return 'checkin';
 }
 
+// Pages through the org's full customer list rather than one unbounded
+// select — see LEAD_PAGE_SIZE's own comment above.
+async function fetchAllLeads(orgId) {
+  const leads = [];
+  let offset = 0;
+  for (;;) {
+    const { data, error } = await supabaseAdmin
+      .from('re_customers')
+      .select('id, full_name, phone, whatsapp_opt_out, created_at, re_reservations(status)')
+      .eq('organization_id', orgId)
+      .order('id', { ascending: true })
+      .range(offset, offset + LEAD_PAGE_SIZE - 1);
+    if (error) throw error;
+    leads.push(...(data || []));
+    if (!data || data.length < LEAD_PAGE_SIZE) break;
+    offset += LEAD_PAGE_SIZE;
+  }
+  return leads;
+}
+
 async function run(orgId) {
-  const { data: leads, error } = await supabaseAdmin
-    .from('re_customers')
-    .select('id, full_name, phone, whatsapp_opt_out, created_at, re_reservations(status)')
-    .eq('organization_id', orgId);
-  if (error) throw error;
+  const leads = await fetchAllLeads(orgId);
 
   const asArray = (value) => (Array.isArray(value) ? value : value ? [value] : []);
-  const unconverted = (leads || []).filter(
+  const unconverted = leads.filter(
     (c) => c.phone && !asArray(c.re_reservations).some((r) => r.status !== 'cancelled')
   );
   if (!unconverted.length) return { sent: 0 };
@@ -82,9 +111,13 @@ async function run(orgId) {
   const now = Date.now();
   let sent = 0;
 
-  for (const lead of unconverted) {
+  // AUDIT FIX (A7/P3) — this used to be a plain `for...of`, one lead's
+  // message-count lookup and WhatsApp send waited on before the next lead's
+  // even started. LEAD_CONCURRENCY lanes pulling from the same list, same
+  // pattern as jobs/daily.js's own per-org loop and collectionsAgent.js.
+  await mapWithConcurrency(unconverted, LEAD_CONCURRENCY, async (lead) => {
     const count = await messageCountForLead(orgId, lead.id);
-    if (count >= MAX_MESSAGES_PER_LEAD) continue;
+    if (count >= MAX_MESSAGES_PER_LEAD) return;
 
     const ageDays = (now - Date.parse(lead.created_at)) / 86_400_000;
     const bucket = bucketFor(ageDays);
@@ -106,7 +139,7 @@ async function run(orgId) {
       template, body, actionType: `lead_${bucket}`,
     });
     if (result?.status === 'sent') sent += 1;
-  }
+  });
 
   return { sent };
 }

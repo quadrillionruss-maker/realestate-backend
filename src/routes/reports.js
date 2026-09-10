@@ -21,6 +21,7 @@ const forecast = require('../services/forecastService');
 const { getInvestorReport } = require('../services/investorReportService');
 const commissionService = require('../services/commissionService');
 const satisfactionSurvey = require('../services/satisfactionSurveyService');
+const reconciliation = require('../services/reconciliationService');
 const router = express.Router();
 
 // A compromised low-privilege account (see CLAUDE.md's RBAC notes) could
@@ -34,6 +35,19 @@ const exportLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req) => req.userId || req.ip,
   message: { error: 'Too many exports. Wait a few minutes and try again.' },
+});
+
+// PROMPT 7 — Financial Reconciliation. Same shape and budget as
+// exportLimiter above: a Paystack transaction-list pull or a CSV parse is
+// real work, and this is an owner-only action expected a handful of times a
+// month, not a page someone refreshes.
+const reconciliationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.userId || req.ip,
+  message: { error: 'Too many reconciliation runs. Wait a few minutes and try again.' },
 });
 
 const round2 = (value) => Math.round(Number(value) * 100) / 100;
@@ -62,7 +76,14 @@ router.get('/investor', requirePermission('reports.investor'), async (req, res, 
       return res.status(400).json({ error: 'project_id must be a valid id.' });
     }
 
-    const report = await getInvestorReport(req.orgId, projectId);
+    // AUDIT FIX (P9) — optional, same shape as commissionService.leaderboard's
+    // own from/to (GET /commissions/summary): omitted, this behaves exactly
+    // as it always has (see investorReportService's own header on why the
+    // default stays unwindowed).
+    const report = await getInvestorReport(req.orgId, projectId, {
+      from: req.query.from || null,
+      to: req.query.to || null,
+    });
     if (report.notFound) return res.status(404).json({ error: 'Project not found' });
     res.json(report);
   } catch (e) { next(e); }
@@ -547,7 +568,7 @@ const EXPORTS = {
       const { data, error } = await supabaseAdmin
         .from('re_payments')
         .select(`
-          amount, method, paystack_reference, paid_at, overpayment,
+          amount, method, paystack_reference, paid_at, overpayment, reallocated_from_payment_id,
           re_installment_schedule(
             installment_number, due_date, amount_due,
             re_installment_plans(
@@ -576,7 +597,14 @@ const EXPORTS = {
       ['Due date', (r) => r.re_installment_schedule?.due_date || ''],
       ['Amount due', (r) => r.re_installment_schedule?.amount_due ?? ''],
       ['Amount paid', 'amount'],
-      ['Overpayment', (r) => (Number(r.overpayment) > 0 ? r.overpayment : '')],
+      // AUDIT FIX (F12) — a reallocated row (reallocated_from_payment_id set)
+      // is the SAME credit moving onto a different installment, not new
+      // money arriving — CLAUDE.md's own "every 'total paid' sum excludes
+      // it rather than counting that money a second time" applies to
+      // Overpayment here too, since that row can carry its own nonzero
+      // overpayment (an overshoot onto the target installment) that would
+      // otherwise double up against the original payment's own figure.
+      ['Overpayment', (r) => (!r.reallocated_from_payment_id && Number(r.overpayment) > 0 ? r.overpayment : '')],
       ['Method', (r) => String(r.method || '').replace(/_/g, ' ')],
       ['Reference', 'paystack_reference'],
     ],
@@ -790,7 +818,7 @@ const EXPORTS = {
           content, pinned, moderated, created_at,
           re_customers(full_name),
           re_projects(name),
-          re_community_replies(id)
+          re_community_replies(id, deleted_at)
         `)
         .eq('organization_id', orgId)
         .order('created_at', { ascending: false });
@@ -803,7 +831,12 @@ const EXPORTS = {
       ['Content', 'content'],
       ['Pinned', (r) => (r.pinned ? 'Yes' : 'No')],
       ['Moderated', (r) => (r.moderated ? 'Yes' : 'No')],
-      ['Replies', (r) => (r.re_community_replies || []).length],
+      // AUDIT FIX (D6) — posts are filtered by the SOFT_DELETABLE registry
+      // (orgContext.js) since this query's top-level .from() is
+      // re_community_posts, but an EMBEDDED resource is never auto-filtered
+      // (CLAUDE.md's "Nothing is ever deleted" section) — so a reply count
+      // needs its own explicit exclusion here rather than trusting the embed.
+      ['Replies', (r) => (r.re_community_replies || []).filter((reply) => !reply.deleted_at).length],
       ['Posted at', (r) => String(r.created_at || '').slice(0, 10)],
     ],
   },
@@ -854,6 +887,73 @@ router.get('/export/:kind', exportLimiter, requirePermission('reports.export'), 
       .type('text/csv; charset=utf-8')
       .attachment(`archta-${spec.filename}-${stamp}.csv`)
       .send(toCsv(spec.columns, rows));
+  } catch (e) { next(e); }
+});
+
+// ── PROMPT 7 — Financial Reconciliation ────────────────────────────────────
+// Owner-only (reports.reconciliation, permissions.js) — see that key's own
+// comment for why. period_start/period_end default to the current calendar
+// month so the button on the Reconciliation tab works with no form at all;
+// either can still be overridden in the request body for a past period.
+router.post('/reconciliation/run', reconciliationLimiter, requirePermission('reports.reconciliation'), async (req, res, next) => {
+  try {
+    const today = lagosToday();
+    const periodStart = req.body?.period_start || `${today.slice(0, 7)}-01`;
+    const periodEnd = req.body?.period_end || today;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(periodStart) || !/^\d{4}-\d{2}-\d{2}$/.test(periodEnd)) {
+      return res.status(400).json({ error: 'period_start and period_end must be YYYY-MM-DD dates' });
+    }
+    if (periodStart > periodEnd) return res.status(400).json({ error: 'period_start must not be after period_end' });
+
+    const run = await reconciliation.runPaystackReconciliation(req.orgId, { periodStart, periodEnd });
+
+    audit(req, {
+      action: 'reconciliation.run',
+      entityType: 're_reconciliation_runs',
+      entityId: run.id,
+      summary: `Paystack reconciliation for ${periodStart} to ${periodEnd}: ${run.matched_count} matched, ${run.unmatched_count} unmatched`,
+      metadata: { provider: 'paystack', period_start: periodStart, period_end: periodEnd, status: run.status },
+    });
+
+    res.status(201).json(run);
+  } catch (e) { next(e); }
+});
+
+// Manual bank-transfer reconciliation — a CSV pasted/uploaded from the
+// browser (plain text in the JSON body, same convention routes/imports.js
+// already uses, not multipart), matched by amount + date since a raw bank
+// statement carries no reference Archta ever generated.
+router.post('/reconciliation/bank-transfer', reconciliationLimiter, requirePermission('reports.reconciliation'), async (req, res, next) => {
+  try {
+    const csv = req.body?.csv;
+    if (!csv) return res.status(400).json({ error: 'csv is required' });
+
+    const run = await reconciliation.runBankTransferReconciliation(req.orgId, csv);
+
+    audit(req, {
+      action: 'reconciliation.run',
+      entityType: 're_reconciliation_runs',
+      entityId: run.id,
+      summary: `Bank-transfer reconciliation for ${run.period_start} to ${run.period_end}: ${run.matched_count} matched, ${run.unmatched_count} unmatched`,
+      metadata: { provider: 'bank_transfer', period_start: run.period_start, period_end: run.period_end, status: run.status },
+    });
+
+    res.status(201).json(run);
+  } catch (e) { next(e); }
+});
+
+router.get('/reconciliation/runs', requirePermission('reports.reconciliation'), async (req, res, next) => {
+  try {
+    res.json(await reconciliation.listRuns(req.orgId));
+  } catch (e) { next(e); }
+});
+
+router.get('/reconciliation/runs/:id', requirePermission('reports.reconciliation'), async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid id' });
+    const run = await reconciliation.getRun(req.orgId, req.params.id);
+    if (!run) return res.status(404).json({ error: 'Reconciliation run not found' });
+    res.json(run);
   } catch (e) { next(e); }
 });
 

@@ -37,12 +37,22 @@ async function ensureBucket() {
 const TABLES = [
   { table: 're_customers', file: 'buyers.csv' },
   { table: 're_reservations', file: 'reservations.csv' },
+  // AUDIT FIX (C6) — the schedule a buyer agreed to belongs in a complete
+  // export of their own data as much as the payments made against it do;
+  // re_payments alone tells you what was PAID, not what was OWED.
+  { table: 're_installment_plans', file: 'installment_plans.csv' },
   { table: 're_payments', file: 'payments.csv' },
   { table: 're_documents', file: 'documents.csv' },
   { table: 're_units', file: 'units.csv' },
   { table: 're_projects', file: 'projects.csv' },
   { table: 're_commissions', file: 'commissions.csv' },
   { table: 're_activities', file: 'activities.csv' },
+  // AUDIT FIX (C6) — every email/SMS/WhatsApp/push attempt this workspace
+  // has sent, including its recipient (CLAUDE.md's "Nothing is ever
+  // deleted": re_notifications has no deleted_at at all, same reasoning as
+  // re_audit_log right below it). A workspace's own communications record
+  // is exactly the kind of thing a complete export must not silently omit.
+  { table: 're_notifications', file: 'notifications.csv' },
   { table: 're_audit_log', file: 'audit_log.csv' },
 ];
 

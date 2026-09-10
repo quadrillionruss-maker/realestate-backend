@@ -172,7 +172,7 @@ const toNaira = (kobo) => Number(kobo) / 100;
 async function applyPaymentsToSchedule(scheduleId) {
   const { data: schedule, error: schedErr } = await supabaseAdmin
     .from('re_installment_schedule')
-    .select('id, amount_due, status, due_date')
+    .select('id, amount_due, status, due_date, waived_before_payment')
     .eq('id', scheduleId)
     .single();
   if (schedErr || !schedule) throw new Error('Installment not found');
@@ -191,15 +191,29 @@ async function applyPaymentsToSchedule(scheduleId) {
   if (covered && schedule.status !== 'paid') {
     await supabaseAdmin
       .from('re_installment_schedule')
-      .update({ status: 'paid', paid_at: new Date().toISOString() })
+      // AUDIT FIX (F5) — nothing at the API is SUPPOSED to let a payment
+      // land on a waived row (routes/payments.js's own check, F4's fix to
+      // initInstallmentPayment), but a link generated before a waive and
+      // completed after one still can (see migrations/085's own header).
+      // waived_before_payment remembers that this row was 'waived' the
+      // instant before this payment covered it, so voiding the payment
+      // later can tell "was pending/overdue" apart from "was waived" —
+      // both look identical once status says 'paid'.
+      .update({ status: 'paid', paid_at: new Date().toISOString(), waived_before_payment: schedule.status === 'waived' })
       .eq('id', scheduleId);
   } else if (!covered && schedule.status === 'paid') {
     // Only reachable by voiding the payment(s) that made this row paid — a
     // payment is never otherwise removed once recorded. Reverts to whatever
-    // this row would read as had it never been paid in the first place.
+    // this row would read as had it never been paid in the first place —
+    // 'waived' if that's genuinely what it was (AUDIT FIX F5), otherwise
+    // whichever of pending/overdue the due date says now.
     await supabaseAdmin
       .from('re_installment_schedule')
-      .update({ status: isPastDue(schedule.due_date) ? 'overdue' : 'pending', paid_at: null })
+      .update(
+        schedule.waived_before_payment
+          ? { status: 'waived', paid_at: null, waived_before_payment: false }
+          : { status: isPastDue(schedule.due_date) ? 'overdue' : 'pending', paid_at: null }
+      )
       .eq('id', scheduleId);
   }
 
@@ -230,6 +244,14 @@ async function initInstallmentPayment(orgId, scheduleId, customerEmail, { callba
   }
   if (schedule.status === 'paid') {
     throw Object.assign(new Error('Installment already paid'), { statusCode: 409 });
+  }
+  // AUDIT FIX (F4) — a waived installment no longer counts as owed; letting
+  // a buyer initiate a real Paystack charge against it would collect money
+  // for a debt the product has already told them they don't have to pay,
+  // with no schedule row left expecting it (applyPaymentsToSchedule has no
+  // path back from 'waived').
+  if (schedule.status === 'waived') {
+    throw Object.assign(new Error('This installment has been waived — there is nothing to pay.'), { statusCode: 409 });
   }
 
   // Charge only what is still outstanding, so a buyer who part-paid by
@@ -414,6 +436,7 @@ async function recordManualPayment(orgId, scheduleId, {
   method = 'bank_transfer',
   reference = null,
   payerName = null,
+  idempotencyKey = null,
 }) {
   const numericAmount = Number(amount);
   if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
@@ -476,9 +499,23 @@ async function recordManualPayment(orgId, scheduleId, {
       vat_rate: vat.vat_rate,
       vat_amount: vat.vat_amount,
       vat_inclusive: vat.vat_inclusive,
+      idempotency_key: idempotencyKey || null,
     })
     .select()
     .single();
+  // AUDIT FIX (FE4) — idempotencyKey identifies THIS submission ATTEMPT,
+  // not this transfer (that's what possibleDuplicate above already covers,
+  // deliberately as a warning, not a block). A retry carrying the same key
+  // — the offline queue replaying a submission whose first attempt actually
+  // landed but the client never saw the response, or a double-tap — hits
+  // uniq_re_payments_idempotency_key (migrations/087) and is rejected
+  // outright rather than creating a second row.
+  if (payErr?.code === '23505' && idempotencyKey) {
+    throw Object.assign(
+      new Error('This payment has already been recorded — duplicate submission ignored.'),
+      { statusCode: 409 }
+    );
+  }
   if (payErr) throw payErr;
 
   const result = await applyPaymentsToSchedule(scheduleId);
@@ -521,12 +558,25 @@ async function reallocateOverpayment(orgId, sourcePaymentId, toScheduleId) {
 
   const { data: schedule, error: schedErr } = await supabaseAdmin
     .from('re_installment_schedule')
-    .select('id, amount_due')
+    .select('id, amount_due, status')
     .eq('id', toScheduleId)
     .eq('organization_id', orgId)
     .single();
   if (schedErr || !schedule) {
     throw Object.assign(new Error('Installment not found'), { statusCode: 404 });
+  }
+  // AUDIT FIX (F3) — a waived installment no longer counts as owed
+  // (installmentService/aiBrief both stop treating it as debt the moment
+  // it's waived); allocating a credit onto it would silently resurrect
+  // money owed against a row the product has already told the buyer they
+  // don't have to pay. An already-paid installment has nothing left to
+  // apply credit toward either — that money belongs on a row that is
+  // actually still outstanding.
+  if (!['pending', 'overdue'].includes(schedule.status)) {
+    throw Object.assign(
+      new Error(`This installment is ${schedule.status} — credit can only be allocated to a pending or overdue installment.`),
+      { statusCode: 409 }
+    );
   }
 
   const { data: priorPayments } = await supabaseAdmin

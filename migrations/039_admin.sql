@@ -153,6 +153,48 @@ begin
   delete from re_org_settings where organization_id = target_org_id;
   get diagnostics n = row_count; counts := counts || jsonb_build_object('re_org_settings', n);
 
+  -- AUDIT FIX (D2) — re_attendance.user_id, re_log_entries.user_id and
+  -- re_campaigns.created_by all reference users(id) with no ON DELETE
+  -- clause at all (migrations/055, /060), i.e. NO ACTION: none of the three
+  -- is attached to a reservation, a customer or a project, so nothing
+  -- above this point ever touched them, and adminService.js's `delete from
+  -- users` in Node — which runs AFTER this function returns, per this
+  -- function's own header — failed outright with a foreign key violation
+  -- whenever the workspace's owner or any team member had ever clocked in,
+  -- logged an entry, or created a campaign. re_campaign_deliveries cascades
+  -- off campaign_id (migrations/060), so deleting re_campaigns also clears
+  -- those.
+  --
+  -- Each wrapped in its own `exception when undefined_table` rather than a
+  -- plain `delete`: src/test/schema.test.js's migration-apply loop does not
+  -- run migrations 055-072 at all (a pre-existing, documented gap — see that
+  -- file's own note), so in THAT simulated database these three tables do
+  -- not exist yet and this function is still called from that same test. In
+  -- every real deployment 055/060 have already run by the time this
+  -- function is ever invoked (CLAUDE.md's "in numeric order"), so the
+  -- exception branch is unreachable there and this behaves exactly like a
+  -- plain `delete`.
+  begin
+    delete from re_attendance where organization_id = target_org_id;
+    get diagnostics n = row_count; counts := counts || jsonb_build_object('re_attendance', n);
+  exception when undefined_table then
+    counts := counts || jsonb_build_object('re_attendance', 0);
+  end;
+
+  begin
+    delete from re_log_entries where organization_id = target_org_id;
+    get diagnostics n = row_count; counts := counts || jsonb_build_object('re_log_entries', n);
+  exception when undefined_table then
+    counts := counts || jsonb_build_object('re_log_entries', 0);
+  end;
+
+  begin
+    delete from re_campaigns where organization_id = target_org_id;
+    get diagnostics n = row_count; counts := counts || jsonb_build_object('re_campaigns', n);
+  exception when undefined_table then
+    counts := counts || jsonb_build_object('re_campaigns', 0);
+  end;
+
   -- A team workspace's own membership rows and the team itself. Harmless
   -- (0 rows) when target_org_id is actually a solo user's own id, since no
   -- team ever exists at that id.

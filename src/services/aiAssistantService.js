@@ -42,6 +42,32 @@ const MAX_CONVERSATION_HISTORY = 10;
 
 const CATEGORIES = ['collections', 'buyers', 'projects', 'sales', 'documents', 'executive'];
 
+// AUDIT FIX (P10) — pages through a whole table rather than one unbounded
+// select() — gatherBaseContext's own credit-score distribution and
+// gatherCategoryContext's own document-status breakdown both used to fetch
+// every re_customers/re_documents row this org has EVER had just to bucket-
+// count them, a read that grows forever as the org's buyer/document history
+// grows, for a workspace years into operation with this assistant open
+// routinely.
+const CONTEXT_PAGE_SIZE = 1000;
+async function fetchAllForContext(table, column, orgId) {
+  const rows = [];
+  let offset = 0;
+  for (;;) {
+    const { data, error } = await supabaseAdmin
+      .from(table)
+      .select(column)
+      .eq('organization_id', orgId)
+      .order('id', { ascending: true })
+      .range(offset, offset + CONTEXT_PAGE_SIZE - 1);
+    if (error) throw error;
+    rows.push(...(data || []));
+    if (!data || data.length < CONTEXT_PAGE_SIZE) break;
+    offset += CONTEXT_PAGE_SIZE;
+  }
+  return rows;
+}
+
 // Pure — keyword-matched against the question text, checked in a fixed
 // order so a question mentioning more than one area still resolves to
 // exactly one category (the FIRST one it matches), same as aiBrief's own
@@ -105,7 +131,7 @@ async function gatherBaseContext(orgId, tokenizer) {
 
   const [
     { data: thisMonthPayments }, { data: lastMonthPayments },
-    { data: overdueRows }, topDefaulters, { data: creditRows },
+    { data: overdueRows }, topDefaulters, creditRows,
     { data: agentActions }, communicationEffectiveness, playbook,
   ] = await Promise.all([
     supabaseAdmin.from('re_payments').select('amount').eq('organization_id', orgId)
@@ -118,7 +144,7 @@ async function gatherBaseContext(orgId, tokenizer) {
       .eq('organization_id', orgId)
       .eq('status', 'overdue'),
     defaultRisk.topDefaultRisks(orgId, 5),
-    supabaseAdmin.from('re_customers').select('credit_score').eq('organization_id', orgId),
+    fetchAllForContext('re_customers', 'credit_score', orgId),
     supabaseAdmin.from('re_agent_actions').select('agent_name, outcome')
       .eq('organization_id', orgId).gte('created_at', new Date(Date.now() - 7 * 86_400_000).toISOString()),
     outcomes.getCommunicationEffectiveness(orgId).catch(() => null),
@@ -234,9 +260,9 @@ async function gatherCategoryContext(orgId, category, tokenizer) {
   }
 
   if (category === 'documents') {
-    const { data } = await supabaseAdmin.from('re_documents').select('status').eq('organization_id', orgId);
+    const rows = await fetchAllForContext('re_documents', 'status', orgId);
     const byStatus = {};
-    for (const row of data || []) byStatus[row.status] = (byStatus[row.status] || 0) + 1;
+    for (const row of rows) byStatus[row.status] = (byStatus[row.status] || 0) + 1;
     return { document_status_breakdown: byStatus };
   }
 
@@ -266,7 +292,66 @@ const SYSTEM_PROMPT =
   'recommendations, never as guaranteed outcomes. If completed_project_history is present, its key_metrics are ' +
   'verified figures computed directly from that project\'s recorded history — state them as fact. Its summary ' +
   'field is an EARLIER AI-generated narrative interpretation of the same project, not a verified record — when ' +
-  'you draw on it, make clear you are relaying a prior summary, not restating a confirmed fact.';
+  'you draw on it, make clear you are relaying a prior summary, not restating a confirmed fact. ' +
+  'CONFIDENCE BLOCK: when your answer is grounded in quantifiable data from the context (a count, a total, a ' +
+  'rate, a trend), end your reply with a single-line JSON object, on its own line, after all prose, in exactly ' +
+  'this shape: {"confidence": "high"|"medium"|"low", "sample_size": <integer count of records the answer is ' +
+  'based on>, "date_range": "<e.g. 30 days>", "caveat": "<optional short warning, or omit the field entirely>"}. ' +
+  'confidence reflects how much data actually supports the answer, not how confident your prose sounds — few ' +
+  'records or a narrow date range means low or medium, never high. Do not wrap it in a code fence, do not label ' +
+  'it, and do not mention this JSON block anywhere in the prose above it. If the answer is not grounded in ' +
+  'quantifiable data at all (a definitional question, a request for general advice), omit the block entirely.';
+
+// Below this many supporting records, a caveat is enforced regardless of
+// whether the model remembered to add one.
+const MIN_CONFIDENT_SAMPLE_SIZE = 5;
+const LIMITED_DATA_CAVEAT = 'Limited data — this insight will improve as more operational history accumulates.';
+
+// Extracts the trailing confidence JSON block the system prompt asks the
+// model for, and returns the answer text with it stripped out — the block
+// is metadata about the answer, never part of what the user reads (item 2's
+// own "not as part of the answer text"). Defensive by necessity: this is
+// free-text model output, not a structured response_format the way
+// aiBrief.js's own OpenAI call uses, so a model that forgets the block, mis-
+// formats it, or wraps it in a code fence must degrade to "no evidence"
+// rather than corrupting the visible answer.
+function extractConfidenceBlock(rawText) {
+  const text = String(rawText || '').trim();
+  const lastBrace = text.lastIndexOf('{');
+  if (lastBrace === -1) return { answer: text, confidence: null };
+
+  // Strip a trailing code fence the model sometimes wraps the block in
+  // despite being asked not to.
+  const candidate = text.slice(lastBrace).replace(/```\s*$/, '').trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch {
+    return { answer: text, confidence: null };
+  }
+  if (!parsed || typeof parsed !== 'object' || !parsed.confidence) return { answer: text, confidence: null };
+
+  const answerWithoutBlock = text.slice(0, lastBrace).replace(/```(?:json)?\s*$/i, '').trim();
+  const sampleSize = Number.isFinite(Number(parsed.sample_size)) ? Number(parsed.sample_size) : null;
+  let caveat = parsed.caveat ? String(parsed.caveat).slice(0, 300) : null;
+  // Deterministic, not trusted to the model: a caveat on thin data must
+  // always be present, not merely whenever the model remembered to add one.
+  if (sampleSize != null && sampleSize < MIN_CONFIDENT_SAMPLE_SIZE && !caveat) {
+    caveat = LIMITED_DATA_CAVEAT;
+  }
+
+  return {
+    // Never leave an empty bubble if the model's whole reply was the JSON
+    // block with no prose above it.
+    answer: answerWithoutBlock || text,
+    confidence: {
+      confidence: ['high', 'medium', 'low'].includes(parsed.confidence) ? parsed.confidence : null,
+      sample_size: sampleSize,
+      date_range: parsed.date_range ? String(parsed.date_range).slice(0, 100) : null,
+      caveat,
+    },
+  };
+}
 
 function isRetryable(err) {
   if (err.malformedResponse) return true;
@@ -346,6 +431,13 @@ async function askAssistant(orgId, userId, question, conversationHistory = []) {
   let tokensUsed = null;
   let generatedBy = 'model';
   let lastError = null;
+  // AUDIT FIX (FE2) — 'not_configured' (no OPENAI_API_KEY at all — a
+  // permanent, admin-fixable state) vs 'model_error' (the key is there but
+  // every retry against OpenAI itself failed — a transient state worth a
+  // "try again"). Both used to collapse into the same generated_by:
+  // 'fallback' with nothing in the response telling the frontend which one
+  // it was looking at.
+  let fallbackReason = null;
 
   if (env.openai.apiKey) {
     for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt += 1) {
@@ -364,18 +456,32 @@ async function askAssistant(orgId, userId, question, conversationHistory = []) {
     }
   } else {
     lastError = new Error('OPENAI_API_KEY not configured');
+    fallbackReason = 'not_configured';
   }
 
   if (lastError || !answerText) {
     console.warn('[ai-assistant] falling back to a direct data readout:', lastError?.message);
     answerText = buildFallbackAnswer(context);
     generatedBy = 'fallback';
+    if (!fallbackReason) fallbackReason = 'model_error';
   }
 
-  const resolvedAnswer = resolveRefsInText(answerText, tokenizer.nameByRef);
+  // CONFIDENCE AND EVIDENCE DISPLAY — stripped from the model's raw reply
+  // BEFORE ref-resolution and storage, so BUYER_N tokens are only ever
+  // resolved (and only the visible prose is ever stored/shown) — the block
+  // itself is never real prose to resolve refs in. A fallback answer's
+  // deterministic prose never contains one, so this naturally no-ops
+  // (confidence stays null) for that path without a separate branch.
+  const { answer: answerWithoutConfidence, confidence } = extractConfidenceBlock(answerText);
+  const resolvedAnswer = resolveRefsInText(answerWithoutConfidence, tokenizer.nameByRef);
 
+  // RECOMMENDATION FEEDBACK — the inserted row's own id is returned to the
+  // caller as conversation_id so a later POST /ai/feedback vote can be
+  // traced back to the exact context/model/category that produced it,
+  // rather than only to whatever question/answer text the client still has.
+  let conversationId = null;
   try {
-    await supabaseAdmin.from('re_ai_conversations').insert({
+    const { data: inserted, error: insertError } = await supabaseAdmin.from('re_ai_conversations').insert({
       organization_id: orgId,
       user_id: userId,
       question: String(question).slice(0, 2000),
@@ -384,13 +490,45 @@ async function askAssistant(orgId, userId, question, conversationHistory = []) {
       context_snapshot: context,
       tokens_used: tokensUsed,
       generated_by: generatedBy,
-    });
+    }).select('id').single();
+    if (insertError) throw insertError;
+    conversationId = inserted.id;
   } catch (err) {
-    // A logging failure must not cost the person waiting on this answer.
+    // A logging failure must not cost the person waiting on this answer —
+    // conversationId simply stays null, same as it always was before this
+    // feature existed.
     console.warn('[ai-assistant] could not store conversation:', err.message);
   }
 
-  return { answer: resolvedAnswer, category, generated_by: generatedBy };
+  return {
+    answer: resolvedAnswer, category, generated_by: generatedBy, fallback_reason: fallbackReason,
+    conversation_id: conversationId, confidence,
+  };
+}
+
+// RECOMMENDATION FEEDBACK — POST /ai/feedback (routes/ai.js), which
+// validates feedback/question/answer BEFORE calling this, same "validate in
+// the route, assume valid input here" convention askAssistant's own caller
+// already follows for `question`. This function itself never throws: a vote
+// that failed to record must not read as an error to whoever just clicked a
+// thumbs-up/down button, same "instrumentation must not cost the real
+// action" rule this file's own conversation-logging above follows.
+async function submitFeedback(orgId, userId, { conversationId = null, question, answer, feedback }) {
+  try {
+    const { error } = await supabaseAdmin.from('re_ai_feedback').insert({
+      organization_id: orgId,
+      user_id: userId,
+      conversation_id: conversationId || null,
+      question: String(question).slice(0, 2000),
+      answer: String(answer).slice(0, 5000),
+      feedback,
+    });
+    if (error) throw error;
+    return { recorded: true };
+  } catch (err) {
+    console.warn('[ai-assistant] could not record feedback:', err.message);
+    return { recorded: false };
+  }
 }
 
 // ── Proactive insights ─────────────────────────────────────────────────
@@ -515,4 +653,7 @@ module.exports = {
   PROJECT_HEALTH_THRESHOLD,
   NEW_OVERDUE_SURGE_THRESHOLD,
   HIGH_CREDIT_THRESHOLD,
+  submitFeedback,
+  // Exported for logic.test.js — pure, no database, directly unit-testable.
+  extractConfidenceBlock,
 };

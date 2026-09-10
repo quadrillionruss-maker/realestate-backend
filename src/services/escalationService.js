@@ -18,6 +18,7 @@ const { supabaseAdmin } = require('../middleware/orgContext');
 const { auditSystem } = require('./auditService');
 const { mapWithConcurrency } = require('../utils/concurrency');
 const outcomes = require('./outcomeService');
+const decisionLedger = require('./decisionLedgerService');
 const projectTimeline = require('./projectTimelineService');
 
 const ESCALATION_CONCURRENCY = 8;
@@ -179,6 +180,13 @@ async function sweepEscalations(orgId = null) {
     // false attribution to avoid here, just nothing to record.
     if (reservation.customer_id) {
       await outcomes.closeMostRecentOpen(reservation.organization_id, reservation.customer_id, {
+        outcomeType: 'escalated',
+      });
+      // Decision Ledger — first of two sites that close 'escalated' outcomes
+      // (the other is collectionsAgent.escalateToNextStage, for an
+      // escalation reached via an inbound WhatsApp reply instead of this
+      // nightly sweep).
+      await decisionLedger.closeOutcome(reservation.organization_id, reservation.customer_id, {
         outcomeType: 'escalated',
       });
     }

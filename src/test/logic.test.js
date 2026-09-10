@@ -40,7 +40,7 @@ const { resolveBranding } = require('../services/brandingService');
 const { pickPaidBucket, classifyMessageSpecificity, deriveTopInsights } = require('../services/outcomeService');
 const { computeStageRecommendation, MIN_STAGE_SAMPLE_SIZE } = require('../services/recoveryPlaybookService');
 const { giniCoefficient, coefficientOfVariation, MIN_PEER_ORGS } = require('../services/developerDnaService');
-const { detectQuestionCategory, resolveRefsInText, buildFallbackAnswer } = require('../services/aiAssistantService');
+const { detectQuestionCategory, resolveRefsInText, buildFallbackAnswer, extractConfidenceBlock } = require('../services/aiAssistantService');
 const { computeKeyMetrics, buildFallbackSummary } = require('../services/projectSummaryService');
 const { computeFingerprint, MIN_OBSERVATIONS } = require('../services/behavioralFingerprintService');
 const { supabaseAdmin } = require('../middleware/orgContext');
@@ -52,7 +52,7 @@ const auth = require('../services/authService');
 const portal = require('../services/portalService');
 const env = require('../config/env');
 const {
-  preview: restructurePreview, contractValue,
+  preview: restructurePreview, contractValue, computeRestructureRecommendation,
 } = require('../services/restructureService');
 const {
   rentTotalForPeriod, computeNewTenancyEndDate,
@@ -87,13 +87,15 @@ const { INTENTS, keywordIntent } = require('../services/whatsappBotService');
 const {
   extractPromisedDate, WILL_PAY_RE, ALREADY_PAID_RE, CANNOT_PAY_RE,
 } = require('../services/collectionsAgent');
-const { requestPause } = require('../services/hardshipService');
+const { requestPause, computeHardshipRecommendation } = require('../services/hardshipService');
 const { scale: projectHealthScale, WARNING_THRESHOLD, CRITICAL_THRESHOLD } = require('../services/projectHealthService');
 const { isEligible: isFinancingEligible } = require('../services/financingService');
 const exchangeRateService = require('../services/exchangeRateService');
 const { bucketFor, MAX_MESSAGES_PER_LEAD } = require('../services/salesAgent');
 const { isDue: financeIsDue, collectRecipientEmails } = require('../services/financeAgent');
 const { isDue: marketIntelIsDue } = require('../services/marketIntelAgent');
+const { missingRequiredKeys, findForbiddenClaims } = require('../services/aiEvaluationService');
+const { matchByReference, matchByAmountAndDate, summarize: summarizeReconciliation } = require('../services/reconciliationService');
 const { authenticate } = require('../middleware/auth');
 // Route files export only `router` normally — these three attach a couple of
 // extra properties purely so this offline suite can assert on their pure
@@ -498,7 +500,7 @@ const sampleDoc = {
       re_projects: { name: 'Lekki Gardens Phase 2', location: 'Ajah, Lagos' },
     },
     re_installment_plans: [{
-      total_amount: 45_000_000, number_of_installments: 18, frequency: 'monthly', start_date: '2026-02-01',
+      status: 'active', total_amount: 45_000_000, number_of_installments: 18, frequency: 'monthly', start_date: '2026-02-01',
     }],
   },
 };
@@ -1340,6 +1342,21 @@ test('reads amounts as developers actually paste them', () => {
   assert.strictEqual(parseAmount('45000000.50'), 45_000_000.5);
   assert.strictEqual(parseAmount(''), null);
   assert.strictEqual(parseAmount('not a number'), null);
+});
+
+// AUDIT FIX (N4) — the letter prefix a keyboard actually types, not just
+// the ₦ glyph a spreadsheet may or may not have a font for.
+test('parseAmount strips N/NGN prefixes, the way a keyboard actually types Naira', () => {
+  assert.strictEqual(parseAmount('N45,000,000'), 45_000_000);
+  assert.strictEqual(parseAmount('NGN45,000,000'), 45_000_000);
+  assert.strictEqual(parseAmount('NGN 45000000'), 45_000_000);
+});
+
+// AUDIT FIX (N4) — a cell holding ONLY currency notation, no digits, must
+// not silently read as a real, valid zero (Number('') is 0 in JavaScript).
+test('parseAmount treats a currency symbol with no digits as unparseable, not zero', () => {
+  assert.strictEqual(parseAmount('₦'), null);
+  assert.strictEqual(parseAmount('NGN'), null);
 });
 
 test('reads dates day-first, which is the local convention', () => {
@@ -2881,6 +2898,45 @@ test('no channel/action_type clears its own minimum sample — no recommendation
   assert.ok(['whatsapp', 'email'].includes(result.best_channel));
 });
 
+// Decision Ledger — hardship has no AI-driven approval step in this product
+// (see hardshipService.js's own top comment), so was_override is derived
+// from this small, deterministic rule instead of a real prior recommendation.
+section('Decision Ledger — computeHardshipRecommendation');
+
+test('excellent/good credit tier recommends approval regardless of pause length', () => {
+  assert.strictEqual(computeHardshipRecommendation({ score: 85, pauseMonths: 3 }).action, 'approve');
+  assert.strictEqual(computeHardshipRecommendation({ score: 65, pauseMonths: 3 }).action, 'approve');
+});
+
+test('fair credit tier recommends approval only for a short pause', () => {
+  assert.strictEqual(computeHardshipRecommendation({ score: 45, pauseMonths: 1 }).action, 'approve');
+  assert.strictEqual(computeHardshipRecommendation({ score: 45, pauseMonths: 2 }).action, 'review');
+});
+
+test('at-risk credit tier recommends review even for a one-month pause', () => {
+  assert.strictEqual(computeHardshipRecommendation({ score: 20, pauseMonths: 1 }).action, 'review');
+});
+
+test('a missing credit score reads as the bottom tier, not a crash', () => {
+  assert.strictEqual(computeHardshipRecommendation({ score: null, pauseMonths: 1 }).action, 'review');
+});
+
+// Decision Ledger — restructure is atomic in this product (offer and
+// completion in one call, restructureService.js's own SECTION 1 comment), so
+// this asks a narrower question: did the payment history actually call for
+// a restructure at the moment a human did one.
+section('Decision Ledger — computeRestructureRecommendation');
+
+test('two or more overdue installments recommends restructuring', () => {
+  assert.strictEqual(computeRestructureRecommendation(2).action, 'restructure');
+  assert.strictEqual(computeRestructureRecommendation(5).action, 'restructure');
+});
+
+test('fewer than two overdue installments recommends holding', () => {
+  assert.strictEqual(computeRestructureRecommendation(0).action, 'hold');
+  assert.strictEqual(computeRestructureRecommendation(1).action, 'hold');
+});
+
 // SECTION 5 (feature expansion) — developer DNA profile.
 section('Developer DNA — giniCoefficient / coefficientOfVariation');
 
@@ -2987,6 +3043,63 @@ test('the fallback answer is built entirely from the context object, with real f
   assert.ok(answer.includes('4'));
   assert.ok(answer.includes('BUYER_1'));
   assert.ok(answer.includes('88'));
+});
+
+// CONFIDENCE AND EVIDENCE DISPLAY — extractConfidenceBlock.
+section('AI assistant — extractConfidenceBlock');
+
+test('a well-formed trailing confidence block is parsed and stripped from the visible answer', () => {
+  const raw = 'Collections dropped 12% this month.\n{"confidence":"high","sample_size":42,"date_range":"30 days"}';
+  const { answer, confidence } = extractConfidenceBlock(raw);
+  assert.strictEqual(answer, 'Collections dropped 12% this month.');
+  assert.deepStrictEqual(confidence, { confidence: 'high', sample_size: 42, date_range: '30 days', caveat: null });
+});
+
+test('a code-fence-wrapped block is still parsed and fully stripped', () => {
+  const raw = 'Three buyers are at risk.\n```json\n{"confidence":"medium","sample_size":8,"date_range":"90 days"}\n```';
+  const { answer, confidence } = extractConfidenceBlock(raw);
+  assert.strictEqual(answer, 'Three buyers are at risk.');
+  assert.strictEqual(confidence.confidence, 'medium');
+  assert.strictEqual(confidence.sample_size, 8);
+});
+
+test('fewer than 5 supporting records forces the limited-data caveat even if the model omitted one', () => {
+  const raw = 'Only a couple of data points here.\n{"confidence":"low","sample_size":2,"date_range":"7 days"}';
+  const { confidence } = extractConfidenceBlock(raw);
+  assert.strictEqual(confidence.caveat, 'Limited data — this insight will improve as more operational history accumulates.');
+});
+
+test("the model's own caveat is kept as-is, not overwritten, even under the threshold", () => {
+  const raw = 'x\n{"confidence":"low","sample_size":1,"date_range":"7 days","caveat":"Only one payment recorded this period."}';
+  const { confidence } = extractConfidenceBlock(raw);
+  assert.strictEqual(confidence.caveat, 'Only one payment recorded this period.');
+});
+
+test('5 or more supporting records adds no caveat on its own', () => {
+  const raw = 'x\n{"confidence":"high","sample_size":5,"date_range":"30 days"}';
+  const { confidence } = extractConfidenceBlock(raw);
+  assert.strictEqual(confidence.caveat, null);
+});
+
+test('an answer with no JSON block at all returns the text unchanged and null confidence', () => {
+  const raw = 'Archta does not have enough information to answer that question.';
+  const { answer, confidence } = extractConfidenceBlock(raw);
+  assert.strictEqual(answer, raw);
+  assert.strictEqual(confidence, null);
+});
+
+test('a malformed trailing JSON block is left as plain text rather than crashing or eating the answer', () => {
+  const raw = 'Here is my answer, which happens to end mid-sentence with a brace {';
+  const { answer, confidence } = extractConfidenceBlock(raw);
+  assert.strictEqual(answer, raw);
+  assert.strictEqual(confidence, null);
+});
+
+test('a trailing JSON object with no confidence field is not treated as a confidence block', () => {
+  const raw = 'Here is context: {"foo":"bar"}';
+  const { answer, confidence } = extractConfidenceBlock(raw);
+  assert.strictEqual(answer, raw);
+  assert.strictEqual(confidence, null);
 });
 
 // SECTION 8 (feature expansion) — institutional memory.
@@ -4155,6 +4268,17 @@ test('buildEntry gives two entries built back-to-back different ids', () => {
   assert.notStrictEqual(a.id, b.id);
 });
 
+// AUDIT FIX (FE4) — a retry (submitOrQueue's own failed live attempt, or a
+// later syncQueue replay) must reuse the SAME key every entry was built
+// with, or the backend's duplicate check never actually catches anything;
+// two DIFFERENT entries must never collide on one by chance.
+test('buildEntry gives every entry its own idempotency key', () => {
+  const a = buildEntry('new_buyer', '/customers', { full_name: 'A' });
+  const b = buildEntry('new_buyer', '/customers', { full_name: 'B' });
+  assert.ok(a.idempotencyKey, 'has an idempotency key');
+  assert.notStrictEqual(a.idempotencyKey, b.idempotencyKey);
+});
+
 test('sortByQueuedAt orders oldest first — "sync all queued submissions in order"', () => {
   const first = { id: 'a', queued_at: '2026-01-01T09:00:00.000Z' };
   const second = { id: 'b', queued_at: '2026-01-01T09:05:00.000Z' };
@@ -4188,6 +4312,163 @@ test('summarize: a mix of pending/syncing/failed counts each correctly, for the 
   assert.strictEqual(summary.failedCount, 1);
   assert.strictEqual(summary.isSyncing, true, 'any item mid-sync means the badge reads "Syncing"');
   assert.strictEqual(summary.isSynced, false, 'a non-empty queue is never "Synced", even if every item already failed once');
+});
+
+// AI EVALUATION SYSTEM — the two pure grading helpers. seedEvalWorkspace/
+// runEvaluation themselves hit a real database and OpenAI, so they are
+// deliberately not exercised here — see aiEvaluationService.js's own header.
+section('AI evaluation — missingRequiredKeys / findForbiddenClaims');
+
+test('a present, non-empty key is not reported missing', () => {
+  const context = { overdue: { buyer_count: 1 }, at_risk_buyers: [{ customer_ref: 'BUYER_1' }] };
+  assert.deepStrictEqual(missingRequiredKeys(context, ['overdue', 'at_risk_buyers']), []);
+});
+
+test('an absent key, a null value, an empty array and an empty object are all reported missing', () => {
+  const context = { present: [1], emptyArray: [], emptyObject: {}, nullValue: null };
+  assert.deepStrictEqual(
+    missingRequiredKeys(context, ['present', 'emptyArray', 'emptyObject', 'nullValue', 'neverExisted']),
+    ['emptyArray', 'emptyObject', 'nullValue', 'neverExisted']
+  );
+});
+
+test('an empty required_data_keys list reports nothing missing', () => {
+  assert.deepStrictEqual(missingRequiredKeys({}, []), []);
+});
+
+test('findForbiddenClaims matches case-insensitively and returns every match', () => {
+  const answer = 'Sorry, I DON\'T HAVE enough information and there is no data for this question.';
+  assert.deepStrictEqual(
+    findForbiddenClaims(answer, ["don't have", 'no data', 'unrelated phrase']),
+    ["don't have", 'no data']
+  );
+});
+
+test('findForbiddenClaims returns an empty list when the answer avoids every forbidden phrase', () => {
+  const answer = 'Eval Gardens Phase 1 collected ₦2,000,000 this month, the most of any project.';
+  assert.deepStrictEqual(findForbiddenClaims(answer, ["don't have", 'no data']), []);
+});
+
+// PROMPT 7 — Financial Reconciliation. runPaystackReconciliation/
+// runBankTransferReconciliation themselves hit a real database and (for the
+// Paystack path) a real external API, so only the pure matching/summarizing
+// functions are exercised here — see reconciliationService.js's own header.
+section('Reconciliation — matchByReference (Paystack)');
+
+test('same reference, equal amounts — matched', () => {
+  const items = matchByReference(
+    [{ id: 'p1', amount: 500000, paystack_reference: 'REINST-a-1' }],
+    [{ reference: 'REINST-a-1', amount: 500000 }]
+  );
+  assert.deepStrictEqual(items, [{
+    payment_id: 'p1', provider_reference: 'REINST-a-1', archta_amount: 500000, provider_amount: 500000,
+    status: 'matched', notes: null,
+  }]);
+});
+
+test('same reference, different amounts — mismatched, not matched', () => {
+  const items = matchByReference(
+    [{ id: 'p1', amount: 500000, paystack_reference: 'REINST-a-1' }],
+    [{ reference: 'REINST-a-1', amount: 480000 }]
+  );
+  assert.strictEqual(items[0].status, 'mismatched');
+  assert.ok(items[0].notes.includes('500,000') && items[0].notes.includes('480,000'));
+});
+
+test('an Archta payment with no matching Paystack transaction is unmatched with a null provider_amount', () => {
+  const items = matchByReference([{ id: 'p1', amount: 500000, paystack_reference: 'REINST-a-1' }], []);
+  assert.deepStrictEqual(items, [{
+    payment_id: 'p1', provider_reference: 'REINST-a-1', archta_amount: 500000, provider_amount: null,
+    status: 'unmatched', notes: 'No matching Paystack transaction found for this reference in the given period.',
+  }]);
+});
+
+test('a Paystack transaction with no matching Archta payment is unmatched with a null payment_id', () => {
+  const items = matchByReference([], [{ reference: 'REINST-orphan-1', amount: 75000 }]);
+  assert.deepStrictEqual(items, [{
+    payment_id: null, provider_reference: 'REINST-orphan-1', archta_amount: null, provider_amount: 75000,
+    status: 'unmatched', notes: 'Paystack has a successful transaction with this reference but Archta has no matching payment recorded.',
+  }]);
+});
+
+test('a sub-kobo floating point difference still counts as matched, not mismatched', () => {
+  const items = matchByReference(
+    [{ id: 'p1', amount: 0.1 + 0.2, paystack_reference: 'REINST-a-1' }], // 0.30000000000000004 in IEEE754
+    [{ reference: 'REINST-a-1', amount: 0.3 }]
+  );
+  assert.strictEqual(items[0].status, 'matched');
+});
+
+section('Reconciliation — matchByAmountAndDate (bank transfer)');
+
+test('same amount, same day — matched', () => {
+  const items = matchByAmountAndDate(
+    [{ id: 'p1', amount: 300000, paid_at: '2026-02-10T09:00:00Z' }],
+    [{ reference: 'BANK-1', amount: 300000, date: '2026-02-10' }]
+  );
+  assert.strictEqual(items[0].status, 'matched');
+  assert.strictEqual(items[0].payment_id, 'p1');
+});
+
+test('same amount, exactly 2 days apart — still inside the window', () => {
+  const items = matchByAmountAndDate(
+    [{ id: 'p1', amount: 300000, paid_at: '2026-02-08T00:00:00Z' }],
+    [{ reference: 'BANK-1', amount: 300000, date: '2026-02-10' }]
+  );
+  assert.strictEqual(items[0].status, 'matched');
+});
+
+test('same amount, more than 2 days apart — unmatched, not force-matched', () => {
+  const items = matchByAmountAndDate(
+    [{ id: 'p1', amount: 300000, paid_at: '2026-02-01T00:00:00Z' }],
+    [{ reference: 'BANK-1', amount: 300000, date: '2026-02-10' }]
+  );
+  assert.strictEqual(items[0].status, 'unmatched');
+  assert.strictEqual(items[0].payment_id, null);
+});
+
+test('two candidates within the window — the closer date wins, and each payment is claimed at most once', () => {
+  const items = matchByAmountAndDate(
+    [
+      { id: 'far', amount: 300000, paid_at: '2026-02-08T00:00:00Z' },
+      { id: 'near', amount: 300000, paid_at: '2026-02-09T12:00:00Z' },
+    ],
+    [{ reference: 'BANK-1', amount: 300000, date: '2026-02-10' }]
+  );
+  assert.strictEqual(items.length, 2); // 1 matched ('near') + 1 leftover-Archta unmatched ('far')
+  const matched = items.find((i) => i.status === 'matched');
+  assert.strictEqual(matched.payment_id, 'near');
+  const leftover = items.find((i) => i.status === 'unmatched');
+  assert.strictEqual(leftover.payment_id, 'far');
+});
+
+test('an Archta bank-transfer payment nothing in the statement matches is its own unmatched item', () => {
+  const items = matchByAmountAndDate(
+    [{ id: 'p1', amount: 300000, paid_at: '2026-02-10T00:00:00Z' }],
+    []
+  );
+  assert.deepStrictEqual(items, [{
+    payment_id: 'p1', provider_reference: null, archta_amount: 300000, provider_amount: null,
+    status: 'unmatched', notes: 'No matching row found in the uploaded bank statement.',
+  }]);
+});
+
+section('Reconciliation — summarize');
+
+test('unmatched_count folds in BOTH mismatched and unmatched — only a clean match counts toward matched_count', () => {
+  const summary = summarizeReconciliation([
+    { status: 'matched' }, { status: 'matched' }, { status: 'mismatched' }, { status: 'unmatched' },
+  ]);
+  assert.deepStrictEqual(summary, { matchedCount: 2, unmatchedCount: 2, status: 'discrepancies' });
+});
+
+test('every item matched — status is clean', () => {
+  const summary = summarizeReconciliation([{ status: 'matched' }, { status: 'matched' }]);
+  assert.deepStrictEqual(summary, { matchedCount: 2, unmatchedCount: 0, status: 'clean' });
+});
+
+test('no items at all — clean, not a division-by-zero artifact', () => {
+  assert.deepStrictEqual(summarizeReconciliation([]), { matchedCount: 0, unmatchedCount: 0, status: 'clean' });
 });
 
 (async () => {

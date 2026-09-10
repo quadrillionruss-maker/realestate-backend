@@ -1365,17 +1365,21 @@ table.data td.num, table.data th.num {
   white-space: nowrap;
 }
 
-/* Positive / complete states. */
+/* Positive / complete states. PROMPT 7 — matched/clean are a reconciliation
+   item/run finding no discrepancy, the same "all is well" green as paid or
+   confirmed. */
 .badge.available, .badge.paid, .badge.active, .badge.kept,
 .badge.completed, .badge.confirmed, .badge.sold, .badge.approved,
-.badge.credit-excellent, .badge.credit-good {
+.badge.credit-excellent, .badge.credit-good, .badge.matched, .badge.clean {
   background: var(--moss-soft); color: var(--moss); border-color: rgba(5, 150, 105, 0.28);
 }
 
-/* Late / broken / failed states. */
+/* Late / broken / failed states. PROMPT 7 — mismatched/unmatched/
+   discrepancies are a reconciliation line (or a whole run) that did NOT
+   settle cleanly — the same "needs a human" red as overdue or failed. */
 .badge.overdue, .badge.broken, .badge.cancelled, .badge.failed,
 .badge.legal, .badge.final_notice, .badge.removed, .badge.credit-at_risk,
-.badge.blacklisted, .badge.expired {
+.badge.blacklisted, .badge.expired, .badge.mismatched, .badge.unmatched, .badge.discrepancies {
   background: var(--danger-soft); color: var(--danger); border-color: rgba(239, 68, 68, 0.28);
 }
 
@@ -1739,8 +1743,16 @@ table.data td.num, table.data th.num {
   transition: width .18s var(--ease);
 }
 /* Expand toggle (item 6) — 380px is comfortable for a quick question, not
-   for reading three paragraphs back. Same panel, same position, just wider. */
-.ai-chat-panel.is-expanded { width: min(560px, calc(100vw - 32px)); }
+   for reading three paragraphs back. Same panel, same position, just wider.
+   AUDIT FIX (FE6) — scoped to above the mobile breakpoint (below) on
+   purpose: unscoped, this two-class selector out-specifies the mobile media
+   query's own single-class `.ai-chat-panel { width: 100% }`, so tapping
+   Expand on a phone shrank the panel from 100vw down to 100vw-32px instead
+   of growing it. The mobile-only expand behaviour (full-screen) lives in
+   the @media block below, next to the rest of that breakpoint's overrides. */
+@media (min-width: 641px) {
+  .ai-chat-panel.is-expanded { width: min(560px, calc(100vw - 32px)); }
+}
 
 .ai-chat-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -1804,6 +1816,39 @@ table.data td.num, table.data th.num {
 .ai-chat-message-copy svg { width: 100%; height: 100%; }
 .ai-chat-message-copy.is-copied { opacity: 1; color: var(--moss); }
 
+/* Recommendation feedback — thumbs up/down, same quiet-icon treatment as
+   the copy button right next to it. Locks after one vote (is-rated) rather
+   than toggling, matching POST /ai/feedback being insert-only. */
+.ai-chat-feedback-btn {
+  background: none; border: none; padding: 2px; display: inline-flex;
+  align-items: center; justify-content: center; opacity: .55; cursor: pointer;
+  font-size: 12px; line-height: 1; width: 15px; height: 15px;
+}
+.ai-chat-feedback-btn:hover { opacity: 1; }
+.ai-chat-feedback-btn.is-selected { opacity: 1; }
+.ai-chat-feedback-btn[disabled] { cursor: default; }
+.ai-chat-feedback-btn[disabled]:not(.is-selected) { opacity: .25; }
+
+/* Confidence/evidence card — a small muted caption under the message bubble
+   it belongs to, deliberately NOT part of the bubble itself (item 2's own
+   "not as part of the answer text"). Sits at the same alignment as an
+   assistant bubble (flex-start, via .ai-chat-messages' own column flow). */
+.ai-chat-evidence {
+  align-self: flex-start;
+  max-width: 88%;
+  margin-top: -4px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.ai-chat-evidence-caveat { margin-top: 3px; color: var(--warn); }
+.ai-chat-confidence-badge { text-transform: capitalize; }
+.ai-chat-confidence-badge.high { color: var(--moss); }
+.ai-chat-confidence-badge.low { color: var(--warn); }
+
 /* Typing indicator (item 4) — three dots, staggered pulse, replacing the
    old plain-text "Thinking…" pending bubble. */
 .ai-chat-typing { display: flex; align-items: center; gap: 4px; padding: 3px 0; }
@@ -1851,6 +1896,10 @@ table.data td.num, table.data th.num {
 @media (max-width: 640px) {
   .ai-chat-panel { bottom: 0; right: 0; left: 0; width: 100%; height: 72vh; border-radius: var(--radius) var(--radius) 0 0; }
   .ai-chat-bubble { bottom: calc(56px + env(safe-area-inset-bottom, 0px) + 12px); }
+  /* AUDIT FIX (FE6) — there is no extra width to grow into at this
+     breakpoint (the panel is already 100% wide), so Expand goes full-screen
+     instead: no bottom-sheet gap, no rounded top corners. */
+  .ai-chat-panel.is-expanded { height: 100vh; height: 100dvh; border-radius: 0; }
 }
 
 /* ── 13. Dashboard-specific ────────────────────────────────────────────── */
@@ -2854,3 +2903,20 @@ table.data td.sched-detail-cell {
 
 .gate-legal { text-align: center; margin: 12px 0 -4px; }
 .gate-legal a { color: var(--accent); text-decoration: underline; }
+
+/* AUDIT FIX (L1) — signup consent, a required checkbox rather than the
+   passive text .gate-legal above once was. flex-start (not .gate-remember's
+   own center) because this label wraps across two lines and the checkbox
+   should sit with the first line, not float centered against the block. */
+.gate-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 14px 0 4px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  text-align: left;
+  cursor: pointer;
+}
+.gate-consent input { width: 14px; height: 14px; margin-top: 2px; flex: none; accent-color: var(--accent); }
+.gate-consent a { color: var(--accent); text-decoration: underline; }

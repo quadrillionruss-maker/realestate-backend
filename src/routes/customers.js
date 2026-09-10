@@ -6,12 +6,15 @@ const { issuePortalToken, portalUrl } = require('../services/portalService');
 const notify = require('../services/notificationService');
 const { audit } = require('../services/auditService');
 const { sanitizeSearchTerm } = require('../utils/searchFilter');
+const { mapWithConcurrency } = require('../utils/concurrency');
 const creditScore = require('../services/creditScoreService');
 const contactTiming = require('../services/contactTimingService');
 const referrals = require('../services/referralService');
 const messages = require('../services/messageService');
 const outcomes = require('../services/outcomeService');
 const behavioralFingerprint = require('../services/behavioralFingerprintService');
+const decisionLedger = require('../services/decisionLedgerService');
+const { lagosToday } = require('../services/overdueService');
 const router = express.Router();
 
 // Shared by the single-buyer send (POST /:id/portal-link) and the bulk send
@@ -95,6 +98,60 @@ router.get('/', requirePermission('customers.read'), async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// Decision Ledger — brief-order override. The daily brief ranks who to
+// contact first (payload.recommendations[0]); nothing before this recorded
+// whether that buyer's page was actually opened first, or a different one
+// was. Fires once per Lagos day, org-wide — not per-user: there is no
+// precedent anywhere in this codebase for filtering a jsonb field via the
+// Supabase JS client, and per-user would not remove the real ambiguity
+// anyway, since recommendations[0] is one org-wide pick regardless of who
+// opens what. Recorded against the RECOMMENDED customer (not whichever one
+// was actually opened) so that buyer's own Decision History shows "Archta
+// suggested you first today" even when the team worked someone else first.
+// Wrapped so a failure here can never turn an ordinary buyer-detail read
+// into a 500 — same "nothing here throws" rule decisionLedgerService.js's
+// own header states.
+async function maybeRecordBriefOrderDecision(req, openedCustomerId) {
+  try {
+    if (await decisionLedger.hasRecordedToday(req.orgId, 'collections_timing')) return;
+
+    const { data: brief } = await supabaseAdmin
+      .from('re_ai_briefs')
+      .select('payload')
+      .eq('organization_id', req.orgId)
+      .eq('brief_date', lagosToday())
+      .maybeSingle();
+    // aiBrief.js's BRIEF_SCHEMA.recommendations items carry only
+    // {title, reservation_id} — no customer_id/customer_ref — so resolving
+    // to a customer needs its own lookup here.
+    const topRecommendation = brief?.payload?.recommendations?.[0];
+    if (!topRecommendation?.reservation_id) return;
+
+    const { data: reservation } = await supabaseAdmin
+      .from('re_reservations')
+      .select('customer_id')
+      .eq('id', topRecommendation.reservation_id)
+      .eq('organization_id', req.orgId)
+      .maybeSingle();
+    const recommendedCustomerId = reservation?.customer_id || null;
+    if (!recommendedCustomerId) return;
+
+    await decisionLedger.recordDecision(req.orgId, {
+      customerId: recommendedCustomerId,
+      reservationId: topRecommendation.reservation_id,
+      recommendationType: 'collections_timing',
+      archtaRecommendation: {
+        action: 'contact_first', reservation_id: topRecommendation.reservation_id,
+        customer_id: recommendedCustomerId, title: topRecommendation.title,
+      },
+      humanDecision: { action: 'opened_customer', customer_id: openedCustomerId, user_id: req.userId },
+      wasOverride: recommendedCustomerId !== openedCustomerId,
+    });
+  } catch (err) {
+    console.warn('[customers] could not record brief-order decision:', err.message);
+  }
+}
+
 // Full buyer history: every reservation, its plan, and every installment.
 // This is the screen a rep opens with the customer on the phone.
 router.get('/:id', requirePermission('customers.read'), async (req, res, next) => {
@@ -170,7 +227,29 @@ router.get('/:id', requirePermission('customers.read'), async (req, res, next) =
       data.unread_messages = await messages.unreadCountForCustomer(req.orgId, data.id, 'buyer');
     }
 
+    // Decision Ledger — wrapped internally so a failure here can never turn
+    // this read into a 500 (see the helper's own header above); awaited
+    // rather than fire-and-forget for the same reason this route already
+    // awaits its other side effects, and it's a no-op query on every
+    // request after the first one each Lagos day.
+    await maybeRecordBriefOrderDecision(req, data.id);
+
     res.json(data);
+  } catch (e) { next(e); }
+});
+
+// Decision Ledger — buyer drawer's "Decision History" section. Same
+// financial.view gate stripFinancials()/the rest of this route already use:
+// amount_recovered is a naira figure, and Documentation never sees one.
+router.get('/:id/decisions', requirePermission('customers.read'), async (req, res, next) => {
+  try {
+    const customer = await findOwnCustomer(req);
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    const rows = await decisionLedger.getForCustomer(req.orgId, customer.id);
+    res.json(canAccess(req.orgRole, 'financial.view')
+      ? rows
+      : rows.map((r) => ({ ...r, amount_recovered: null })));
   } catch (e) { next(e); }
 });
 
@@ -687,10 +766,13 @@ router.post('/bulk-portal-link', requirePermission('customers.bulkPortalLink'), 
       .from('re_org_settings').select('company_name, reply_to_email')
       .eq('organization_id', req.orgId).maybeSingle();
 
+    // AUDIT FIX (P7) — an email send per buyer, run one at a time; a large
+    // selection waited on this serially. mapWithConcurrency(4) matches
+    // every other correctly-implemented sweep in this codebase.
     let sent = 0;
     let skippedNoEmail = 0;
-    for (const customer of customers || []) {
-      if (!customer.email) { skippedNoEmail += 1; continue; }
+    await mapWithConcurrency(customers || [], 4, async (customer) => {
+      if (!customer.email) { skippedNoEmail += 1; return; }
 
       const token = issuePortalToken(customer);
       const url = portalUrl(token);
@@ -704,7 +786,7 @@ router.post('/bulk-portal-link', requirePermission('customers.bulkPortalLink'), 
         summary: `Portal link issued for ${customer.full_name} — bulk send`,
         metadata: { emailed: result.status },
       });
-    }
+    });
 
     res.json({ sent, skipped_no_email: skippedNoEmail, total: (customers || []).length });
   } catch (e) { next(e); }

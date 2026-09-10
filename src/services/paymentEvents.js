@@ -39,6 +39,7 @@ const portalNotifications = require('./portalNotificationService');
 const featureUsage = require('./featureUsageService');
 const { generateDocument } = require('./documentService');
 const outcomes = require('./outcomeService');
+const decisionLedger = require('./decisionLedgerService');
 const projectTimeline = require('./projectTimelineService');
 
 const naira = (amount) => {
@@ -95,15 +96,22 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
   outcome.commission = accrual.accrued ? `accrued ${naira(accrual.commission.amount)}` : accrual.reason;
 
   // ── Joint sale — external agent statements (FEATURE — joint sales) ───────
-  // Only when a commission actually accrued — no accrual (no rep, no rate,
-  // already accrued) means nothing to split or state.
-  if (accrual.accrued) {
-    await jointSale.notifyExternalParties(orgId, {
-      reservation, customer, unit, project, payment,
-      commissionAmount: accrual.commission.amount,
-      companyName: settings.company_name,
-    });
-  }
+  // AUDIT FIX (F10) — used to run only when a commission actually accrued,
+  // which silently skipped a reservation's external co-sellers entirely
+  // whenever the in-house rate was 0% or no rep was assigned — even though
+  // notifyExternalParties already no-ops for free when there is no joint
+  // sale on this reservation at all (getForReservation returns null), so
+  // this never adds a real cost to the common case. commissionAccrued/
+  // accrualReason let it tell a genuine "nothing to split" apart from a
+  // likely misconfiguration and log accordingly — see that function's own
+  // header.
+  await jointSale.notifyExternalParties(orgId, {
+    reservation, customer, unit, project, payment,
+    commissionAmount: accrual.accrued ? accrual.commission.amount : 0,
+    commissionAccrued: accrual.accrued,
+    accrualReason: accrual.accrued ? null : accrual.reason,
+    companyName: settings.company_name,
+  });
 
   // ── Tell the buyer ───────────────────────────────────────────────────────
   if (settings.notify_on_payment !== false) {
@@ -237,6 +245,11 @@ async function onPaymentRecorded({ orgId, paymentId, source = 'manual', actor = 
   // most recent for this buyer — best-effort correlation, not proof that
   // action caused this payment, per outcomeService's own header.
   await outcomes.recordPaymentOutcome(orgId, customer.id, Number(payment.amount));
+
+  // Decision Ledger — same attribution as the outcome database above:
+  // whichever ledger row is still open and most recent for this buyer
+  // closes as 'paid'.
+  await decisionLedger.closeOutcome(orgId, customer.id, { outcomeType: 'paid', amountRecovered: Number(payment.amount) });
 
   // ── Outright sale completion (FEATURE — outright sales) ──────────────────
   // An outright reservation always has a one-row plan due immediately (see

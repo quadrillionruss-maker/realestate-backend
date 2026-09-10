@@ -229,13 +229,26 @@ async function computeHealth(orgId, project) {
   return { score, signals };
 }
 
-// Run once a day for every project in every org — see jobs/daily.js.
-// Upserts on (project_id, computed_date) (migrations/038's unique index),
-// so a re-run of the morning job the same day updates today's figure
-// rather than appending a duplicate.
-async function computeAndStoreForAllProjects() {
+// Run once a day for every project in ONE org — see jobs/daily.js, which
+// calls this from inside its per-org loop, once per org, not once
+// platform-wide. Upserts on (project_id, computed_date) (migrations/038's
+// unique index), so a re-run of the morning job the same day updates
+// today's figure rather than appending a duplicate.
+//
+// AUDIT FIX (P1) — this used to be computeAndStoreForAllProjects(), taking
+// no orgId at all and fetching every project across every org in one
+// unfiltered query, run once before the per-org loop even started: a read
+// that grows forever as the platform's total project count grows (the same
+// class of problem migrations/010's distinct_reservation_org_ids() exists to
+// avoid for org enumeration itself), and a single slow or failing org's scan
+// could not be isolated from any other org's — one .catch() covered the
+// whole platform. Scoped to organization_id and moved inside jobs/daily.js's
+// existing per-org mapWithConcurrency loop instead, so it fails, logs and
+// scales per workspace like every other step in that loop already does.
+async function computeAndStoreForOrg(orgId) {
   const { data: projects, error } = await supabaseAdmin
-    .from('re_projects').select('id, organization_id, created_at').neq('status', 'archived');
+    .from('re_projects').select('id, organization_id, created_at')
+    .eq('organization_id', orgId).neq('status', 'archived');
   if (error) throw error;
 
   let computed = 0;
@@ -393,6 +406,6 @@ async function summaryForBrief(orgId) {
 
 module.exports = {
   WEIGHTS, WARNING_THRESHOLD, CRITICAL_THRESHOLD, CONSECUTIVE_DAYS_FOR_TASK, CONSECUTIVE_DAYS_FOR_PORTAL_NOTICE,
-  scale, computeHealth, computeAndStoreForAllProjects, getLatestHealth, criticalProjects, portalNoticeFor,
+  scale, computeHealth, computeAndStoreForOrg, getLatestHealth, criticalProjects, portalNoticeFor,
   summaryForBrief,
 };

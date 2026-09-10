@@ -35,14 +35,19 @@ function check(name, cond, detail) {
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
       '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql', '054_client_errors.sql',
-      // NOTE — 055 through 072 are real, already-shipped migrations that
-      // were never added to this list (a pre-existing gap, found while
-      // adding 073 below, not introduced by it). 073_action_outcomes.sql
-      // has no dependency on anything any of those 18 add, so appending it
-      // straight after 054 here is safe for THIS file's own purposes even
-      // though it does not mirror the real on-disk migration order — see
-      // this feature expansion's Section 1 report for the fuller note.
-      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql']) {
+      // NOTE — 055 through 072 were left out of this list for a while (a
+      // pre-existing gap, found while adding 073). Closed now: the two bugs
+      // that gap was hiding (061_audit_undo.sql's real FK on re_audit_log,
+      // 072_whatsapp_message_dedup.sql never enabling RLS) are fixed at the
+      // source (061, 072) plus a corrective migration (084) for a database
+      // that already has the old constraint — so this range applies clean.
+      '055_attendance_and_logs.sql', '056_default_risk_score.sql', '057_optimal_contact_time.sql',
+      '058_vat.sql', '059_joint_sales.sql', '060_campaigns.sql', '061_audit_undo.sql', '062_sentiment.sql',
+      '063_whatsapp_app_secret.sql', '064_joint_sale_integrity.sql', '065_campaign_sending_status.sql',
+      '066_notifications_whatsapp_channel.sql', '067_sentiment_index.sql', '068_admin_aggregation_rpcs.sql',
+      '069_campaign_delivery_skipped.sql', '070_commissions_reservation_index.sql',
+      '071_admin_tables_exist_rpc.sql', '072_whatsapp_message_dedup.sql',
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql', '083_soft_delete_cascade_expansion.sql', '084_audit_log_drop_reversed_by_fk.sql', '085_waived_before_payment.sql', '086_accepted_terms_at.sql', '087_payment_idempotency_key.sql', '088_platform_sweep_indexes.sql', '089_decision_ledger.sql', '090_ai_feedback.sql', '091_reconciliation.sql', '092_approval_requests.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -78,14 +83,19 @@ function check(name, cond, detail) {
       '021_group_organizations.sql', '022_construction_milestones.sql', '023_credit_scoring.sql',
       '024_buyer_referrals.sql', '025_sales_forecasts.sql', '026_plan_recommendations.sql',
       '027_legal_documents_esignature.sql', '028_v2_agents.sql', '029_activities.sql', '030_hardship_requests.sql', '031_messages.sql', '032_unit_details.sql', '033_legal_cases.sql', '034_financing_requests.sql', '035_handover.sql', '036_contractors.sql', '037_community.sql', '038_project_health.sql', '039_admin.sql', '040_admin_actions.sql', '041_buyer_blacklist.sql', '042_document_expiry.sql', '043_document_versioning.sql', '044_email_templates.sql', '045_push_subscriptions.sql', '046_totp_2fa.sql', '047_sessions.sql', '048_receipt_templates.sql', '049_scheduled_messages.sql', '050_satisfaction_surveys.sql', '051_portal_notifications.sql', '052_subscriptions.sql', '053_feature_events.sql', '054_client_errors.sql',
-      // NOTE — 055 through 072 are real, already-shipped migrations that
-      // were never added to this list (a pre-existing gap, found while
-      // adding 073 below, not introduced by it). 073_action_outcomes.sql
-      // has no dependency on anything any of those 18 add, so appending it
-      // straight after 054 here is safe for THIS file's own purposes even
-      // though it does not mirror the real on-disk migration order — see
-      // this feature expansion's Section 1 report for the fuller note.
-      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql']) {
+      // NOTE — 055 through 072 were left out of this list for a while (a
+      // pre-existing gap, found while adding 073). Closed now: the two bugs
+      // that gap was hiding (061_audit_undo.sql's real FK on re_audit_log,
+      // 072_whatsapp_message_dedup.sql never enabling RLS) are fixed at the
+      // source (061, 072) plus a corrective migration (084) for a database
+      // that already has the old constraint — so this range applies clean.
+      '055_attendance_and_logs.sql', '056_default_risk_score.sql', '057_optimal_contact_time.sql',
+      '058_vat.sql', '059_joint_sales.sql', '060_campaigns.sql', '061_audit_undo.sql', '062_sentiment.sql',
+      '063_whatsapp_app_secret.sql', '064_joint_sale_integrity.sql', '065_campaign_sending_status.sql',
+      '066_notifications_whatsapp_channel.sql', '067_sentiment_index.sql', '068_admin_aggregation_rpcs.sql',
+      '069_campaign_delivery_skipped.sql', '070_commissions_reservation_index.sql',
+      '071_admin_tables_exist_rpc.sql', '072_whatsapp_message_dedup.sql',
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql', '083_soft_delete_cascade_expansion.sql', '084_audit_log_drop_reversed_by_fk.sql', '085_waived_before_payment.sql', '086_accepted_terms_at.sql', '087_payment_idempotency_key.sql', '088_platform_sweep_indexes.sql', '089_decision_ledger.sql', '090_ai_feedback.sql', '091_reconciliation.sql', '092_approval_requests.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -2609,6 +2619,74 @@ function check(name, cond, detail) {
   check('service_role can select/insert/update re_action_outcomes', actionOutcomesGrant);
   check('re_action_outcomes grants no delete — every row is a permanent part of the outcome trail', actionOutcomesNoDelete);
 
+  // ── 089: decision ledger ──────────────────────────────────────────────────
+  const decisionLedgerCols = await colsOf('re_decision_ledger');
+  check('re_decision_ledger has the columns decisionLedgerService selects/inserts',
+    ['organization_id', 'customer_id', 'reservation_id', 'project_id', 'recommendation_type',
+      'archta_recommendation', 'human_decision', 'was_override',
+      'outcome_type', 'outcome_recorded_at', 'days_to_outcome', 'amount_recovered', 'created_at']
+      .every((c) => decisionLedgerCols.includes(c)), decisionLedgerCols.join(', '));
+
+  // Reuses the outcome-database fixtures just above — same customer/reservation.
+  const [{ id: dlPendingId, outcome_type: dlPendingOutcomeType, was_override: dlPendingOverride }] = await q(
+    `insert into re_decision_ledger (organization_id, customer_id, reservation_id, recommendation_type, was_override)
+     values ($1,$2,$3,'channel_choice',true) returning id, outcome_type, was_override`,
+    [userId, aoCustomer, aoReservation]);
+  check('a decision ledger row round-trips and starts open (outcome_type null)',
+    !!dlPendingId && dlPendingOutcomeType === null && dlPendingOverride === true);
+
+  let badRecommendationTypeRefused = false;
+  try {
+    await q(`insert into re_decision_ledger (organization_id, customer_id, recommendation_type) values ($1,$2,'gut_feel')`,
+      [userId, aoCustomer]);
+  } catch (err) { badRecommendationTypeRefused = /check/i.test(err.message); }
+  check('re_decision_ledger.recommendation_type is limited to the six known types', badRecommendationTypeRefused);
+
+  let dlBadOutcomeTypeRefused = false;
+  try {
+    await q(`update re_decision_ledger set outcome_type='rejected', outcome_recorded_at=now() where id=$1`, [dlPendingId]);
+  } catch (err) { dlBadOutcomeTypeRefused = /check/i.test(err.message); }
+  check('re_decision_ledger.outcome_type is limited to paid|ignored|promised|escalated', dlBadOutcomeTypeRefused);
+
+  let dlOutcomeWithNoRecordedAtRefused = false;
+  try {
+    await q(`update re_decision_ledger set outcome_type='paid' where id=$1`, [dlPendingId]);
+  } catch (err) { dlOutcomeWithNoRecordedAtRefused = /check/i.test(err.message); }
+  check('a decision ledger outcome_type cannot be set without outcome_recorded_at (and vice versa)', dlOutcomeWithNoRecordedAtRefused);
+
+  // The close, done the way decisionLedgerService.closeRow actually does it —
+  // an UPDATE guarded by `where outcome_type is null`, the same idempotency
+  // mechanism re_action_outcomes' own write side relies on.
+  const dlClosed1 = await q(
+    `update re_decision_ledger set outcome_type='paid', outcome_recorded_at=now(), days_to_outcome=2, amount_recovered=150000
+     where id=$1 and outcome_type is null returning id`, [dlPendingId]);
+  check('closing an open decision ledger row with the outcome_type-is-null guard succeeds the first time', dlClosed1.length === 1);
+
+  const dlClosed2 = await q(
+    `update re_decision_ledger set outcome_type='ignored', outcome_recorded_at=now(), days_to_outcome=30
+     where id=$1 and outcome_type is null returning id`, [dlPendingId]);
+  check('the SAME guarded close on an already-closed decision ledger row is a no-op', dlClosed2.length === 0);
+
+  const [{ outcome_type: dlFinalOutcomeType, amount_recovered: dlFinalAmount }] = await q(
+    `select outcome_type, amount_recovered from re_decision_ledger where id=$1`, [dlPendingId]);
+  check('the decision ledger row still reflects the FIRST close, not the rejected second attempt',
+    dlFinalOutcomeType === 'paid' && Number(dlFinalAmount) === 150000);
+
+  let dlNegativeDaysRefused = false;
+  try {
+    await q(`insert into re_decision_ledger (organization_id, customer_id, recommendation_type, outcome_type, outcome_recorded_at, days_to_outcome)
+      values ($1,$2,'hardship','ignored',now(),-1)`, [userId, aoCustomer]);
+  } catch (err) { dlNegativeDaysRefused = /check/i.test(err.message); }
+  check('re_decision_ledger.days_to_outcome cannot be negative', dlNegativeDaysRefused);
+
+  const [{ ok: decisionLedgerGrant, noDelete: decisionLedgerNoDelete }] = await q(
+    `select has_table_privilege('service_role', 'public.re_decision_ledger', 'select')
+        and has_table_privilege('service_role', 'public.re_decision_ledger', 'insert')
+        and has_table_privilege('service_role', 'public.re_decision_ledger', 'update') as ok,
+      not has_table_privilege('service_role', 'public.re_decision_ledger', 'delete') as "noDelete"`);
+  check('service_role can select/insert/update re_decision_ledger', decisionLedgerGrant);
+  check('re_decision_ledger grants no delete — every row is a permanent part of the decision trail', decisionLedgerNoDelete);
+
   // ── 074: buyer behavioral fingerprint (SECTION 2 — feature expansion) ────
   const fingerprintCols = await colsOf('re_customers');
   check('re_customers has the behavioral fingerprint columns behavioralFingerprintService selects/updates',
@@ -2786,6 +2864,170 @@ function check(name, cond, detail) {
   await q(`update re_ai_proactive_insights set dismissed_at = now() where id=$1`, [insightId]);
   const [{ dismissed_at: insightDismissedAfter }] = await q(`select dismissed_at from re_ai_proactive_insights where id=$1`, [insightId]);
   check('a proactive insight can be dismissed', insightDismissedAfter !== null);
+
+  // ── 090: AI recommendation feedback ───────────────────────────────────────
+  const aiFeedbackCols = await colsOf('re_ai_feedback');
+  check('re_ai_feedback has the columns aiAssistantService.submitFeedback selects/inserts',
+    ['organization_id', 'user_id', 'conversation_id', 'question', 'answer', 'feedback', 'created_at']
+      .every((c) => aiFeedbackCols.includes(c)), aiFeedbackCols.join(', '));
+
+  const [{ id: aiFeedbackId, feedback: aiFeedbackValue }] = await q(
+    `insert into re_ai_feedback (organization_id, user_id, conversation_id, question, answer, feedback)
+     values ($1,$2,$3,'Why did collections drop?','Because of Project X.','positive') returning id, feedback`,
+    [userId, userId, conversationId]);
+  check('an AI feedback row round-trips, linked to its conversation', !!aiFeedbackId && aiFeedbackValue === 'positive');
+
+  let badFeedbackValueRefused = false;
+  try {
+    await q(`update re_ai_feedback set feedback='neutral' where id=$1`, [aiFeedbackId]);
+  } catch (err) { badFeedbackValueRefused = /check/i.test(err.message); }
+  check('re_ai_feedback.feedback is limited to positive|negative', badFeedbackValueRefused);
+
+  // A vote on a fallback answer has no model-generated conversation row to
+  // link back to — conversation_id must accept null.
+  const [{ id: aiFeedbackNoConversationId }] = await q(
+    `insert into re_ai_feedback (organization_id, user_id, question, answer, feedback)
+     values ($1,$2,'How many buyers are overdue?','12 buyers are overdue.','negative') returning id`,
+    [userId, userId]);
+  check('re_ai_feedback.conversation_id is nullable — a fallback answer has no conversation to link to', !!aiFeedbackNoConversationId);
+
+  const [{ ok: aiFeedbackGrant, noUpdate: aiFeedbackNoUpdate }] = await q(
+    `select has_table_privilege('service_role', 'public.re_ai_feedback', 'select')
+        and has_table_privilege('service_role', 'public.re_ai_feedback', 'insert') as ok,
+      not has_table_privilege('service_role', 'public.re_ai_feedback', 'update') as "noUpdate"`);
+  check('service_role can select/insert re_ai_feedback', aiFeedbackGrant);
+  check('re_ai_feedback is append-only — a vote is never edited after the fact', aiFeedbackNoUpdate);
+
+  // ── 091: Financial Reconciliation ─────────────────────────────────────────
+  const reconRunCols = await colsOf('re_reconciliation_runs');
+  check('re_reconciliation_runs has the columns reconciliationService selects/inserts',
+    ['organization_id', 'provider', 'period_start', 'period_end', 'archta_total', 'provider_total',
+      'matched_count', 'unmatched_count', 'status', 'created_at']
+      .every((c) => reconRunCols.includes(c)), reconRunCols.join(', '));
+
+  const reconItemCols = await colsOf('re_reconciliation_items');
+  check('re_reconciliation_items has the columns reconciliationService selects/inserts',
+    ['organization_id', 'reconciliation_run_id', 'payment_id', 'provider_reference', 'archta_amount',
+      'provider_amount', 'status', 'notes', 'created_at']
+      .every((c) => reconItemCols.includes(c)), reconItemCols.join(', '));
+
+  const [{ id: reconRunId, status: reconRunStatus }] = await q(
+    `insert into re_reconciliation_runs
+       (organization_id, provider, period_start, period_end, archta_total, provider_total, matched_count, unmatched_count, status)
+     values ($1,'paystack','2026-01-01','2026-01-31',2500000,2500000,1,0,'clean') returning id, status`,
+    [userId]);
+  check('a reconciliation run round-trips', !!reconRunId && reconRunStatus === 'clean');
+
+  let badProviderRefused = false;
+  try {
+    await q(`insert into re_reconciliation_runs
+       (organization_id, provider, period_start, period_end, status)
+       values ($1,'stripe','2026-01-01','2026-01-31','clean')`, [userId]);
+  } catch (err) { badProviderRefused = /check/i.test(err.message); }
+  check('re_reconciliation_runs.provider is limited to paystack|bank_transfer', badProviderRefused);
+
+  // A matched item — points back at a real payment row (the same one seeded
+  // near the top of this file) to exercise the payment_id FK, without
+  // deleting or mutating it.
+  const [{ id: matchedItemId }] = await q(
+    `insert into re_reconciliation_items
+       (organization_id, reconciliation_run_id, payment_id, provider_reference, archta_amount, provider_amount, status)
+     values ($1,$2,$3,'REINST-test-ref',2500000,2500000,'matched') returning id`,
+    [userId, reconRunId, paymentId]);
+  check('a matched reconciliation item round-trips, linked to its payment', !!matchedItemId);
+
+  // A provider-only item — money the provider reported that Archta never
+  // recorded, so there is no payment row to point payment_id at.
+  const [{ id: providerOnlyItemId, payment_id: providerOnlyPaymentId }] = await q(
+    `insert into re_reconciliation_items
+       (organization_id, reconciliation_run_id, provider_reference, provider_amount, status, notes)
+     values ($1,$2,'REINST-orphan-ref',75000,'unmatched','Paystack has this transaction but Archta does not.') returning id, payment_id`,
+    [userId, reconRunId]);
+  check('re_reconciliation_items.payment_id is nullable — a provider-only item has no payment to link to',
+    !!providerOnlyItemId && providerOnlyPaymentId === null);
+
+  let badItemStatusRefused = false;
+  try {
+    await q(`update re_reconciliation_items set status='pending_review' where id=$1`, [matchedItemId]);
+  } catch (err) { badItemStatusRefused = /check/i.test(err.message); }
+  check('re_reconciliation_items.status is limited to matched|mismatched|unmatched', badItemStatusRefused);
+
+  const [{ ok: reconGrant, noUpdate: reconNoUpdate }] = await q(
+    `select has_table_privilege('service_role', 'public.re_reconciliation_runs', 'select')
+        and has_table_privilege('service_role', 'public.re_reconciliation_runs', 'insert')
+        and has_table_privilege('service_role', 'public.re_reconciliation_items', 'select')
+        and has_table_privilege('service_role', 'public.re_reconciliation_items', 'insert') as ok,
+      not has_table_privilege('service_role', 'public.re_reconciliation_runs', 'update') as "noUpdate"`);
+  check('service_role can select/insert both reconciliation tables', reconGrant);
+  check('re_reconciliation_runs is append-only — a run is never edited after the fact', reconNoUpdate);
+
+  // ── 092: Unified Approval/Workflow Engine ──────────────────────────────────
+  const approvalCols = await colsOf('re_approval_requests');
+  check('re_approval_requests has the columns approvalService selects/inserts/updates',
+    ['organization_id', 'request_type', 'entity_type', 'entity_id', 'requested_by', 'requested_at',
+      'current_approver_role', 'status', 'approval_chain', 'approvals_received', 'rejection_reason', 'created_at']
+      .every((c) => approvalCols.includes(c)), approvalCols.join(', '));
+
+  const [{ id: approvalId, status: approvalStatus }] = await q(
+    `insert into re_approval_requests
+       (organization_id, request_type, entity_type, entity_id, current_approver_role, approval_chain)
+     values ($1,'hardship','re_hardship_requests',$2,'sales_director','["sales_director"]') returning id, status`,
+    [userId, paymentId]); // entity_id just needs to be A uuid — no FK to a specific table by design
+  check('an approval request round-trips and starts pending', !!approvalId && approvalStatus === 'pending');
+
+  let badRequestTypeRefused = false;
+  try {
+    await q(`insert into re_approval_requests
+       (organization_id, request_type, entity_type, entity_id, current_approver_role)
+       values ($1,'discount_override','re_customers',$2,'owner')`, [userId, paymentId]);
+  } catch (err) { badRequestTypeRefused = /check/i.test(err.message); }
+  check('re_approval_requests.request_type is limited to the seven known types', badRequestTypeRefused);
+
+  let badApproverRoleRefused = false;
+  try {
+    await q(`insert into re_approval_requests
+       (organization_id, request_type, entity_type, entity_id, current_approver_role)
+       values ($1,'financing','re_financing_requests',$2,'sales_rep')`, [userId, paymentId]);
+  } catch (err) { badApproverRoleRefused = /check/i.test(err.message); }
+  check('re_approval_requests.current_approver_role is limited to sales_director|owner', badApproverRoleRefused);
+
+  // A second pending row for the SAME entity is refused by the partial
+  // unique index — the same "one pending review at a time" rule the source
+  // tables (e.g. re_hardship_requests, migrations/030) already enforce
+  // independently.
+  let dupePendingRefused = false;
+  try {
+    await q(`insert into re_approval_requests
+       (organization_id, request_type, entity_type, entity_id, current_approver_role)
+       values ($1,'hardship','re_hardship_requests',$2,'sales_director')`, [userId, paymentId]);
+  } catch (err) { dupePendingRefused = /duplicate|unique/i.test(err.message); }
+  check('a second PENDING row for the same entity is refused', dupePendingRefused);
+
+  await q(
+    `update re_approval_requests set status='approved',
+       approvals_received='[{"role":"sales_director","user_id":null,"decision":"approved"}]'
+     where id=$1`,
+    [approvalId]);
+  const [{ status: approvalClosedStatus }] = await q(`select status from re_approval_requests where id=$1`, [approvalId]);
+  check('an approval request can move from pending to approved', approvalClosedStatus === 'approved');
+
+  // Now that the only pending row for this entity is closed, a NEW pending
+  // row for the same entity is allowed again — the partial index only ever
+  // blocks two SIMULTANEOUSLY pending rows, never a later, separate request.
+  const [{ id: secondApprovalId }] = await q(
+    `insert into re_approval_requests
+       (organization_id, request_type, entity_type, entity_id, current_approver_role)
+     values ($1,'hardship','re_hardship_requests',$2,'sales_director') returning id`,
+    [userId, paymentId]);
+  check('a new pending row for the same entity is allowed once the prior one is resolved', !!secondApprovalId);
+
+  const [{ ok: approvalGrant, noDelete: approvalNoDelete }] = await q(
+    `select has_table_privilege('service_role', 'public.re_approval_requests', 'select')
+        and has_table_privilege('service_role', 'public.re_approval_requests', 'insert')
+        and has_table_privilege('service_role', 'public.re_approval_requests', 'update') as ok,
+      not has_table_privilege('service_role', 'public.re_approval_requests', 'delete') as "noDelete"`);
+  check('service_role can select/insert/update re_approval_requests', approvalGrant);
+  check('re_approval_requests is never hard-deleted, even by service_role', approvalNoDelete);
 
   // ── 079: longitudinal project timeline (SECTION 7 — feature expansion) ───
   const projectEventCols = await colsOf('re_project_events');

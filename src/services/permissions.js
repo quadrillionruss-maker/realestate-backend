@@ -128,6 +128,19 @@ const PERMISSIONS = {
   // owner-only tier as the investor report it sits beside on the Reports
   // screen.
   'reports.forecast': OWNER,
+  // PROMPT 7 — Financial Reconciliation. Same owner-only tier as
+  // reports.forecast just above: matching Archta's own ledger against what
+  // Paystack (or an uploaded bank statement) actually settled is a
+  // financial-integrity check on the business itself, not a director's own
+  // book of deals.
+  'reports.reconciliation': OWNER,
+  // PROMPT 8 — Unified Approval/Workflow Engine. DIRECTORS can SEE the
+  // pending queue (between owner and sales_director, one of them can decide
+  // every request type it holds), but deciding a specific row re-checks the
+  // real underlying permission for its request_type — approvalService.js's
+  // own REQUEST_TYPE_PERMISSION map — so a sales_director cannot approve a
+  // financing or bulk_waive request just because they can see the list.
+  'approvals.view': DIRECTORS,
   // SECTION 1 (feature expansion) — outcome-database analytics (recovery
   // rates by action type, best day/channel to contact, promise reliability
   // by credit band). Same owner-only tier as reports.forecast just above:
@@ -139,6 +152,10 @@ const PERMISSIONS = {
   // fingerprint compared against other workspaces, not any one director's
   // own book.
   'analytics.developerDna': OWNER,
+  // Decision Ledger — override rate, outcome comparison, top override
+  // patterns. Same owner-only tier as the other two workspace-wide
+  // analytics reads just above.
+  'analytics.decisionLedger': OWNER,
   'commissions.markPaid': OWNER,
   // FEATURE — system log with undo. Reversing a recorded payment, a void,
   // a waived debt, a blacklist or a generated legal document is the same

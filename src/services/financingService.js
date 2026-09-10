@@ -17,6 +17,7 @@ const { paymentHistory } = require('./legalCaseService');
 const creditScore = require('./creditScoreService');
 const { audit, auditSystem } = require('./auditService');
 const notify = require('./notificationService');
+const approvals = require('./approvalService');
 
 const TEMPLATE_PATH = path.join(__dirname, '../templates/financing_letter.html');
 const STATUSES = ['pending', 'submitted', 'under_review', 'approved', 'rejected', 'disbursed'];
@@ -27,8 +28,11 @@ const naira = (amount) => {
   const n = Number(amount || 0);
   return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
 };
+// AUDIT FIX (N2) — timeZone pinned to Africa/Lagos, not the server's own
+// (UTC on Render). Without it, a letter generated in the 23:00-23:59 UTC
+// window — already past midnight in Lagos — printed yesterday's date.
 const formatDate = (value) =>
-  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Africa/Lagos' });
 
 // Whether a buyer's OWN "Apply for bank financing" button shows at all —
 // >=30% of their total contracted value paid, and a credit score above 40.
@@ -193,6 +197,13 @@ async function requestFinancing(customer, reservationId, { bankName, amountReque
     metadata: { reservation_id: reservationId, bank_name: trimmedBank, amount_requested: amount },
   });
 
+  // PROMPT 8 — Unified Approval/Workflow Engine. Submitted from the portal
+  // by the buyer, not a staff user — requestedBy stays null, same reasoning
+  // hardshipService's own requestPause hook uses.
+  await approvals.recordRequest(customer.organization_id, {
+    requestType: 'financing', entityType: 're_financing_requests', entityId: data.id,
+  });
+
   // The owner reviews every request before anything reaches a bank — a task
   // is how they find out, the same pattern messageService.sendFromBuyer
   // already uses for "a buyer did something, someone has to act on it".
@@ -263,6 +274,19 @@ async function updateRequest(req, id, { status, bankReference, notes }) {
     summary: `Financing request for ${data.re_customers?.full_name || 'buyer'} moved to ${patch.status || data.status}`,
     metadata: patch,
   });
+
+  // PROMPT 8 — closes whatever pending re_approval_requests row this
+  // request opened. Only 'approved'/'rejected' are DECISIONS — the
+  // intermediate states (submitted, under_review) this file's own richer
+  // status lifecycle allows are not a yes/no on the request, so they leave
+  // the approval row exactly as they found it (closeForEntity itself is a
+  // no-op there anyway, since the .eq('status','pending') filter in the
+  // update still finds it — but only these two statuses are worth the call).
+  if (patch.status === 'approved' || patch.status === 'rejected') {
+    await approvals.closeForEntity(req.orgId, 're_financing_requests', id, {
+      status: patch.status, userId: req.userId, rejectionReason: patch.status === 'rejected' ? (patch.notes || null) : null,
+    });
+  }
 
   if (patch.status === 'approved') {
     const customer = data.re_customers;

@@ -22,6 +22,23 @@ const { mapWithConcurrency } = require('../utils/concurrency');
 const portalNotifications = require('./portalNotificationService');
 const featureUsage = require('./featureUsageService');
 const projectTimeline = require('./projectTimelineService');
+// AUDIT FIX (F8/F9) — contractValue() reads original_total_amount first, the
+// same way restructureService.js itself defines "what this buyer actually
+// contracted for" (a restructured plan's total_amount is only the remaining
+// BALANCE — see that file's own header).
+const { contractValue } = require('./restructureService');
+
+// AUDIT FIX (F8) — picks the plan actually still in force. A restructured
+// reservation carries more than one re_installment_plans row (the old one,
+// superseded, plus the new active one); grabbing whichever sorted first used
+// to mix a paid-off OLD plan's terms into a letter describing the CURRENT
+// deal. Falls back to plans[0] only when none is marked active at all — real
+// rows always are (migrations/005's default), so this only guards a
+// malformed/test fixture.
+const activePlanOf = (plans) => {
+  const list = Array.isArray(plans) ? plans : [plans].filter(Boolean);
+  return list.find((p) => p?.status === 'active') || list[0] || null;
+};
 
 // Template lives inside src/ so it travels with the code.
 const TEMPLATE_PATH = path.join(__dirname, '../templates/allocation_letter.html');
@@ -129,8 +146,11 @@ const naira = (amount) => {
   return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
 };
 
+// AUDIT FIX (N2) — timeZone pinned to Africa/Lagos, not the server's own
+// (UTC on Render). Without it, a document generated in the 23:00-23:59 UTC
+// window — already past midnight in Lagos — printed yesterday's date.
 const formatDate = (value) =>
-  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Africa/Lagos' });
 
 // Branding moved to brandingService once receipts needed the same answer —
 // two copies of "whose company name wins" is how a receipt ends up branded
@@ -146,7 +166,7 @@ async function loadDocumentContext(orgId, documentId) {
         id, reserved_at,
         re_customers(id, full_name, email, phone),
         re_units(unit_number, unit_type, size_sqm, list_price, project_id, re_projects(name, location)),
-        re_installment_plans(total_amount, number_of_installments, frequency, start_date)
+        re_installment_plans(status, total_amount, original_total_amount, number_of_installments, frequency, start_date)
       )`)
     .eq('id', documentId)
     .eq('organization_id', orgId)
@@ -158,7 +178,8 @@ async function loadDocumentContext(orgId, documentId) {
 }
 
 function describePaymentPlan(plans, listPrice) {
-  const plan = Array.isArray(plans) ? plans[0] : plans;
+  // AUDIT FIX (F8) — the active plan, not whichever sorted first.
+  const plan = activePlanOf(plans);
   if (!plan) return `Outright payment of ${naira(listPrice)}`;
 
   const perInstallment = Number(plan.total_amount) / Number(plan.number_of_installments);
@@ -199,6 +220,16 @@ function buildAllocationLetterHtml(doc, branding) {
 
   const projectLine = [project.name, project.location].filter(Boolean).map(escapeHtml).join(', ');
 
+  // AUDIT FIX (F9) — the actual contracted amount (contractValue reads
+  // original_total_amount first, so a restructured deal's true contract
+  // price survives), not the unit's current list_price — a unit's list
+  // price can move after the sale (a later phase repriced, a discount was
+  // negotiated), and the allocation letter must say what THIS buyer agreed
+  // to pay, not today's asking price for the unit. Falls back to list_price
+  // only when the reservation has no plan at all yet.
+  const activePlan = activePlanOf(reservation.re_installment_plans);
+  const headlinePrice = activePlan ? contractValue(activePlan) : Number(unit.list_price || 0);
+
   const senderContact = [
     branding.registration_number,
     branding.brand_address || branding.address,
@@ -226,7 +257,7 @@ function buildAllocationLetterHtml(doc, branding) {
     .replace(/{{UNIT_NUMBER}}/g, escapeHtml(unit.unit_number || ''))
     .replace(/{{UNIT_TYPE}}/g, escapeHtml(unit.unit_type || '—'))
     .replace(/{{SIZE_ROW_BLOCK}}/g, sizeRowBlock)
-    .replace(/{{PRICE_FORMATTED}}/g, naira(unit.list_price))
+    .replace(/{{PRICE_FORMATTED}}/g, naira(headlinePrice))
     .replace(/{{PAYMENT_PLAN_SUMMARY}}/g, escapeHtml(describePaymentPlan(reservation.re_installment_plans, unit.list_price)))
     .replace(/{{FINEPRINT}}/g, senderContact);
 }
@@ -293,8 +324,10 @@ async function buildLegalDocumentHtml(orgId, doc, branding, { signed = false } =
   const customer = reservation.re_customers || {};
   const unit = reservation.re_units || {};
   const project = unit.re_projects || {};
-  const plan = Array.isArray(reservation.re_installment_plans)
-    ? reservation.re_installment_plans[0] : reservation.re_installment_plans;
+  // AUDIT FIX (F8/F9) — same fix as buildAllocationLetterHtml above, for the
+  // same reason: the active plan, and its actual contract value, not
+  // whichever plan sorted first or the unit's current list price.
+  const plan = activePlanOf(reservation.re_installment_plans);
 
   const companyName = branding.brand_company_name || branding.company_name || branding.full_name || 'Our Company';
   // Same "keyed on the reservation, not the document row" reasoning
@@ -311,7 +344,7 @@ async function buildLegalDocumentHtml(orgId, doc, branding, { signed = false } =
     project_name: project.name || '',
     project_location: project.location || '',
     project_line: [project.name, project.location].filter(Boolean).join(', '),
-    total_amount: naira(plan?.total_amount ?? unit.list_price),
+    total_amount: naira(plan ? contractValue(plan) : unit.list_price),
     date: formatDate(new Date()),
     reference_number: referenceNumber,
     // Raw HTML — deliberately not escaped, see fillPlaceholders' rawKeys.
@@ -468,7 +501,15 @@ async function notifySigningLink(orgId, doc, signingUrl) {
 }
 
 // ── The one public entry point ─────────────────────────────────────────────
-async function generateDocument(orgId, documentId) {
+// AUDIT FIX (P4) — pdfPool is optional and threads straight through to
+// renderHtmlToPdf; every existing caller (single-document generate, and
+// every other service that calls generateDocument indirectly) passes
+// nothing and gets the exact single-shot behaviour it always has.
+// routes/documents.js's /bulk-generate is the one caller that passes one,
+// shared across every document in the batch — see pdfAdapter.js's own
+// header on why that's the one place launching a fresh browser per document
+// was actually expensive enough to matter.
+async function generateDocument(orgId, documentId, { pdfPool } = {}) {
   const doc = await loadDocumentContext(orgId, documentId);
   if (!doc) return { notFound: true };
 
@@ -488,7 +529,7 @@ async function generateDocument(orgId, documentId) {
   if (doc.doc_type === 'allocation_letter') {
     const branding = await resolveBranding(orgId);
     const html = buildAllocationLetterHtml(doc, branding);
-    const pdf = await renderHtmlToPdf(html);
+    const pdf = await renderHtmlToPdf(html, { pool: pdfPool });
 
     // Timestamped rather than a deterministic {documentId}.pdf — SECTION 10
     // now gives a regeneration its own ROW too (writeGeneratedVersion), but
@@ -530,7 +571,7 @@ async function generateDocument(orgId, documentId) {
 
   const branding = await resolveBranding(orgId);
   const html = await buildLegalDocumentHtml(orgId, doc, branding, { signed: false });
-  const pdf = await renderHtmlToPdf(html);
+  const pdf = await renderHtmlToPdf(html, { pool: pdfPool });
 
   const wasRegeneration = doc.status === 'generated' || doc.status === 'sent' || doc.status === 'signed';
   const storagePath = await uploadPdf(`${orgId}/${documentId}/${Date.now()}.pdf`, pdf);

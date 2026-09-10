@@ -25,8 +25,26 @@ const naira = (amount) => {
   return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
 };
 
+// AUDIT FIX (N3) — the headline {{AMOUNT_FORMATTED}} figure used to round
+// to whole naira (naira() above) while {{AMOUNT_IN_WORDS}} right next to it
+// (amountInWords, kobo-exact by design — see that file's own header on why
+// "the words are what settles an argument when a figure has been altered")
+// stated the exact kobo amount: a payment of ₦1,234,567.89 printed
+// "₦1,234,568" beside "...Sixty-Seven Naira and Eighty-Nine Kobo Only" —
+// two different numbers on the same line of the same receipt, which is
+// exactly the disagreement amount-in-words exists to make impossible.
+// Always shows two decimal places (not just when non-zero) so the figure's
+// own precision is never in question either.
+const nairaExact = (amount) => {
+  const n = Number(amount || 0);
+  return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+// AUDIT FIX (N2) — timeZone pinned to Africa/Lagos, not the server's own
+// (UTC on Render). Without it, a receipt generated in the 23:00-23:59 UTC
+// window — already past midnight in Lagos — printed yesterday's date.
 const formatDate = (value) =>
-  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Africa/Lagos' });
 
 const METHOD_LABELS = {
   paystack: 'Paystack (card / online transfer)',
@@ -162,6 +180,20 @@ function buildReceiptHtml(context, branding = {}, receiptNumber, receiptTemplate
     vatRowsBlock = `<tr><td>Subtotal</td><td>${naira(subtotal)}</td></tr>`
       + `<tr><td>VAT (${payment.vat_rate}%)</td><td>${naira(vatAmount)}</td></tr>`
       + `<tr><td>Total${payment.vat_inclusive ? '' : ' (incl. VAT)'}</td><td>${naira(total)}</td></tr>`;
+    // AUDIT FIX (C7) — exclusive mode's "Total (incl. VAT)" row above reads,
+    // on its own, like ₦${subtotal+vat} changed hands — this file's own
+    // header on why that line is "informational... does not imply more
+    // money was collected than payment.amount actually recorded" was only
+    // ever a comment nobody reading the PDF itself would ever see. Stated
+    // on the receipt instead, for exactly the mode where the gap between
+    // "what was paid" and "what the VAT-inclusive total shows" exists —
+    // inclusive mode has no such gap, since amount received IS the total.
+    if (!payment.vat_inclusive) {
+      vatRowsBlock += `<tr><td colspan="2" style="font-size:9.5pt;color:#555;padding-top:6px;">`
+        + `Note: ${naira(subtotal)} is the amount actually received. The VAT line above is the tax `
+        + `component computed on this amount for disclosure — it was not collected as a separate or `
+        + `additional charge.</td></tr>`;
+    }
   } else if (payment.reallocated_from_payment_id) {
     // AUDIT FIX (F14) — a reallocated payment deliberately carries no
     // vat_amount of its own (paystackService.js's own comment: the credit
@@ -187,7 +219,7 @@ function buildReceiptHtml(context, branding = {}, receiptNumber, receiptTemplate
     .replace(/{{RECEIPT_NUMBER}}/g, escapeHtml(receiptNumber))
     .replace(/{{DATE}}/g, formatDate(new Date()))
     .replace(/{{CUSTOMER_NAME}}/g, escapeHtml(customer.full_name || ''))
-    .replace(/{{AMOUNT_FORMATTED}}/g, naira(payment.amount))
+    .replace(/{{AMOUNT_FORMATTED}}/g, nairaExact(payment.amount))
     .replace(/{{AMOUNT_IN_WORDS}}/g, escapeHtml(amountInWords(payment.amount)))
     .replace(/{{PROJECT_LINE}}/g, [project.name, project.location].filter(Boolean).map(escapeHtml).join(', ') || '—')
     .replace(/{{UNIT_NUMBER}}/g, escapeHtml(unit.unit_number || '—'))

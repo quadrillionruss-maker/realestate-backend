@@ -47,6 +47,37 @@ create table if not exists re_developer_dna (
   created_at timestamptz not null default now()
 );
 
+-- AUDIT FIX (D7) — same reasoning as re_recovery_playbook.recovery_rate
+-- (migrations/076): each of these is a fraction stored in numeric(5,4)
+-- (1.0000 = 100%), computed by division elsewhere (developerDnaService.js).
+-- collections_consistency_score (a coefficient of variation) and
+-- rep_gini_coefficient are deliberately NOT included here — a CV is not
+-- bounded at 1, and the Gini coefficient, while mathematically in [0,1] for
+-- non-negative inputs, is not one of the named rate columns this fix targets.
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 're_developer_dna_avg_buyer_default_rate_check') then
+    alter table re_developer_dna
+      add constraint re_developer_dna_avg_buyer_default_rate_check
+      check (avg_buyer_default_rate is null or (avg_buyer_default_rate >= 0 and avg_buyer_default_rate <= 1));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 're_developer_dna_milestone_completion_rate_check') then
+    alter table re_developer_dna
+      add constraint re_developer_dna_milestone_completion_rate_check
+      check (milestone_completion_rate is null or (milestone_completion_rate >= 0 and milestone_completion_rate <= 1));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 're_developer_dna_restructuring_rate_check') then
+    alter table re_developer_dna
+      add constraint re_developer_dna_restructuring_rate_check
+      check (restructuring_rate is null or (restructuring_rate >= 0 and restructuring_rate <= 1));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 're_developer_dna_promise_kept_rate_check') then
+    alter table re_developer_dna
+      add constraint re_developer_dna_promise_kept_rate_check
+      check (promise_kept_rate is null or (promise_kept_rate >= 0 and promise_kept_rate <= 1));
+  end if;
+end $$;
+
 alter table re_developer_dna enable row level security;
 drop policy if exists "org members access re_developer_dna" on re_developer_dna;
 

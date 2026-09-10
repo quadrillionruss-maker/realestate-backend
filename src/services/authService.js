@@ -243,10 +243,41 @@ async function findUserByEmail(email) {
   return data || null;
 }
 
+// AUDIT FIX (C4) — moved here from adminService.js (which still uses it,
+// for the platform-admin password reset/hard-delete audit trail) so
+// routes/auth.js can reuse the exact same "which workspace(s) does this
+// audit event belong in" resolution for a person's OWN security actions
+// (2FA, password, email, avatar), rather than a second, drifting copy of
+// this query. A team member's security event belongs in every workspace
+// they're an active member of — every co-worker's audit log should be able
+// to show "this account's password changed" — not just whichever workspace
+// happens to be selected in their browser right now (which the request
+// might not even carry, e.g. mid-login before a session exists at all).
+// Falls back to the user's own id, same as everywhere else in this product
+// treats a solo account: CLAUDE.md's "organization_id = user.team_id ??
+// user.id".
+async function activeOrgIdsFor(userId) {
+  const { data: memberships, error } = await supabaseAdmin
+    .from('team_members')
+    .select('team_id, status')
+    .eq('user_id', userId);
+  if (error) throw error;
+
+  const activeTeamIds = (memberships || []).filter((m) => m.status === 'active').map((m) => m.team_id);
+  return activeTeamIds.length ? activeTeamIds : [userId];
+}
+
 // ── Register ───────────────────────────────────────────────────────────────
-async function register({ email, password, full_name, company_name }) {
+async function register({ email, password, full_name, company_name, acceptedTerms }) {
   if (!env.auth.allowRegistration) {
     throw Object.assign(new Error('Sign-up is closed. Ask your administrator for an invite.'), { statusCode: 403 });
+  }
+  // AUDIT FIX (L1) — consent used to be passive text under the form with
+  // nothing enforcing or recording it. Required here, not just in the
+  // frontend's own checkbox check, so this cannot be bypassed by calling
+  // the API directly.
+  if (acceptedTerms !== true) {
+    throw badRequest('You must accept the Terms & Conditions and Privacy Policy to create an account.');
   }
   assertValidCredentials(email, password);
 
@@ -272,6 +303,9 @@ async function register({ email, password, full_name, company_name }) {
       company_name: (company_name || '').trim() || null,
       last_login_at: now,
       email_verified_at: now,
+      // AUDIT FIX (L1) — durable record of consent, not just the passive
+      // text that used to sit under the form.
+      accepted_terms_at: now,
     })
     .select(PUBLIC_USER_COLUMNS)
     .single();
@@ -504,14 +538,33 @@ async function loginWithTotp({ partialToken, code }) {
 
   const { data: user, error } = await supabaseAdmin
     .from('users')
-    .select(`${PUBLIC_USER_COLUMNS}, totp_secret_encrypted, totp_backup_codes, totp_enabled, email_verified_at`)
+    .select(`${PUBLIC_USER_COLUMNS}, totp_secret_encrypted, totp_backup_codes, totp_enabled, email_verified_at, failed_login_count, locked_until`)
     .eq('id', claims.id)
     .maybeSingle();
   if (error) throw error;
   if (!user || !user.totp_enabled) throw unauthorized('2FA is not enabled on this account.');
 
+  // AUDIT FIX (S2) — same account-level lockout as a wrong password in
+  // login() above, reusing the very columns/helper registerFailedLogin
+  // already maintains. Without this, the password lockout is pointless
+  // against an attacker who has captured a partial_token some other way
+  // (e.g. an XSS on the login page, or a shared/logged terminal): they get
+  // unlimited guesses at a 6-digit TOTP code or an 8-entry backup-code list,
+  // both far more guessable than credentialLimiter's per-IP budget alone
+  // would suggest. The partial token already proves the password was
+  // correct, so there is no enumeration concern in answering distinctly here
+  // the way login()'s locked-account branch has to.
+  const locked = Boolean(user.locked_until && new Date(user.locked_until) > new Date());
+  if (locked) {
+    console.warn(`[auth] 2FA attempt against a locked account: ${user.id}`);
+    throw unauthorized('This account is temporarily locked. Try again later.');
+  }
+
   const result = await verifyTotpOrBackupCode(user, code);
-  if (!result.valid) throw unauthorized('That code is not correct.');
+  if (!result.valid) {
+    await registerFailedLogin(user);
+    throw unauthorized('That code is not correct.');
+  }
 
   // A used backup code is burned immediately — single-use by design, the
   // same reasoning a payment promise or an invite token is consumed the
@@ -531,6 +584,10 @@ async function loginWithTotp({ partialToken, code }) {
     token: issueToken(user),
     user: publicUser(user),
     email_verified: Boolean(user.email_verified_at),
+    // AUDIT FIX (C4) — lets the route log a backup-code login as its own
+    // consequential action (one of a finite, now one-fewer, single-use set)
+    // rather than an ordinary 2FA sign-in.
+    used_backup_code: result.usedBackupCode !== null,
   };
 }
 
@@ -748,4 +805,5 @@ module.exports = {
   verifyTotpSetup,
   disableTotp,
   loginWithTotp,
+  activeOrgIdsFor,
 };

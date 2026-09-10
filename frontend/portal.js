@@ -96,6 +96,20 @@
     return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { maximumFractionDigits: 0 });
   }
 
+  // AUDIT FIX (N5) — naira() above rounds to the nearest whole naira for
+  // display, but Paystack is charged toKobo(amount) = Math.round(amount*100)
+  // kobo (paystackService.js) — the exact figure, kobo and all. An
+  // installment whose amount carries kobo (the last row of a schedule
+  // absorbing installmentService's own remainder correction, e.g.
+  // ₦333,333.34) showed "₦333,333" next to a "Pay now" button that then
+  // charged ₦333,333.34 — a buyer comparing the two saw a mismatch on their
+  // bank statement. Used only where an amount sits directly against a pay
+  // action, so it reads exactly as what the charge will be.
+  function nairaExact(amount) {
+    var n = Number(amount || 0);
+    return (n < 0 ? '-' : '') + '₦' + Math.abs(n).toLocaleString('en-NG', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
   var CURRENCY_SYMBOL = { USD: '$', GBP: '£', EUR: '€', CAD: 'CA$' };
 
   // The small grey line under an NGN figure — nothing if NGN itself is the
@@ -127,10 +141,21 @@
     return parts.length ? '<div class="fx-line">≈ ' + parts.join(' · ') + '</div>' : '';
   }
 
+  // AUDIT FIX (N1) — without an explicit timeZone, toLocaleDateString
+  // renders in whichever timezone the buyer's OWN device happens to be set
+  // to. A due_date like "2026-07-30" (date-only, no time component) parses
+  // as UTC midnight; a buyer viewing this from anywhere west of UTC would
+  // see it rendered as 29 July — a due date that read a day early, for a
+  // product whose due dates are defined in Africa/Lagos terms specifically
+  // (CLAUDE.md's "Due dates are 18:00 Africa/Lagos") and nowhere else.
+  // Pinned here so every date on this page reads the same regardless of
+  // which country the buyer happens to be opening it from.
   function fmtDate(value) {
     if (!value) return '—';
     var d = new Date(value);
-    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-NG', { day: 'numeric', month: 'long', year: 'numeric' });
+    return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-NG', {
+      day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Africa/Lagos',
+    });
   }
 
   // TASK 2.9/2.12 — same formatter as screens.js's formatDocType, duplicated
@@ -515,7 +540,7 @@
         ? '<div class="card mt-2"><div class="card-body">' +
             '<div class="stat-label">' + (nextDue.property_type === 'rental' ? 'Next rent due' : 'Next payment') + '</div>' +
             '<div class="flex-row justify-between gap-14 align-end mt-8px">' +
-              '<div><div class="mono fs-21">' + esc(naira(nextDue.amount_due)) + '</div>' + fxLine(nextDue.amount_due) +
+              '<div><div class="mono fs-21">' + esc(nairaExact(nextDue.amount_due)) + '</div>' + fxLine(nextDue.amount_due) +
                 '<div class="page-sub">due <span class="nowrap">' + esc(fmtDate(nextDue.due_date)) + '</span>' +
                   (nextDue.unit_number ? ' · Unit ' + esc(nextDue.unit_number) : '') + '</div></div>' +
               '<button class="btn brass" id="btn-pay" data-schedule="' + esc(nextDue.schedule_id) + '">Pay now</button>' +
@@ -990,7 +1015,7 @@
             '<div class="mt-1">' + schedule.map(function (row) {
               return '<div class="sched ' + esc(row.status) + '">' +
                 '<span class="sched-n">' + row.installment_number + '</span>' +
-                '<span class="sched-main"><span class="mono">' + esc(naira(row.amount_due)) + '</span>' +
+                '<span class="sched-main"><span class="mono">' + esc(nairaExact(row.amount_due)) + '</span>' +
                   '<span class="page-sub">' +
                     (row.status === 'paid'
                       ? 'paid <span class="nowrap">' + esc(fmtDate(row.paid_at || row.due_date)) + '</span>'
@@ -1009,7 +1034,7 @@
                   // but a screen reader lists all of them with no context
                   // distinguishing one installment's button from another's.
                   ? '<button class="btn-quiet" data-schedule="' + esc(row.id) + '" aria-label="Pay installment ' +
-                    row.installment_number + ', ' + esc(naira(row.amount_due)) + ', due ' + esc(fmtDate(row.due_date)) + '">Pay</button>'
+                    row.installment_number + ', ' + esc(nairaExact(row.amount_due)) + ', due ' + esc(fmtDate(row.due_date)) + '">Pay</button>'
                   : '') +
               '</div>';
             }).join('') + '</div>'
