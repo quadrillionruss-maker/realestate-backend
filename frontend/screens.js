@@ -3915,9 +3915,9 @@
             var customer = r.re_customers;
             return '<tr>' +
               '<td class="cell-primary">' +
-                (customer
+                (customer && customer.id
                   ? '<span class="name-link" data-open-buyer="' + esc(customer.id) + '">' + esc(customer.full_name) + '</span>'
-                  : '—') +
+                  : esc((customer && customer.full_name) || '—')) +
                 '<div class="cell-meta">' + esc((customer && customer.phone) || '') + '</div></td>' +
               '<td>' + esc(unit.unit_number || '—') +
                 '<div class="cell-meta">' + esc((unit.re_projects && unit.re_projects.name) || '') + '</div></td>' +

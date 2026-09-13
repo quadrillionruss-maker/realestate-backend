@@ -48,7 +48,13 @@ router.get('/', requirePermission('reservations.read'), async (req, res, next) =
 
     let query = supabaseAdmin
       .from('re_reservations')
-      .select('*, re_customers(full_name, phone), re_units(unit_number, list_price, project_id, re_projects(name)), re_installment_plans(id, total_amount, number_of_installments), re_joint_sales(id)')
+      // id was missing from this embed — frontend/screens.js's reservations
+      // table builds its buyer link from customer.id (data-open-buyer), so
+      // every row here rendered a link to openCustomer('') that 400'd every
+      // one of the buyer drawer's fetches. re_customers.id is never null (a
+      // uuid primary key); this was a query-projection gap, not orphaned
+      // data — confirmed against production, see CLAUDE.md's "Known gap" note.
+      .select('*, re_customers(id, full_name, phone), re_units(unit_number, list_price, project_id, re_projects(name)), re_installment_plans(id, total_amount, number_of_installments), re_joint_sales(id)')
       .eq('organization_id', req.orgId)
       .order('created_at', { ascending: false })
       .limit(limit);
