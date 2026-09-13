@@ -1145,8 +1145,11 @@
     return '<div class="record">' +
       // Clicking anywhere in the top row (name, meta, or amount) opens the
       // buyer — no separate "Open" button competing with Call/WhatsApp/Log a
-      // promise for space in record-actions below.
-      '<div class="record-top is-clickable" data-buyer="' + esc(c.customer.id) + '">' +
+      // promise for space in record-actions below. Same guard as the brief's
+      // own numbered risk list just above: omit data-buyer entirely rather
+      // than render it empty when c.customer.id is missing, so a click here
+      // can never fire openCustomer('') and 500 the buyer drawer's fetches.
+      '<div class="record-top' + (c.customer.id ? ' is-clickable" data-buyer="' + esc(c.customer.id) : '') + '">' +
         '<div><div class="record-name">' + esc(c.customer.full_name) + '</div>' +
         '<div class="record-meta">' + meta + '</div></div>' +
         '<div class="record-amount">' + naira(c.overdue_amount) + '</div>' +

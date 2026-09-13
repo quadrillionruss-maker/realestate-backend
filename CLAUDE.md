@@ -521,6 +521,17 @@ for a human, never carries row data), not the raw error object. This is why
 err)` — the pattern is deliberate, not incidental, and worth matching in new
 code that logs a caught driver error.
 
+**Known gap: a server-side 5xx has no path into the admin dashboard's error
+view.** `re_client_errors` (`clientErrorService.js`, read by `routes/admin.js`)
+is populated only by the *frontend* reporting a caught exception in itself
+(`POST /client-errors`) — a raw backend 500, logged by `errorHandler.js` via
+`console.error`, only ever reaches Render's log stream. Someone watching the
+admin dashboard's error feed during a real backend incident sees nothing,
+not because nothing happened but because that feed was never wired to catch
+it. Not fixed here — flagging it the way "There is currently no automated
+path that honours a buyer's request to be forgotten" is flagged above: a
+known, open gap, not a solved problem.
+
 ## Due dates are 18:00 Africa/Lagos
 
 An installment due on a date is due by **6pm on that date**, close of business.

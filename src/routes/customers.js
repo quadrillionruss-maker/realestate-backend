@@ -17,6 +17,31 @@ const decisionLedger = require('../services/decisionLedgerService');
 const { lagosToday } = require('../services/overdueService');
 const router = express.Router();
 
+// AUDIT FIX — every route below keys off :id, and a request built from a
+// stale or unresolved frontend value (a buyer link rendered before its id
+// was known, e.g.) arrives here as an EMPTY path segment: GET
+// /customers//activities, not a 404. Express still matches that against
+// '/:id/activities' with id === '', so without this guard the empty string
+// reaches Supabase and Postgres rejects it as invalid uuid input — a 500
+// logged only to Render's console, with nothing in the admin dashboard's
+// Client Errors feed (that table is populated by the FRONTEND reporting a
+// caught exception in itself; a raw backend 500 like this one never reaches
+// it). One router.param covers every :id route in this file, same UUID_RE
+// pattern audit.js/reports.js/dashboard.js already each keep their own copy
+// of, rather than repeating the check in all thirteen handlers.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.param('id', (req, res, next, id) => {
+  if (!UUID_RE.test(id)) {
+    // Logged here (not left to errorHandler.js, which only ever sees 5xx)
+    // because this is the one clue to which SCREEN sent a malformed id —
+    // the referer header, never row data, safe under CLAUDE.md's logging
+    // rule — for tracing the frontend bug that produced it.
+    console.warn(`[${new Date().toISOString()}] rejected non-uuid customer id "${id}" from ${req.get('referer') || 'unknown referer'}`);
+    return res.status(400).json({ error: 'Invalid customer id.' });
+  }
+  next();
+});
+
 // Shared by the single-buyer send (POST /:id/portal-link) and the bulk send
 // (POST /bulk-portal-link) — one place building this email so the two never
 // drift into slightly different wording for the same link.
