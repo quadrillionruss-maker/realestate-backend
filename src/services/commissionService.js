@@ -269,12 +269,12 @@ async function repPerformance(orgId) {
 // definition exactly (share of installments that have actually come due —
 // paid or overdue — and were overdue), so a rep's number on this screen
 // means the same thing as the org-wide figure on the forecast card.
-async function leaderboard(orgId, { from = null, to = null } = {}) {
+async function leaderboard(orgId, { from = null, to = null, projectId = null } = {}) {
   let reservationsQuery = supabaseAdmin
     .from('re_reservations')
     .select(`
       id, sales_rep_id, created_at,
-      re_units(list_price),
+      re_units(list_price, project_id),
       re_installment_plans(
         status, total_amount, original_total_amount,
         re_installment_schedule(status, amount_due)
@@ -295,7 +295,15 @@ async function leaderboard(orgId, { from = null, to = null } = {}) {
     if (result.error) throw result.error;
   }
 
-  const reservations = reservationsRes.data || [];
+  // Filtered in JS rather than with a nested !inner filter: re_units here is
+  // a to-one embed selected alongside plan data the rest of this function
+  // already loops over, so narrowing the array once, up front, is simpler
+  // than reshaping the select for one caller (the reports leaderboard card)
+  // out of leaderboard's several.
+  const allReservations = reservationsRes.data || [];
+  const reservations = projectId
+    ? allReservations.filter((r) => r.re_units && r.re_units.project_id === projectId)
+    : allReservations;
   const reservationIds = reservations.map((r) => r.id);
 
   // Scoped to reservations already inside the period, via re_commissions'

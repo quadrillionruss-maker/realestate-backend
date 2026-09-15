@@ -22,9 +22,12 @@ router.get('/', requirePermission('payments.read'), async (req, res, next) => {
     // sales_rep_id filter below actually narrow the top-level rows rather
     // than being silently ignored — same requirement routes/dashboard.js's
     // identical filter already depends on.
+    // re_units is !inner here (unlike the plain select elsewhere) only because
+    // the project_id filter below needs it to actually narrow the top-level
+    // rows — same reasoning as the sales_rep_id !inner chain above it.
     let query = supabaseAdmin
       .from('re_payments')
-      .select('*, re_installment_schedule!inner(installment_number, due_date, amount_due, status, re_installment_plans!inner(re_reservations!inner(sales_rep_id, re_customers(full_name), re_units(unit_number, re_projects(name)))))')
+      .select('*, re_installment_schedule!inner(installment_number, due_date, amount_due, status, re_installment_plans!inner(re_reservations!inner(sales_rep_id, re_customers(full_name), re_units!inner(project_id, unit_number, re_projects(name)))))')
       .eq('organization_id', req.orgId)
       .order('paid_at', { ascending: false })
       .limit(limit);
@@ -43,6 +46,9 @@ router.get('/', requirePermission('payments.read'), async (req, res, next) => {
       );
     }
 
+    if (req.query.project_id) {
+      query = query.eq('re_installment_schedule.re_installment_plans.re_reservations.re_units.project_id', req.query.project_id);
+    }
     if (req.query.method) query = query.eq('method', req.query.method);
     if (req.query.from) query = query.gte('paid_at', req.query.from);
     if (req.query.to) {
@@ -81,7 +87,7 @@ router.get('/schedule', requirePermission('payments.schedule'), async (req, res,
           re_reservations!inner(
             id, status, escalation_stage,
             re_customers(id, full_name, phone, email),
-            re_units(unit_number, re_projects(id, name))
+            re_units!inner(project_id, unit_number, re_projects(id, name))
           )
         )`)
       .eq('organization_id', req.orgId)
@@ -109,6 +115,9 @@ router.get('/schedule', requirePermission('payments.schedule'), async (req, res,
       query = query.eq('re_installment_plans.re_reservations.customer_id', req.query.customer_id);
     }
     if (req.query.due_before) query = query.lte('due_date', req.query.due_before);
+    if (req.query.project_id) {
+      query = query.eq('re_installment_plans.re_reservations.re_units.project_id', req.query.project_id);
+    }
 
     // A Sales Executive browses their own buyers' schedule only — same
     // two-step re_sales_reps lookup as every other own-book filter, applied

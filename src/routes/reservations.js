@@ -54,13 +54,18 @@ router.get('/', requirePermission('reservations.read'), async (req, res, next) =
       // one of the buyer drawer's fetches. re_customers.id is never null (a
       // uuid primary key); this was a query-projection gap, not orphaned
       // data — confirmed against production, see CLAUDE.md's "Known gap" note.
-      .select('*, re_customers(id, full_name, phone), re_units(unit_number, list_price, project_id, re_projects(name)), re_installment_plans(id, total_amount, number_of_installments), re_joint_sales(id)')
+      // re_units is !inner (unlike the plain select it started as) only
+      // because the project_id filter below needs it to actually narrow the
+      // top-level rows, not just the embedded object — same requirement as
+      // the sales_rep_id !inner filter further down.
+      .select('*, re_customers(id, full_name, phone), re_units!inner(unit_number, list_price, project_id, re_projects(name)), re_installment_plans(id, total_amount, number_of_installments), re_joint_sales(id)')
       .eq('organization_id', req.orgId)
       .order('created_at', { ascending: false })
       .limit(limit);
 
     if (req.query.status) query = query.eq('status', req.query.status);
     if (req.query.property_type) query = query.eq('property_type', req.query.property_type);
+    if (req.query.project_id) query = query.eq('re_units.project_id', req.query.project_id);
 
     // A Sales Executive sees only their own book — everyone else who can
     // open this screen at all (owner, sales director, documentation) sees

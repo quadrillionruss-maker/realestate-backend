@@ -2682,8 +2682,18 @@
       // bare list route once the drawer actually closes (see openCustomer).
       if (params[0]) { openCustomer(params[0]); return; }
 
+      if (query.project) projectFilter = query.project;
+
       var search = query.q || '';
-      var customers = await api('/customers' + (search ? '?search=' + encodeURIComponent(search) : ''));
+      var customerQs = [];
+      if (search) customerQs.push('search=' + encodeURIComponent(search));
+      if (projectFilter) customerQs.push('project_id=' + encodeURIComponent(projectFilter));
+      var customerResults = await Promise.all([
+        api('/customers' + (customerQs.length ? '?' + customerQs.join('&') : '')),
+        api('/projects'),
+      ]);
+      var customers = customerResults[0];
+      var buyerProjects = customerResults[1];
       // null for Documentation (server-side stripped, same as any amount) —
       // the filter row only draws once there is a real score to filter by.
       var scoresVisible = customers.some(function (c) { return c.credit_score != null; });
@@ -2727,6 +2737,8 @@
             '<button class="btn" id="btn-export-buyers">Export CSV</button>' +
             '<button class="btn" id="btn-import-buyers">Import CSV</button>' +
             '<button class="btn primary" id="btn-new-buyer">Add buyer</button>') +
+
+          projectFilterPills(buyerProjects) +
 
           '<div class="filter-row">' +
             (scoresVisible
@@ -2824,6 +2836,8 @@
             renderPage();
           });
         }
+
+        wireProjectFilterPills(view);
 
         // SECTION 4 — every checkbox click just flips `selected` and
         // re-renders; the whole bar (and the header checkbox's own state)
@@ -3881,7 +3895,16 @@
   R.screens.reservations = {
     render: async function (view, params, query) {
       var status = query.status || '';
-      var reservations = await api('/reservations' + (status ? '?status=' + status : ''));
+      if (query.project) projectFilter = query.project;
+      var reservationQs = [];
+      if (status) reservationQs.push('status=' + status);
+      if (projectFilter) reservationQs.push('project_id=' + encodeURIComponent(projectFilter));
+      var reservationResults = await Promise.all([
+        api('/reservations' + (reservationQs.length ? '?' + reservationQs.join('&') : '')),
+        api('/projects'),
+      ]);
+      var reservations = reservationResults[0];
+      var reservationProjects = reservationResults[1];
       // reports.export, reservations.restructure and reservations.renewTenancy
       // are all DIRECTORS-only (owner + sales_director) — a sales rep has
       // none of them, but 'reservations' is still in their nav for their own
@@ -3895,6 +3918,8 @@
         head('Reservations', 'Unit, buyer, rep and payment plan.',
           (canExport ? '<button class="btn" id="btn-export-reservations">Export CSV</button>' : '') +
           '<button class="btn primary" id="btn-new-res">New reservation</button>') +
+
+        projectFilterPills(reservationProjects) +
 
         '<div class="filter-row">' +
           '<a class="pill' + (status ? '' : ' is-on') + '" href="#/reservations">All</a>' +
@@ -3968,6 +3993,8 @@
       R.qsa('[data-open-buyer]', view).forEach(function (node) {
         node.addEventListener('click', function () { openCustomer(node.dataset.openBuyer); });
       });
+
+      wireProjectFilterPills(view);
 
       R.onClick(view, '#btn-new-res, #btn-empty-res', async function () { await reservationModal({}); });
 
@@ -4999,13 +5026,42 @@
   // this screen for that role yet — the route itself works if reached
   // directly (#/payments). Adding the nav entry is a one-line change in
   // realestate.js, which this pass does not own/touch.
+  // Shared by Payments, Buyers, Reservations and Commissions below — the
+  // exact pill pattern already used on Dashboard/Units/Documents (module-level
+  // projectFilter, "All projects" plus one pill per project, click → R.reload()).
+  // Extracted here rather than copy-pasted a fourth/fifth/sixth time.
+  function projectFilterPills(projects) {
+    if (!projects || projects.length <= 1) return '';
+    return '<div class="filter-row">' +
+      '<button class="pill' + (projectFilter ? '' : ' is-on') + '" data-project="">All projects</button>' +
+      projects.map(function (p) {
+        return '<button class="pill' + (projectFilter === p.id ? ' is-on' : '') + '" data-project="' + esc(p.id) + '">' + esc(p.name) + '</button>';
+      }).join('') +
+    '</div>';
+  }
+
+  function wireProjectFilterPills(view) {
+    R.qsa('[data-project]', view).forEach(function (pill) {
+      pill.addEventListener('click', function () {
+        projectFilter = pill.dataset.project || null;
+        R.reload();
+      });
+    });
+  }
+
   R.screens.payments = {
     render: async function (view, params, query) {
       var tab = query.tab || 'all';
       if (tab === 'due') tab = 'all'; // pre-redesign bookmark or link
+      if (query.project) projectFilter = query.project;
 
       if (tab === 'history') {
-        var payments = await api('/payments?limit=200');
+        var historyResults = await Promise.all([
+          api('/payments?limit=200' + (projectFilter ? '&project_id=' + encodeURIComponent(projectFilter) : '')),
+          api('/projects'),
+        ]);
+        var payments = historyResults[0];
+        var allProjects = historyResults[1];
         var historyPage = 1;
 
         var renderHistory = function () {
@@ -5016,6 +5072,7 @@
             head('Payments', 'Every naira received, most recent first.',
               '<button class="btn" id="btn-export-payments">Export CSV</button>') +
             paymentTabs(tab) +
+            projectFilterPills(allProjects) +
             card(null, table(
               [{ label: 'Date' }, { label: 'Buyer' }, { label: 'Unit', hideMobile: true },
                 { label: 'Method', hideMobile: true },
@@ -5069,6 +5126,8 @@
             toast('Exported. Check your downloads.', 'ok');
           });
 
+          wireProjectFilterPills(view);
+
           var prev = R.qs('[data-page-prev]', view);
           if (prev) prev.addEventListener('click', function () { historyPage -= 1; renderHistory(); });
           var next = R.qs('[data-page-next]', view);
@@ -5085,7 +5144,12 @@
       // "remaining balance" per buyer need the buyer's WHOLE plan, not just
       // whichever slice the active tab cares about, so grouping and tab
       // filtering both happen client-side against this one fetch.
-      var schedule = await api('/payments/schedule?limit=1000');
+      var scheduleResults = await Promise.all([
+        api('/payments/schedule?limit=1000' + (projectFilter ? '&project_id=' + encodeURIComponent(projectFilter) : '')),
+        api('/projects'),
+      ]);
+      var schedule = scheduleResults[0];
+      var scheduleProjects = scheduleResults[1];
       var buyers = groupScheduleByBuyer(schedule);
       var filtered = filterBuyersForTab(buyers, tab).sort(function (a, b) {
         // Most urgent first: earliest still-open due date, buyers with
@@ -5114,6 +5178,7 @@
             : tab === 'due_week' ? 'Buyers with an installment due in the next 7 days.'
             : 'Every buyer who still owes something.') +
           paymentTabs(tab) +
+          projectFilterPills(scheduleProjects) +
           '<div class="grid cols-3 mb-2">' +
             stat('Buyers', String(filtered.length)) +
             stat('Outstanding', naira(totalOutstanding), { tone: tab === 'overdue' ? 'clay' : null }) +
@@ -5138,6 +5203,8 @@
         R.qsa('[data-open-schedule]', view).forEach(function (node) {
           node.addEventListener('click', function () { openPaymentSchedule(node.dataset.openSchedule); });
         });
+
+        wireProjectFilterPills(view);
 
         var prev = R.qs('[data-page-prev]', view);
         if (prev) prev.addEventListener('click', function () { schedulePage -= 1; renderSchedule(); });
@@ -5968,6 +6035,7 @@
       // the one click most people take to get here (the sidebar link, which
       // carries no ?tab=).
       var tab = query.tab || (R.can('commissions.readAll') ? 'summary' : 'entries');
+      if (query.project) projectFilter = query.project;
 
       if (tab === 'performance') {
         var performance = await api('/commissions/performance');
@@ -6006,10 +6074,15 @@
         // jointSaleService.myJointSaleCommissions's own header for why
         // this is a split of the SAME rows the entries table already
         // lists, not separate commission money.
-        var entriesResults = await Promise.all([api('/commissions'), api('/commissions/joint-sales')]);
-        var entries = entriesResults[0], jointCommissions = entriesResults[1];
+        var entriesResults = await Promise.all([
+          api('/commissions' + (projectFilter ? '?project_id=' + encodeURIComponent(projectFilter) : '')),
+          api('/commissions/joint-sales'),
+          api('/projects'),
+        ]);
+        var entries = entriesResults[0], jointCommissions = entriesResults[1], commissionProjects = entriesResults[2];
         view.innerHTML = head('Commission entries', 'One row per payment. This is where a rep\'s total comes from.') +
           commissionTabs(tab) +
+          projectFilterPills(commissionProjects) +
           card(null, table(
             [{ label: 'Date', hideMobile: true }, { label: 'Rep' }, { label: 'Buyer' },
               { label: 'Payment', num: true, hideMobile: true },
@@ -6077,6 +6150,8 @@
             R.reload();
           });
         });
+
+        wireProjectFilterPills(view);
         return;
       }
 
@@ -6611,7 +6686,10 @@
 
   R.screens.reports = {
     render: async function (view, params, query) {
-      var scope = query.project ? '?project_id=' + encodeURIComponent(query.project) : '';
+      if (query.project) projectFilter = query.project;
+      var scope = projectFilter ? '?project_id=' + encodeURIComponent(projectFilter) : '';
+      var scopeAnd = projectFilter ? '&project_id=' + encodeURIComponent(projectFilter) : '';
+      var reportsProjects = await api('/projects');
       var today = localDateStr(new Date());
       var monthStart = today.slice(0, 7) + '-01';
 
@@ -6658,17 +6736,17 @@
 
       var results = await Promise.all([
         canInvestor ? api('/reports/investor' + scope) : Promise.resolve(null),
-        canCollections ? api('/reports/collections?months=12') : Promise.resolve(null),
+        canCollections ? api('/reports/collections?months=12' + scopeAnd) : Promise.resolve(null),
         canRental ? api('/reports/rental') : Promise.resolve(null),
         canReferrals ? api('/reports/referrals') : Promise.resolve(null),
         canForecast ? api('/reports/forecast') : Promise.resolve(null),
         canLegal ? api('/legal-cases/summary') : Promise.resolve(null),
         canLegal ? api('/legal-cases?status=active') : Promise.resolve(null),
         canFinancing ? api('/financing-requests') : Promise.resolve(null),
-        canLeaderboard ? api('/reports/leaderboard?period=' + leaderboardPeriod) : Promise.resolve(null),
-        canHeatmap ? api('/reports/payment-heatmap') : Promise.resolve(null),
+        canLeaderboard ? api('/reports/leaderboard?period=' + leaderboardPeriod + scopeAnd) : Promise.resolve(null),
+        canHeatmap ? api('/reports/payment-heatmap' + scope) : Promise.resolve(null),
         canSatisfaction ? api('/reports/satisfaction') : Promise.resolve(null),
-        canVat ? api('/reports/vat') : Promise.resolve(null),
+        canVat ? api('/reports/vat' + scope) : Promise.resolve(null),
         canCommEffectiveness ? api('/analytics/communication-effectiveness') : Promise.resolve(null),
         // SECTION 4 (feature expansion) — recovery playbook. Same
         // analytics.outcomes gate as communication effectiveness beside it.
@@ -6716,6 +6794,22 @@
               '<button class="btn" data-export="payments">Export payments</button>' +
               '<button class="btn primary" id="btn-print">Print / PDF</button>'
             : '') +
+
+        // Project scope for the whole screen — a dropdown, not pills, since
+        // reports are opened far less often than Payments/Buyers/Reservations
+        // and every card below that supports project_id (investor summary,
+        // collections trend, VAT, payment heatmap, rep leaderboard) reads the
+        // same `scope`/`scopeAnd` string built from this one selection.
+        (reportsProjects.length > 1
+          ? '<div class="filter-row">' +
+              '<select class="select" id="reports-filter-project">' +
+                '<option value="">All projects</option>' +
+                reportsProjects.map(function (p) {
+                  return '<option value="' + esc(p.id) + '"' + (projectFilter === p.id ? ' selected' : '') + '>' + esc(p.name) + '</option>';
+                }).join('') +
+              '</select>' +
+            '</div>'
+          : '') +
 
         // SECTION 6 — owner-only, same tier as the investor view it sits
         // above. forecast is null on the very first load of a workspace with
@@ -7091,6 +7185,14 @@
       // forcing this URL directly rather than reaching it from the sidebar.
       var printButton = R.qs('#btn-print', view);
       if (printButton) printButton.addEventListener('click', function () { window.print(); });
+
+      var reportsProjectSelect = R.el('reports-filter-project');
+      if (reportsProjectSelect) {
+        reportsProjectSelect.addEventListener('change', function () {
+          projectFilter = reportsProjectSelect.value || null;
+          R.reload();
+        });
+      }
 
       R.onClick(view, '[data-renew]', async function (button) {
         await renewTenancyModal(button.dataset.renew, button.dataset.buyerName);

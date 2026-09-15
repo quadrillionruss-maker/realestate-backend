@@ -37,15 +37,18 @@ router.get('/joint-sales', requirePermission('commissions.read'), async (req, re
 // else who can open this screen at all sees the whole team's.
 router.get('/', requirePermission('commissions.read'), async (req, res, next) => {
   try {
+    // re_reservations/re_units are !inner only because the project_id filter
+    // below needs them to actually narrow the top-level rows — same
+    // requirement as every other nested project/rep filter in this codebase.
     let query = supabaseAdmin
       .from('re_commissions')
       .select(`
         *,
         re_sales_reps(id, users(full_name, email)),
         re_payments(amount, method, paid_at, paystack_reference),
-        re_reservations(
+        re_reservations!inner(
           re_customers(full_name),
-          re_units(unit_number, re_projects(name))
+          re_units!inner(unit_number, project_id, re_projects(name))
         )`)
       .eq('organization_id', req.orgId)
       .order('created_at', { ascending: false })
@@ -56,6 +59,10 @@ router.get('/', requirePermission('commissions.read'), async (req, res, next) =>
       query = query.in('sales_rep_id', repIds.length ? repIds : [MATCHES_NOTHING]);
     } else if (req.query.sales_rep_id) {
       query = query.eq('sales_rep_id', req.query.sales_rep_id);
+    }
+
+    if (req.query.project_id) {
+      query = query.eq('re_reservations.re_units.project_id', req.query.project_id);
     }
 
     if (req.query.status) {

@@ -232,15 +232,30 @@ router.get('/vat', requirePermission('reports.vat'), async (req, res, next) => {
     since.setUTCDate(1);
     since.setUTCMonth(since.getUTCMonth() - (months - 1));
     const sinceIso = since.toISOString().slice(0, 10);
+    const projectId = req.query.project_id || null;
+    if (projectId && !UUID_RE.test(projectId)) {
+      return res.status(400).json({ error: 'project_id must be a valid id.' });
+    }
 
-    const { data: payments, error } = await supabaseAdmin
+    // The nested chain down to re_units is only pulled in (and made !inner,
+    // so the project_id filter below actually narrows these rows rather than
+    // being silently ignored) when a project was actually requested — every
+    // other caller keeps the plain, joinless select it always had.
+    let query = supabaseAdmin
       .from('re_payments')
-      .select('amount, vat_amount, vat_rate, vat_inclusive, paid_at')
+      .select(projectId
+        ? 'amount, vat_amount, vat_rate, vat_inclusive, paid_at, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(re_units!inner(project_id))))'
+        : 'amount, vat_amount, vat_rate, vat_inclusive, paid_at')
       .eq('organization_id', req.orgId)
       .not('vat_amount', 'is', null)
       .gte('paid_at', sinceIso)
       .is('voided_at', null)
       .order('paid_at', { ascending: true });
+    if (projectId) {
+      query = query.eq('re_installment_schedule.re_installment_plans.re_reservations.re_units.project_id', projectId);
+    }
+
+    const { data: payments, error } = await query;
     if (error) throw error;
 
     const rows = payments || [];
@@ -273,6 +288,10 @@ router.get('/vat', requirePermission('reports.vat'), async (req, res, next) => {
 router.get('/collections', requirePermission('reports.collections'), async (req, res, next) => {
   try {
     const months = Math.max(1, Math.min(Number(req.query.months) || 12, 36));
+    const projectId = req.query.project_id || null;
+    if (projectId && !UUID_RE.test(projectId)) {
+      return res.status(400).json({ error: 'project_id must be a valid id.' });
+    }
     const since = new Date();
     // Clamp to the 1st BEFORE subtracting months, not after. setUTCMonth
     // overflows silently when the current day-of-month doesn't exist in the
@@ -285,13 +304,19 @@ router.get('/collections', requirePermission('reports.collections'), async (req,
     since.setUTCDate(1);
     since.setUTCMonth(since.getUTCMonth() - (months - 1));
 
-    const { data, error } = await supabaseAdmin
+    let query = supabaseAdmin
       .from('re_payments')
-      .select('amount, paid_at, method')
+      .select(projectId
+        ? 'amount, paid_at, method, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(re_units!inner(project_id))))'
+        : 'amount, paid_at, method')
       .eq('organization_id', req.orgId)
       .gte('paid_at', since.toISOString().slice(0, 10))
       .is('voided_at', null)
       .order('paid_at');
+    if (projectId) {
+      query = query.eq('re_installment_schedule.re_installment_plans.re_reservations.re_units.project_id', projectId);
+    }
+    const { data, error } = await query;
     if (error) throw error;
 
     const buckets = new Map();
@@ -343,7 +368,11 @@ router.get('/leaderboard', requirePermission('reports.leaderboard'), async (req,
   try {
     const period = LEADERBOARD_PERIODS.includes(req.query.period) ? req.query.period : 'all_time';
     const { from, to } = periodRange(period, lagosToday());
-    const rows = await commissionService.leaderboard(req.orgId, { from, to });
+    const projectId = req.query.project_id || null;
+    if (projectId && !UUID_RE.test(projectId)) {
+      return res.status(400).json({ error: 'project_id must be a valid id.' });
+    }
+    const rows = await commissionService.leaderboard(req.orgId, { from, to, projectId });
     res.json({ period, rows });
   } catch (e) { next(e); }
 });
@@ -492,11 +521,22 @@ function bucketPaymentsByDayOfMonth(payments) {
 
 router.get('/payment-heatmap', requirePermission('reports.heatmap'), async (req, res, next) => {
   try {
-    const { data, error } = await supabaseAdmin
+    const projectId = req.query.project_id || null;
+    if (projectId && !UUID_RE.test(projectId)) {
+      return res.status(400).json({ error: 'project_id must be a valid id.' });
+    }
+
+    let query = supabaseAdmin
       .from('re_payments')
-      .select('amount, paid_at')
+      .select(projectId
+        ? 'amount, paid_at, re_installment_schedule!inner(re_installment_plans!inner(re_reservations!inner(re_units!inner(project_id))))'
+        : 'amount, paid_at')
       .eq('organization_id', req.orgId)
       .is('voided_at', null);
+    if (projectId) {
+      query = query.eq('re_installment_schedule.re_installment_plans.re_reservations.re_units.project_id', projectId);
+    }
+    const { data, error } = await query;
     if (error) throw error;
 
     const days = bucketPaymentsByDayOfMonth(data);

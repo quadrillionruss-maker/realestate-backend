@@ -1,6 +1,6 @@
 const express = require('express');
 const { supabaseAdmin } = require('../middleware/orgContext');
-const { requirePermission, isOwnRecordsOnly, assertPermission } = require('../middleware/rbac');
+const { requirePermission, isOwnRecordsOnly, assertPermission, MATCHES_NOTHING } = require('../middleware/rbac');
 const { canAccess } = require('../services/permissions');
 const { issuePortalToken, portalUrl } = require('../services/portalService');
 const notify = require('../services/notificationService');
@@ -100,6 +100,22 @@ router.get('/', requirePermission('customers.read'), async (req, res, next) => {
     // them, not an access filter.
     if (isOwnRecordsOnly(req.orgRole)) {
       query = query.eq('created_by_user_id', req.userId);
+    }
+
+    // A buyer has no project_id of its own (CLAUDE.md — a buyer is owned by
+    // the user who entered them, not by a project) — "in project X" means
+    // "has at least one reservation whose unit is in project X", resolved as
+    // a separate lookup and folded into an `in (...)` filter, the same shape
+    // as the sales-rep own-book filter just above.
+    if (req.query.project_id) {
+      const { data: matches, error: matchErr } = await supabaseAdmin
+        .from('re_reservations')
+        .select('customer_id, re_units!inner(project_id)')
+        .eq('organization_id', req.orgId)
+        .eq('re_units.project_id', req.query.project_id);
+      if (matchErr) throw matchErr;
+      const customerIds = [...new Set((matches || []).map((r) => r.customer_id))];
+      query = query.in('id', customerIds.length ? customerIds : [MATCHES_NOTHING]);
     }
 
     if (req.query.search) {
