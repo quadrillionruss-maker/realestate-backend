@@ -83,8 +83,11 @@
          a rubber-stamp motif. -->
     <div class="gate-drawing-ref" aria-hidden="true">
       <div class="gate-drawing-ref-line1">DRAWING REF.</div>
-      <div class="gate-drawing-ref-line2">AUTH-01</div>
-      <div class="gate-drawing-ref-line3">BUILD 791</div>
+      <!-- Filled in by boot() from GET /auth/config (app_version, build_number)
+           once that request resolves. These placeholders are what shows if the
+           API is unreachable at load. -->
+      <div class="gate-drawing-ref-line2" id="gate-drawing-ref-version">AUTH-01</div>
+      <div class="gate-drawing-ref-line3" id="gate-drawing-ref-build">BUILD —</div>
       <div class="gate-drawing-ref-diamond">◆</div>
       <div class="gate-drawing-ref-rule"></div>
     </div>

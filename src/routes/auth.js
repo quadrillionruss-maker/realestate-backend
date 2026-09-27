@@ -12,6 +12,9 @@
 
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const { execSync } = require('child_process');
+const path = require('path');
+const packageJson = require('../../package.json');
 const env = require('../config/env');
 const { authenticate } = require('../middleware/auth');
 const { supabaseAdmin } = require('../middleware/orgContext');
@@ -87,13 +90,31 @@ async function currentSessionId(tokenHash) {
   return data?.id || null;
 }
 
+// Read once at startup, not per request — the commit count doesn't change
+// while the process is running, and `git` may not even be on PATH in every
+// deploy target (a Docker image built from a tarball, for instance). Falls
+// back to null rather than failing boot; the gate's drawing-ref block reads
+// that as "just show the version, drop the build line."
+let gitCommitCount = null;
+try {
+  gitCommitCount = execSync('git rev-list --count HEAD', {
+    cwd: path.join(__dirname, '..', '..'),
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).toString().trim();
+} catch {
+  gitCommitCount = null;
+}
+
 // What the sign-in screen needs to know before anyone types anything: whether
-// to draw a Google button, and whether to offer a sign-up tab.
+// to draw a Google button, whether to offer a sign-up tab, and the
+// version/build shown in the drawing-ref corner of the gate panel.
 router.get('/config', (_req, res) => {
   res.json({
     google_client_id: env.auth.googleClientId || null,
     allow_registration: env.auth.allowRegistration,
     min_password_length: auth.MIN_PASSWORD_LENGTH,
+    app_version: packageJson.version,
+    build_number: gitCommitCount,
   });
 });
 

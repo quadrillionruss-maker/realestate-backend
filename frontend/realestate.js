@@ -1199,7 +1199,7 @@
           html += '<div class="search-section">Reservations</div>' + found.reservations.map(function (r) {
             var unit = r.re_units || {};
             return '<button class="search-hit" data-go="#/reservations">' +
-              '<span>' + esc(r.re_customers.full_name) + '</span>' +
+              '<span>' + esc((r.re_customers && r.re_customers.full_name) || '—') + '</span>' +
               '<span class="hit-meta">' + esc(unit.unit_number ? 'Unit ' + unit.unit_number : '') + ' · ' + esc(r.status) + '</span></button>';
           }).join('');
         }
@@ -1689,7 +1689,13 @@
     el('gate').hidden = true;
     el('app').hidden = false;
 
-    if (!window.location.hash || window.location.hash.indexOf('#/reset') === 0) {
+    if (pendingReturnHash) {
+      // showGate() blanked this out of the address bar when the session
+      // dropped; now that there's a live one again, send them back rather
+      // than bouncing them to the dashboard.
+      window.location.hash = pendingReturnHash;
+      pendingReturnHash = null;
+    } else if (!window.location.hash || window.location.hash.indexOf('#/reset') === 0) {
       window.location.hash = '#/dashboard';
     }
 
@@ -1708,13 +1714,33 @@
     initAiAssistant();
   }
 
+  // Set whenever showGate() blanks a real route out of the address bar —
+  // read once, by enterApp()'s success path, to send the person back to the
+  // page they were on rather than always landing on the dashboard.
+  var pendingReturnHash = null;
+
   function showGate() {
     RE.state.user = null;
+
+    var priorHash = window.location.hash;
+
+    // A stale route (#/commission, a deep link opened signed-out, …) sitting
+    // in the address bar while the SIGN-IN FORM is on screen reads as broken
+    // — the URL and the page it names have nothing to do with each other.
+    // Stash it and blank the bar with replaceState (no hashchange, so this
+    // does not trip renderRoute against a user that's about to be null);
+    // enterApp() restores it once there is a session again. #/reset and
+    // #/accept-invite are gate routes themselves, so they stay visible.
+    if (priorHash && priorHash.indexOf('#/reset') !== 0 && priorHash.indexOf('#/accept-invite') !== 0) {
+      pendingReturnHash = priorHash;
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+
     el('app').hidden = true;
     el('gate').hidden = false;
 
     // A reset link lands on #/reset?token=… before anyone is signed in.
-    if (window.location.hash.indexOf('#/reset') === 0) showGateForm('form-reset');
+    if (priorHash.indexOf('#/reset') === 0) showGateForm('form-reset');
     else showGateForm('form-login');
   }
 
@@ -1986,6 +2012,14 @@
       if (!RE.state.config.allow_registration) {
         el('tab-register').hidden = true;
         el('link-to-register').closest('span').hidden = true;
+      }
+      if (RE.state.config.app_version) {
+        el('gate-drawing-ref-version').textContent = 'v' + RE.state.config.app_version;
+      }
+      // Absent when the deploy target has no git history to count (see
+      // routes/auth.js) — leave the placeholder rather than print "BUILD null".
+      if (RE.state.config.build_number) {
+        el('gate-drawing-ref-build').textContent = 'BUILD ' + RE.state.config.build_number;
       }
     } catch (e) {
       // The API being unreachable at boot is worth saying out loud, because
