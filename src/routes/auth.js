@@ -22,7 +22,7 @@ const auth = require('../services/authService');
 const invites = require('../services/inviteService');
 const { uploadUserAvatar } = require('../services/documentStorage');
 const { ROLE_LABELS, actionsFor, normalizeRole } = require('../services/permissions');
-const { getGroupsOwnedBy } = require('../services/groupService');
+const { getGroupsOwnedBy, getBranchesGrantedTo } = require('../services/groupService');
 const { auditSystem } = require('../services/auditService');
 
 const router = express.Router();
@@ -317,6 +317,12 @@ router.get('/me', authenticate, async (req, res, next) => {
     // its contents — GET /group/dashboard is the real read. Fetched here so
     // it costs no extra round trip, same reasoning as `workspaces` above.
     const groups = await getGroupsOwnedBy(req.user.id);
+    // Someone who owns no group of their own but has been explicitly granted
+    // one or more branches (groupService.grantBranchAccess) needs the same
+    // sidebar link shown for a different reason — is_branch_viewer, not
+    // is_group_owner. Skipped entirely when the caller already owns a group,
+    // since ownership is strictly the wider access (see getDashboard).
+    const grantedBranches = groups.length ? [] : await getBranchesGrantedTo(req.user.id);
 
     res.json({
       ...data,
@@ -332,6 +338,7 @@ router.get('/me', authenticate, async (req, res, next) => {
       permissions: actionsFor(role),
       workspaces,
       is_group_owner: groups.length > 0,
+      is_branch_viewer: grantedBranches.length > 0,
       groups,
       // Informational only — nothing in the app gates on this any more.
       email_verified: Boolean(req.user.email_verified_at),

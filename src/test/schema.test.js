@@ -47,7 +47,7 @@ function check(name, cond, detail) {
       '066_notifications_whatsapp_channel.sql', '067_sentiment_index.sql', '068_admin_aggregation_rpcs.sql',
       '069_campaign_delivery_skipped.sql', '070_commissions_reservation_index.sql',
       '071_admin_tables_exist_rpc.sql', '072_whatsapp_message_dedup.sql',
-      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql', '083_soft_delete_cascade_expansion.sql', '084_audit_log_drop_reversed_by_fk.sql', '085_waived_before_payment.sql', '086_accepted_terms_at.sql', '087_payment_idempotency_key.sql', '088_platform_sweep_indexes.sql', '089_decision_ledger.sql', '090_ai_feedback.sql', '091_reconciliation.sql', '092_approval_requests.sql']) {
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql', '083_soft_delete_cascade_expansion.sql', '084_audit_log_drop_reversed_by_fk.sql', '085_waived_before_payment.sql', '086_accepted_terms_at.sql', '087_payment_idempotency_key.sql', '088_platform_sweep_indexes.sql', '089_decision_ledger.sql', '090_ai_feedback.sql', '091_reconciliation.sql', '092_approval_requests.sql', '093_branch_access_grants.sql']) {
       const sql = fs.readFileSync(`${M}/${file}`, 'utf8');
       try {
         await db.exec(sql);
@@ -95,7 +95,7 @@ function check(name, cond, detail) {
       '066_notifications_whatsapp_channel.sql', '067_sentiment_index.sql', '068_admin_aggregation_rpcs.sql',
       '069_campaign_delivery_skipped.sql', '070_commissions_reservation_index.sql',
       '071_admin_tables_exist_rpc.sql', '072_whatsapp_message_dedup.sql',
-      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql', '083_soft_delete_cascade_expansion.sql', '084_audit_log_drop_reversed_by_fk.sql', '085_waived_before_payment.sql', '086_accepted_terms_at.sql', '087_payment_idempotency_key.sql', '088_platform_sweep_indexes.sql', '089_decision_ledger.sql', '090_ai_feedback.sql', '091_reconciliation.sql', '092_approval_requests.sql']) {
+      '073_action_outcomes.sql', '074_behavioral_fingerprint.sql', '075_message_specificity.sql', '076_recovery_playbook.sql', '077_developer_dna.sql', '078_ai_conversations.sql', '079_project_events.sql', '080_project_summaries.sql', '081_org_registration_number.sql', '082_schema_migrations_ledger.sql', '083_soft_delete_cascade_expansion.sql', '084_audit_log_drop_reversed_by_fk.sql', '085_waived_before_payment.sql', '086_accepted_terms_at.sql', '087_payment_idempotency_key.sql', '088_platform_sweep_indexes.sql', '089_decision_ledger.sql', '090_ai_feedback.sql', '091_reconciliation.sql', '092_approval_requests.sql', '093_branch_access_grants.sql']) {
     try {
       await db.exec(fs.readFileSync(`${M}/${file}`, 'utf8'));
       passed++;
@@ -3028,6 +3028,53 @@ function check(name, cond, detail) {
       not has_table_privilege('service_role', 'public.re_approval_requests', 'delete') as "noDelete"`);
   check('service_role can select/insert/update re_approval_requests', approvalGrant);
   check('re_approval_requests is never hard-deleted, even by service_role', approvalNoDelete);
+
+  // ── 093: per-user branch access grants ───────────────────────────────────
+  const branchGrantCols = await colsOf('re_branch_access_grants');
+  check('re_branch_access_grants has the columns groupService selects/inserts/updates',
+    ['id', 'group_id', 'team_id', 'user_id', 'granted_by', 'status', 'created_at', 'revoked_at']
+      .every((c) => branchGrantCols.includes(c)), branchGrantCols.join(', '));
+
+  const [{ id: bgOwnerId }] = await q(
+    `insert into users (email, full_name) values ('branch-grant-owner@example.com','Branch Grant Owner') returning id`);
+  const [{ id: bgGranteeId }] = await q(
+    `insert into users (email, full_name) values ('branch-grant-grantee@example.com','Branch Grant Grantee') returning id`);
+  const [{ id: bgGroupId }] = await q(
+    `insert into parent_organizations (name, owner_id) values ('Grant Test Group', $1) returning id`, [bgOwnerId]);
+  const [{ id: bgTeamId }] = await q(
+    `insert into teams (name, owner_id, parent_organization_id) values ('Grant Test Branch', $1, $2) returning id`,
+    [bgOwnerId, bgGroupId]);
+
+  const [{ id: bgGrantId, status: bgGrantStatus }] = await q(
+    `insert into re_branch_access_grants (group_id, team_id, user_id, granted_by)
+     values ($1,$2,$3,$4) returning id, status`, [bgGroupId, bgTeamId, bgGranteeId, bgOwnerId]);
+  check('a branch access grant can be inserted and defaults to active', bgGrantStatus === 'active');
+
+  let dupeActiveGrantRefused = false;
+  try {
+    await q(`insert into re_branch_access_grants (group_id, team_id, user_id, granted_by)
+       values ($1,$2,$3,$4)`, [bgGroupId, bgTeamId, bgGranteeId, bgOwnerId]);
+  } catch (err) { dupeActiveGrantRefused = /duplicate|unique/i.test(err.message); }
+  check('a second ACTIVE grant for the same (team, user) pair is refused', dupeActiveGrantRefused);
+
+  await q(`update re_branch_access_grants set status='revoked', revoked_at=now() where id=$1`, [bgGrantId]);
+  const [{ id: bgRegrantId }] = await q(
+    `insert into re_branch_access_grants (group_id, team_id, user_id, granted_by)
+     values ($1,$2,$3,$4) returning id`, [bgGroupId, bgTeamId, bgGranteeId, bgOwnerId]);
+  check('once the prior grant is revoked, a new ACTIVE grant for the same pair is allowed',
+    !!bgRegrantId && bgRegrantId !== bgGrantId);
+
+  await q(`delete from teams where id=$1`, [bgTeamId]);
+  const remainingGrants = await q(`select id from re_branch_access_grants where team_id=$1`, [bgTeamId]);
+  check('deleting the branch cascades to its access grants', remainingGrants.length === 0);
+
+  const [{ ok: branchGrantOk, noDelete: branchGrantNoDelete }] = await q(
+    `select has_table_privilege('service_role', 'public.re_branch_access_grants', 'select')
+        and has_table_privilege('service_role', 'public.re_branch_access_grants', 'insert')
+        and has_table_privilege('service_role', 'public.re_branch_access_grants', 'update') as ok,
+      not has_table_privilege('service_role', 'public.re_branch_access_grants', 'delete') as "noDelete"`);
+  check('service_role can select/insert/update re_branch_access_grants', branchGrantOk);
+  check('re_branch_access_grants is never hard-deleted, even by service_role', branchGrantNoDelete);
 
   // ── 079: longitudinal project timeline (SECTION 7 — feature expansion) ───
   const projectEventCols = await colsOf('re_project_events');

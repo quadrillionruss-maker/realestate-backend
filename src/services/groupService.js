@@ -43,20 +43,35 @@ async function getGroupsOwnedBy(userId) {
   return data || [];
 }
 
-async function getDashboard(userId) {
-  const groups = await getGroupsOwnedBy(userId);
-  if (!groups.length) return null;
+// A person who has been explicitly granted one or more branches (see
+// grantBranchAccess below) but does not own the group itself. Defensive
+// against a branch that has since left its group: a grant's own group_id
+// must still match the branch's CURRENT parent_organization_id, not just
+// whatever it was at grant time — same reasoning as the migration's header.
+async function getBranchesGrantedTo(userId) {
+  const { data, error } = await supabaseAdmin
+    .from('re_branch_access_grants')
+    .select('team_id, group_id, teams(id, name, parent_organization_id), parent_organizations(name)')
+    .eq('user_id', userId)
+    .eq('status', 'active');
+  if (error) throw error;
+  return (data || [])
+    .filter((row) => row.teams && row.teams.parent_organization_id === row.group_id)
+    .map((row) => ({
+      team_id: row.team_id,
+      name: row.teams.name,
+      group_id: row.group_id,
+      group_name: row.parent_organizations?.name || null,
+    }));
+}
 
-  const groupIds = groups.map((g) => g.id);
-  const { data: branchRows, error: branchErr } = await supabaseAdmin
-    .from('teams')
-    .select('id, name, parent_organization_id')
-    .in('parent_organization_id', groupIds);
-  if (branchErr) throw branchErr;
-
-  if (!branchRows || !branchRows.length) {
-    return { groups, branches: [], totals: emptyTotals() };
-  }
+// The math shared by both a group owner's full roll-up and a grantee's
+// narrower one — same gross_development_value / contracted_value /
+// collected_total / receivables_overdue definitions either way, so a branch's
+// own investor report, the owner's per-branch row and a grantee's per-branch
+// row for that same branch can never disagree with each other.
+async function buildDashboard(groups, branchRows) {
+  if (!branchRows.length) return { groups, branches: [], totals: emptyTotals() };
 
   const branchIds = branchRows.map((b) => b.id);
   const today = new Date().toISOString().slice(0, 10);
@@ -136,6 +151,163 @@ async function getDashboard(userId) {
   return { groups, branches, totals };
 }
 
+// GET /group/dashboard's one entry point. An owner sees every branch under
+// every group they own (unchanged from before grants existed); someone with
+// no group of their own but one or more explicit grants sees only the
+// branches named in those grants, possibly spanning groups they do not own
+// at all. The two are mutually exclusive by construction — ownership is
+// always the wider access, so an owner who also happens to hold a grant on
+// one of their own branches gains nothing from it.
+async function getDashboard(userId) {
+  const ownedGroups = await getGroupsOwnedBy(userId);
+  if (ownedGroups.length) {
+    const groupIds = ownedGroups.map((g) => g.id);
+    const { data: branchRows, error } = await supabaseAdmin
+      .from('teams')
+      .select('id, name, parent_organization_id')
+      .in('parent_organization_id', groupIds);
+    if (error) throw error;
+    const dashboard = await buildDashboard(ownedGroups, branchRows || []);
+    return { is_group_owner: true, is_branch_viewer: false, ...dashboard };
+  }
+
+  const granted = await getBranchesGrantedTo(userId);
+  if (!granted.length) return null;
+
+  const grantedGroupIds = [...new Set(granted.map((g) => g.group_id))];
+  const { data: groupRows, error: groupErr } = await supabaseAdmin
+    .from('parent_organizations')
+    .select('id, name, created_at')
+    .in('id', grantedGroupIds);
+  if (groupErr) throw groupErr;
+
+  const branchRows = granted.map((g) => ({ id: g.team_id, name: g.name, parent_organization_id: g.group_id }));
+  const dashboard = await buildDashboard(groupRows || [], branchRows);
+  return { is_group_owner: false, is_branch_viewer: true, ...dashboard };
+}
+
+// A group owner knows the person they want to grant by email, same as every
+// other "add someone" flow in this product (invites, team management) — a
+// raw user id is also accepted, for a caller that already has one on hand.
+async function resolveGranteeId({ userId, email }) {
+  if (userId) {
+    const { data, error } = await supabaseAdmin.from('users').select('id').eq('id', userId).maybeSingle();
+    if (error) throw error;
+    return data ? data.id : null;
+  }
+  const trimmed = String(email || '').trim().toLowerCase();
+  if (!trimmed) return null;
+  const { data, error } = await supabaseAdmin.from('users').select('id').eq('email', trimmed).maybeSingle();
+  if (error) throw error;
+  return data ? data.id : null;
+}
+
+// Owner-only (routes/group.js gates every one of these behind
+// requirePermission('group.manage')). Grants a specific person read access to
+// ONE branch's numbers on the group dashboard — not a role, not a
+// team_members row, nothing they can act on inside that branch.
+async function grantBranchAccess(granterId, teamId, grantee) {
+  const { data: team, error: teamErr } = await supabaseAdmin
+    .from('teams').select('id, parent_organization_id').eq('id', teamId).maybeSingle();
+  if (teamErr) throw teamErr;
+  if (!team || !team.parent_organization_id) {
+    throw Object.assign(new Error('This workspace is not part of a group.'), { statusCode: 404 });
+  }
+
+  const { data: group, error: groupErr } = await supabaseAdmin
+    .from('parent_organizations').select('id, owner_id').eq('id', team.parent_organization_id).maybeSingle();
+  if (groupErr) throw groupErr;
+  if (!group || group.owner_id !== granterId) {
+    throw Object.assign(new Error('Group not found.'), { statusCode: 404 });
+  }
+
+  const userId = await resolveGranteeId(grantee);
+  if (!userId) {
+    throw Object.assign(new Error('No Archta account found for that person yet.'), { statusCode: 404 });
+  }
+
+  // Re-granting after a revoke re-activates the one row the partial unique
+  // index allows for this (team_id, user_id) pair rather than inserting a
+  // second one — see the migration's own comment.
+  const { data: existing, error: existingErr } = await supabaseAdmin
+    .from('re_branch_access_grants').select('id')
+    .eq('team_id', teamId).eq('user_id', userId).maybeSingle();
+  if (existingErr) throw existingErr;
+
+  if (existing) {
+    const { data, error } = await supabaseAdmin
+      .from('re_branch_access_grants')
+      .update({ status: 'active', revoked_at: null, granted_by: granterId, group_id: group.id })
+      .eq('id', existing.id)
+      .select('id, group_id, team_id, user_id, status, created_at')
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('re_branch_access_grants')
+    .insert({ group_id: group.id, team_id: teamId, user_id: userId, granted_by: granterId })
+    .select('id, group_id, team_id, user_id, status, created_at')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function revokeBranchAccess(granterId, teamId, userId) {
+  const { data: team, error: teamErr } = await supabaseAdmin
+    .from('teams').select('id, parent_organization_id').eq('id', teamId).maybeSingle();
+  if (teamErr) throw teamErr;
+  if (!team || !team.parent_organization_id) {
+    throw Object.assign(new Error('This workspace is not part of a group.'), { statusCode: 404 });
+  }
+
+  const { data: group, error: groupErr } = await supabaseAdmin
+    .from('parent_organizations').select('owner_id').eq('id', team.parent_organization_id).maybeSingle();
+  if (groupErr) throw groupErr;
+  if (!group || group.owner_id !== granterId) {
+    throw Object.assign(new Error('Group not found.'), { statusCode: 404 });
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('re_branch_access_grants')
+    .update({ status: 'revoked', revoked_at: new Date().toISOString() })
+    .eq('team_id', teamId).eq('user_id', userId).eq('status', 'active')
+    .select('id')
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw Object.assign(new Error('No active grant found for that user on this branch.'), { statusCode: 404 });
+  return { id: data.id, team_id: teamId, user_id: userId, status: 'revoked' };
+}
+
+// Every active grant across every group the caller owns — the management
+// list behind routes/group.js's GET /access. Joined for display so the
+// frontend needs no second lookup per row.
+async function listBranchGrants(granterId) {
+  const ownedGroups = await getGroupsOwnedBy(granterId);
+  if (!ownedGroups.length) return [];
+
+  const groupIds = ownedGroups.map((g) => g.id);
+  const { data, error } = await supabaseAdmin
+    .from('re_branch_access_grants')
+    .select('id, team_id, user_id, group_id, status, created_at, teams(name), users(full_name, email)')
+    .in('group_id', groupIds)
+    .eq('status', 'active')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+
+  return (data || []).map((row) => ({
+    id: row.id,
+    team_id: row.team_id,
+    branch_name: row.teams?.name || null,
+    user_id: row.user_id,
+    user_name: row.users?.full_name || null,
+    user_email: row.users?.email || null,
+    group_id: row.group_id,
+    created_at: row.created_at,
+  }));
+}
+
 // Creates a group owned by the caller. A branch is attached later, one at a
 // time, through attachBranch — not accepted here as a list — so each attach
 // can be validated against that specific team's own membership.
@@ -206,4 +378,7 @@ async function detachBranch(userId, teamId) {
   return { id: teamId, parent_organization_id: null };
 }
 
-module.exports = { getGroupsOwnedBy, getDashboard, createGroup, attachBranch, detachBranch };
+module.exports = {
+  getGroupsOwnedBy, getDashboard, createGroup, attachBranch, detachBranch,
+  getBranchesGrantedTo, grantBranchAccess, revokeBranchAccess, listBranchGrants,
+};

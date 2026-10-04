@@ -5914,17 +5914,25 @@
 
   /* ══ GROUP DASHBOARD (SECTION 1 — multi-branch / multi-company) ═════════
      Only reachable via the sidebar's Group link, itself only shown when
-     GET /auth/me reported is_group_owner. The route still works if typed
-     directly by someone who is not a group owner — the API answers
-     is_group_owner:false rather than 403ing, and this screen renders the
+     GET /auth/me reported is_group_owner OR is_branch_viewer. The route
+     still works if typed directly by someone who is neither — the API
+     answers both flags false rather than 403ing, and this screen renders the
      "create a group" empty state instead, same as any other owner-only
      screen degrades gracefully rather than assuming the nav already
-     gatekept it. */
+     gatekept it.
+
+     A branch VIEWER (granted explicit access to a subset of branches —
+     groupService.grantBranchAccess — without owning the group) sees exactly
+     the same stats/table a subset of the owner's own screen would show for
+     those branches, and nothing an owner-only action: no Add/Remove branch,
+     no access management. The two states share one render path because the
+     numbers themselves are identical in shape either way — only the actions
+     available around them differ. */
   R.screens.group = {
     render: async function (view) {
       var data = await api('/group/dashboard');
 
-      if (!data.is_group_owner) {
+      if (!data.is_group_owner && !data.is_branch_viewer) {
         view.innerHTML = head('Group dashboard', 'A consolidated view across every branch workspace you own.') +
           card(null, R.emptyState(
             'You do not own a group yet',
@@ -5949,6 +5957,7 @@
         return;
       }
 
+      var isOwner = data.is_group_owner;
       var totals = data.totals;
       var branches = data.branches;
       var branchIds = branches.map(function (b) { return b.branch_id; });
@@ -5960,9 +5969,15 @@
         return w.role === 'owner' && branchIds.indexOf(w.team_id) === -1;
       });
 
-      view.innerHTML = head('Group dashboard', 'Consolidated across ' + branches.length +
+      // Owner-only grant management, fetched alongside the dashboard rather
+      // than gating a second screen on it — a group owner managing who can
+      // see which branch is a small enough list to belong right here.
+      var grants = isOwner ? await api('/group/access') : [];
+
+      view.innerHTML = head('Group dashboard',
+          (isOwner ? 'Consolidated across ' : 'Granted access to ') + branches.length +
           (branches.length === 1 ? ' branch.' : ' branches.'),
-          '<button class="btn-quiet" id="btn-add-branch">Add branch</button>') +
+          isOwner ? '<button class="btn-quiet" id="btn-add-branch">Add branch</button>' : '') +
 
         '<div class="grid cols-4 mb-2">' +
           stat('Total buyers', String(totals.total_buyers)) +
@@ -5974,7 +5989,7 @@
         card('By branch', table(
           [{ label: 'Branch' }, { label: 'Buyers', num: true, hideMobile: true },
             { label: 'Collected', num: true }, { label: 'Overdue', num: true },
-            { label: 'GDV', num: true, hideMobile: true }, { label: '' }],
+            { label: 'GDV', num: true, hideMobile: true }].concat(isOwner ? [{ label: '' }] : []),
           branches,
           function (b) {
             return '<tr>' +
@@ -5983,11 +5998,29 @@
               '<td class="num moss">' + naira(b.collected_total) + '</td>' +
               '<td class="num ' + (b.receivables_overdue ? 'clay' : 'muted') + '">' + naira(b.receivables_overdue) + '</td>' +
               '<td class="num hide-mobile">' + naira(b.gross_development_value) + '</td>' +
-              '<td class="right"><button class="btn-quiet" data-remove-branch="' + esc(b.branch_id) + '" data-name="' + esc(b.name) + '">Remove</button></td>' +
+              (isOwner ? '<td class="right"><button class="btn-quiet" data-remove-branch="' + esc(b.branch_id) + '" data-name="' + esc(b.name) + '">Remove</button></td>' : '') +
             '</tr>';
           },
-          { emptyTitle: 'No branches yet', emptyHint: 'Add a workspace you own to start rolling up its numbers here.' }
-        ), { flush: true });
+          { emptyTitle: 'No branches yet', emptyHint: isOwner ? 'Add a workspace you own to start rolling up its numbers here.' : 'Nothing has been granted to you yet.' }
+        ), { flush: true }) +
+
+        (isOwner ? card('Branch access',
+          '<p class="field-hint mb-1">Give someone read-only access to one branch’s numbers on this dashboard, without making them a member of that branch’s own team.</p>' +
+          '<button class="btn-quiet mb-1" id="btn-grant-access">Grant access</button>' +
+          table(
+            [{ label: 'Person' }, { label: 'Branch' }, { label: '' }],
+            grants,
+            function (g) {
+              return '<tr>' +
+                '<td class="cell-primary">' + esc(g.user_name || g.user_email || g.user_id) + '</td>' +
+                '<td>' + esc(g.branch_name || '') + '</td>' +
+                '<td class="right"><button class="btn-quiet" data-revoke-access="' + esc(g.team_id) + '" data-user="' + esc(g.user_id) + '" data-person="' + esc(g.user_name || g.user_email || '') + '">Revoke</button></td>' +
+              '</tr>';
+            },
+            { emptyTitle: 'Nobody has been granted branch access', emptyHint: 'Everyone else sees only the branch they already belong to.' }
+          ), { flush: true }) : '');
+
+      if (!isOwner) return;
 
       R.qs('#btn-add-branch', view).addEventListener('click', function () {
         if (!ownedElsewhere.length) {
@@ -6021,6 +6054,41 @@
         if (!ok) return;
         await api('/group/branches/' + button.dataset.removeBranch, { method: 'DELETE' });
         toast('Branch removed from the group.', 'ok');
+        R.reload();
+      });
+
+      R.qs('#btn-grant-access', view).addEventListener('click', function () {
+        R.modal({
+          title: 'Grant branch access',
+          body: '<div class="field"><label for="grp-access-branch">Branch</label>' +
+            '<select class="select" id="grp-access-branch" name="team_id">' +
+              branches.map(function (b) {
+                return '<option value="' + esc(b.branch_id) + '">' + esc(b.name) + '</option>';
+              }).join('') +
+            '</select></div>' +
+            '<div class="field"><label for="grp-access-email">Person’s email</label>' +
+            '<input class="input" id="grp-access-email" name="email" type="email" required placeholder="name@example.com"></div>' +
+            '<p class="field-hint">They must already have an Archta account. This gives them no role and no ability to act inside the branch — only its numbers on this dashboard.</p>',
+          submitLabel: 'Grant',
+          onSubmit: async function (form, close) {
+            var values = R.values(form);
+            await api.post('/group/branches/' + values.team_id + '/access', { email: values.email });
+            close();
+            toast('Access granted.', 'ok');
+            R.reload();
+          },
+        });
+      });
+
+      R.onClick(view, '[data-revoke-access]', async function (button) {
+        var ok = await R.confirm({
+          title: 'Revoke access?',
+          message: button.dataset.person + ' will no longer see this branch on their group dashboard.',
+          confirmLabel: 'Revoke',
+        });
+        if (!ok) return;
+        await api('/group/branches/' + button.dataset.revokeAccess + '/access/' + button.dataset.user, { method: 'DELETE' });
+        toast('Access revoked.', 'ok');
         R.reload();
       });
     },

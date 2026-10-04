@@ -1579,15 +1579,17 @@
   }
 
   // The Group nav item — hidden by default (see index.html's comment on
-  // #nav-group-group) and shown only for the small minority of owners who
-  // actually own a parent_organizations row. Unlike the workspace switcher,
-  // this never changes X-Workspace-Id — it just navigates to #/group, a
-  // screen backed by GET /group/dashboard, which is scoped by the caller's
-  // own id rather than by whichever workspace happens to be selected.
+  // #nav-group-group) and shown for group owners AND for the separate,
+  // smaller case of someone granted explicit read access to one or more
+  // branches without owning the group themselves (is_branch_viewer —
+  // groupService.grantBranchAccess). Unlike the workspace switcher, this
+  // never changes X-Workspace-Id — it just navigates to #/group, a screen
+  // backed by GET /group/dashboard, which is scoped by the caller's own id
+  // rather than by whichever workspace happens to be selected.
   function renderGroupLink(me) {
     var group = el('nav-group-group');
     if (!group) return;
-    group.classList.toggle('hidden', !me.is_group_owner);
+    group.classList.toggle('hidden', !me.is_group_owner && !me.is_branch_viewer);
   }
 
   // The sidebar footer's identity block — split out of enterApp() so the
